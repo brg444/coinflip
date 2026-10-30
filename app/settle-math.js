@@ -1,4 +1,5 @@
-// Integer settlement for OptionVault. Branch order matches option_vault.ark.
+// Integer settlement for OptionVault and PredictVault. Branch order matches
+// option_vault.ark and predict_vault.ark.
 // Prices are USD cents. Notional, premium, and payoffs are sats.
 // Division truncates toward zero, same as the covenant's OP_DIV.
 
@@ -56,6 +57,9 @@ export function twap(m0, m1, m2) {
 }
 
 export function holderPayoff(kind, settlement, strike, collateral) {
+  // Predict is all or nothing. A close on the line pays the writer.
+  if (kind === 2) return settlement > strike ? collateral : 0n;
+  if (kind === 3) return settlement < strike ? collateral : 0n;
   let ph = 0n;
   if (kind === 0 && settlement > strike) {
     ph = (collateral * (settlement - strike)) / settlement;

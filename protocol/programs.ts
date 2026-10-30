@@ -4,6 +4,8 @@ import beaconArtifact from "../contracts/attestation_beacon.artifact.json" with 
 import swapArtifact from "../contracts/non_interactive_swap.artifact.json" with { type: "json" };
 import intentArtifact from "../contracts/option_intent.artifact.json" with { type: "json" };
 import vaultArtifact from "../contracts/option_vault.artifact.json" with { type: "json" };
+import predictArtifact from "../contracts/predict_vault.artifact.json" with { type: "json" };
+import { isPredict } from "./constants.ts";
 
 // CHECKTIME (0xdc) is in the SDK. The vault's slot loop still compiles to OP_PUT
 // (0xbb), which that table does not list, so the spent program cannot load
@@ -51,6 +53,16 @@ export function vaultProgram() {
   return secondsExit(vaultArtifact as arkade.ContractArtifact);
 }
 
+/** OptionVault with an all-or-nothing payoff. Kinds 2 (higher) and 3 (lower). */
+export function predictVaultProgram() {
+  return secondsExit(predictArtifact as arkade.ContractArtifact);
+}
+
+/** The vault a kind settles through. */
+export function vaultProgramFor(kind: number) {
+  return isPredict(kind) ? predictVaultProgram() : vaultProgram();
+}
+
 export function intentProgram() {
   return secondsExit(intentArtifact as arkade.ContractArtifact);
 }
@@ -72,6 +84,10 @@ export function beaconProgram() {
 
 export function rawVaultProgram() {
   return arkade.programFromArtifact(vaultArtifact as arkade.ContractArtifact);
+}
+
+export function rawPredictVaultProgram() {
+  return arkade.programFromArtifact(predictArtifact as arkade.ContractArtifact);
 }
 
 export function rawBeaconProgram() {

@@ -96,6 +96,19 @@ Desk logs: one line per UTC hour, `hour N quotes, N filled, N premium paid, N co
 
 The status object omits `ctrlGidx` (it is `0`, the `0000` suffix on `assetId`).
 
+## Predict
+
+All-or-nothing calls on where BTC closes at the end of a short window: higher (kind 2) or lower (kind 3) than a line. The page is `#/predict`.
+
+- **Contract.** `contracts/predict_vault.ark` is OptionVault with the payoff swapped and nothing else: the same beacon read, read fee, dust folding and spend paths. Above the line (higher) or below it (lower), the holder gets the whole collateral less the read fee; a close on the line pays the writer. OptionVault is unchanged, so open option vaults keep their addresses.
+- **Fill.** OptionIntent side 1, unchanged. The bettor is the holder and funds the intent with the stake. The desk is the writer: finalize pays the stake to the desk at output 0 and funds the vault with the payout from the desk float at output 1. A stake the desk does not fill is cancelled back to the bettor after the deadline.
+- **Wire.** A predict `rfq_request` names `holder_pubkey` and `holder_pk_script` (the bettor's address) and `amount` is the stake. The quote names the desk as `writer_pubkey` and `writer_pk_script`, and `to_amount` is the payout. A filled position carries `holder_pk_script` so a settler can rebuild the vault.
+- **Windows.** Closes are on the 5-minute grid, at least 2 minutes and at most an hour away. The stake has to arrive within 60 seconds of the quote (`PREDICT_LOCK_S`): the 3-minute options lock would let a bettor watch most of a window before paying.
+- **Price.** The multiplier is `(1 - edge) / p`, where `p` is the lognormal chance of finishing on the bettor's side at the at-the-money Deribit IV of the nearest expiry at least six hours out. `DESK_EDGE` sets the edge (default 0.05, so 1.90× at even odds). `DESK_VOL` overrides the vol for options and predictions alike. Multipliers outside 1.05× to 10× are refused, as is a payout that does not beat the stake after the read fee.
+- **Float.** A prediction ties up the whole payout, not a premium, so open predictions count their payout against the float.
+
+`pnpm smoke:regtest` runs a prediction after the option: a fill from the desk float, a refund of an unfilled stake, a fixing above the line and the payout to the bettor.
+
 ## Page
 
 ```bash

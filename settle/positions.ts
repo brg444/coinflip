@@ -1,6 +1,7 @@
 import { asset } from "@arkade-os/sdk";
 
 import { beaconIdOf } from "../protocol/beacon-id.ts";
+import type { Kind } from "../protocol/constants.ts";
 import { directPayoutKey, type Terms } from "../protocol/contracts.ts";
 import { hexToBytes } from "../protocol/hex.ts";
 import { parsePosition, type OptionPosition } from "../protocol/messages.ts";
@@ -12,7 +13,7 @@ import { parsePosition, type OptionPosition } from "../protocol/messages.ts";
 export type WatchPosition = {
   id: string;
   rfqId: string;
-  kind: 0 | 1;
+  kind: Kind;
   collateral: bigint;
   strike: bigint;
   expiry: number;
@@ -20,6 +21,8 @@ export type WatchPosition = {
   writerPk: Uint8Array;
   holderPk: Uint8Array;
   payoutKey?: Uint8Array;
+  /** Predict: the bettor's address key, which the payout pays. */
+  holderPayoutKey?: Uint8Array;
   beaconTxid: string;
   beaconGidx: number;
   vaultAddress: string;
@@ -61,6 +64,7 @@ export function positionFromAnnouncement(body: unknown): WatchPosition | null {
     writerPk: hexToBytes(row.writer_pubkey),
     holderPk: hexToBytes(row.holder_pubkey),
     payoutKey: directPayoutKey(row.writer_pubkey, row.writer_pk_script),
+    holderPayoutKey: row.holder_pk_script ? directPayoutKey(row.holder_pubkey, row.holder_pk_script) : undefined,
     beaconTxid: row.beacon_txid,
     beaconGidx: row.beacon_gidx,
     vaultAddress: row.vault_address,
@@ -110,6 +114,7 @@ export function termsFor(position: WatchPosition, serverKey: Uint8Array, emulato
     writerPk: position.writerPk,
     payoutKey: position.payoutKey,
     holderPk: position.holderPk,
+    holderPayoutKey: position.holderPayoutKey,
     beacon: beaconIdOf(asset.AssetId.create(position.beaconTxid, position.beaconGidx)),
     readFee,
     serverKey,

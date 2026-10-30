@@ -6,7 +6,9 @@ import {
   artifactLine,
   beaconProgram,
   intentProgram,
+  predictVaultProgram,
   rawBeaconProgram,
+  rawPredictVaultProgram,
   rawIntentProgram,
   rawSwapProgram,
   rawVaultProgram,
@@ -40,6 +42,7 @@ function onlySecondsDiffers(raw: ReturnType<typeof rawVaultProgram>, spent: Retu
 }
 
 onlySecondsDiffers(rawVaultProgram(), vaultProgram());
+onlySecondsDiffers(rawPredictVaultProgram(), predictVaultProgram());
 onlySecondsDiffers(rawIntentProgram(), intentProgram());
 onlySecondsDiffers(rawSwapProgram(), swapProgram());
 onlySecondsDiffers(rawBeaconProgram(), beaconProgram());
@@ -151,4 +154,9 @@ if (!line.includes("no oracle signatures") || !line.includes("CHECKTIME(deadline
   throw new Error(line);
 }
 
-console.log("option, swap, and beacon programs load through programFromArtifact");
+const predictAsm = predictVaultProgram().functions.settle?.arkadeScript?.asm ?? [];
+if (!predictAsm.includes("INSPECTINASSETLOOKUP") || !predictAsm.includes("INSPECTINPUTPACKET")) {
+  throw new Error("PredictVault settle is missing the beacon read");
+}
+
+console.log("option, predict, swap, and beacon programs load through programFromArtifact");

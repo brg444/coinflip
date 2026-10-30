@@ -1,15 +1,22 @@
 import { mkdir, readFile } from "node:fs/promises";
 import path from "node:path";
 
+import { isPredict, type Kind } from "../protocol/constants.ts";
 import { writeJsonFile } from "../protocol/sqlite-storage.ts";
 
 export type QuoteStatus = "open" | "filled" | "expired";
 
+/**
+ * One quote. Options: the user writes, `collateral` is what they lock and
+ * `premium` what the desk pays. Predict: the user holds, `premium` is the
+ * stake and `collateral` the payout the desk locks; the writer fields are
+ * the desk and the holder fields the bettor.
+ */
 export type QuoteRow = {
   rfqId: string;
   collateral: string;
   premium: string;
-  kind: 0 | 1;
+  kind: Kind;
   strike: string;
   expiry: number;
   deadline: number;
@@ -18,6 +25,8 @@ export type QuoteRow = {
   writerPubkey: string;
   writerPkScript: string;
   holderPubkey: string;
+  /** Predict: the bettor's Arkade address script, which the payout pays. */
+  holderPkScript?: string;
   /** Display txid of the beacon identity asset. */
   beaconTxid: string;
   beaconGidx: number;
@@ -43,11 +52,16 @@ export function hasBeacon(row: QuoteRow): boolean {
   return /^[0-9a-f]{64}$/.test(row.beaconTxid ?? "") && Number.isInteger(row.beaconGidx) && row.beaconGidx >= 0 && row.beaconGidx <= 65_535;
 }
 
-/** Premium already promised by open quotes. A new quote has to fit beside this. */
+/** Float a fill spends: the premium for an option, the whole payout for a prediction. */
+export function outlay(row: Pick<QuoteRow, "kind" | "premium" | "collateral">): bigint {
+  return BigInt(isPredict(row.kind) ? row.collateral : row.premium);
+}
+
+/** Float already promised by open quotes. A new quote has to fit beside this. */
 export function openPremium(rows: readonly QuoteRow[], now: number): bigint {
   let sum = 0n;
   for (const row of rows) {
-    if (row.status === "open" && row.deadline > now) sum += BigInt(row.premium);
+    if (row.status === "open" && row.deadline > now) sum += outlay(row);
   }
   return sum;
 }

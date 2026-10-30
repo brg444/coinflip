@@ -31,6 +31,12 @@ export type TxOutput = {
   script: string;
 };
 
+/**
+ * Side 0 (options): the user's coin is the collateral; a fill pays the user the
+ * premium. Side 1 (predict): the user's coin is the stake; a fill funds the
+ * vault with the collateral. Either way, a spend that pays the whole coin back
+ * to the user is a refund. `writerScript` is the user's script on both sides.
+ */
 export function classifyIntent(input: {
   coins: CoinView[];
   spends: Record<string, TxOutput[]>;
@@ -39,9 +45,15 @@ export function classifyIntent(input: {
   writerScript: string;
   now: number;
   deadline: number;
+  side?: 0 | 1;
+  /** Side 1: the vault a fill funds. */
+  vaultScript?: string;
 }): IntentView {
   const writer = input.writerScript.toLowerCase();
-  const live = input.coins.find((coin) => !coin.spent && coin.value >= input.collateral);
+  const side = input.side ?? 0;
+  const vault = (input.vaultScript ?? "").toLowerCase();
+  const locks = side === 1 ? input.premium : input.collateral;
+  const live = input.coins.find((coin) => !coin.spent && coin.value >= locks);
   if (live) {
     const open = input.now < input.deadline;
     return {
@@ -52,20 +64,22 @@ export function classifyIntent(input: {
     };
   }
   const spent = input.coins
-    .filter((coin) => coin.spent && coin.value >= input.collateral && coin.spentBy)
+    .filter((coin) => coin.spent && coin.value >= locks && coin.spentBy)
     .sort((a, b) => Number(b.value - a.value));
+  const sumTo = (outputs: TxOutput[], script: string) => outputs.reduce((sum, output) => (
+    script && output.script.toLowerCase() === script ? sum + output.amount : sum
+  ), 0n);
   for (const coin of spent) {
     const outputs = input.spends[coin.spentBy] ?? [];
-    const paid = outputs.reduce((sum, output) => (
-      output.script.toLowerCase() === writer ? sum + output.amount : sum
-    ), 0n);
+    const paid = sumTo(outputs, writer);
     const view = {
       refundable: false,
       fundingTxid: txid(coin.txid),
       closeTxid: txid(coin.spentBy),
     };
     if (paid >= coin.value) return { phase: "refunded", ...view };
-    if (paid >= input.premium) return { phase: "filled", ...view };
+    if (side === 0 && paid >= input.premium) return { phase: "filled", ...view };
+    if (side === 1 && sumTo(outputs, vault) >= input.collateral) return { phase: "filled", ...view };
   }
   return {
     phase: input.now < input.deadline ? "open" : "expired",
