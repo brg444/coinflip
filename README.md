@@ -123,18 +123,24 @@ Keys, data and logs live in `~/.coinflip-demo`; delete it to start over with a n
 
 ## Deploy
 
-`coinflip.Dockerfile` runs the same system as `pnpm demo` on a server: the page, an oracle with its own beacon, a desk and a settler in one container, started with `pnpm demo -- --server`. Only the page port, 4173, is exposed. The services talk to each other on loopback inside the container, and their logs go to the container log with a `[oracle]`, `[desk]` or `[settler]` prefix as well as to `/data/logs`.
+`coinflip.Dockerfile` runs the same system as `pnpm demo` on a server: the page, an oracle with its own beacon, a desk and a settler in one container, started with `pnpm demo -- --server`. Only the page port, 4173, is exposed. The services talk to each other on loopback inside the container, and their logs go to the container log with an `[oracle]`, `[desk]` or `[settler]` prefix as well as to `/data/logs`. It needs a volume at `/data`, which holds the keys, the beacon, the desk's book and the settler's progress. That volume has to outlive redeploys: a new one is a new beacon and a new, unfunded desk. The image has no secrets in it, since the keys are made on first start and stay in `/data/keys.json`.
 
-On Dokploy:
+On Railway, `railway.toml` picks the Dockerfile, the health check and the restart policy. From a checkout, with the CLI logged in:
 
-1. In a project, create an Application named `coinflip`.
-2. Under Provider, choose Git with the repository `https://github.com/brg444/coinflip.git`, branch `main` and build path `/`.
-3. Under Build Type, choose Dockerfile, with Docker File `coinflip.Dockerfile` and Docker Context Path `.`.
-4. Under Advanced, add a volume mount named `coinflip-data` at `/data`. It holds the keys, the beacon, the desk's book and the settler's progress, so it has to outlive redeploys: a new volume is a new beacon and a new, unfunded desk.
-5. Under Domains, add a domain on container port 4173. Without a domain of our own, generate a `traefik.me` host and leave HTTPS off; the page needs no secure context, but some browsers warn before opening a plain HTTP site. Once `coinflip.casino` has DNS, point an A record at the server and add that host with HTTPS and Let's Encrypt.
-6. Deploy, then open the domain. The page comes up first and the header pill walks through the two deposits, as in [Demo](#demo); the addresses are in the container log too.
+```sh
+railway init --name coinflip
+railway add --service coinflip --variables PORT=4173
+railway service link coinflip
+railway volume add --mount-path /data
+railway up --detach
+railway domain --port 4173
+```
 
-A redeploy keeps everything on the volume, so the beacon, the desk float and open bets carry over. The image has no secrets in it: the keys are made on first start and stay in `/data/keys.json`.
+The last command prints the `up.railway.app` address. Open it: the page comes up first and the header pill walks through the two deposits, as in [Demo](#demo); the addresses are in the deploy log too. A later `railway up` redeploys and keeps the volume.
+
+On Dokploy, create an Application from this repository with Build Type Dockerfile, Docker File `coinflip.Dockerfile` and Docker Context Path `.`, add a volume mount at `/data`, and add a domain on container port 4173. A generated `traefik.me` host has no trusted certificate, so leave HTTPS off there; the page needs no secure context.
+
+Once `coinflip.casino` has DNS, either host can serve it with a managed certificate.
 
 ## Page
 

@@ -1,0 +1,10 @@
+# Railway: build coinflip.Dockerfile and keep the one container running.
+# The service needs a volume at /data and PORT=4173; see the README's Deploy section.
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "coinflip.Dockerfile"
+
+[deploy]
+healthcheckPath = "/demo.json"
+healthcheckTimeout = 300
+restartPolicyType = "ALWAYS"
