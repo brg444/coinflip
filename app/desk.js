@@ -3056,6 +3056,107 @@ function bindTheme() {
   });
 }
 
+
+// ----- demo setup: the page walks through funding a `pnpm demo` system -----
+
+const DEMO_SETUP = typeof __COINFLIP_DEMO__ !== "undefined" && __COINFLIP_DEMO__?.setup;
+let setupSeen = "";
+
+async function readSetup() {
+  if (!DEMO_SETUP) return;
+  let next = null;
+  try {
+    const res = await fetch("/demo.json", { cache: "no-store" });
+    if (res.ok) next = await res.json();
+  } catch {
+    next = null;
+  }
+  if (!next) {
+    $("demo-setup").hidden = true;
+    return;
+  }
+  // The page is rebuilt once the beacon exists; pick that build up when setup finishes.
+  if (next.stage === "ready" && setupSeen && setupSeen !== "ready") {
+    location.reload();
+    return;
+  }
+  setupSeen = next.stage;
+  renderSetup(next);
+}
+
+function setupStep(index, { title, need, note, address, balance, done, busy, waiting }) {
+  const item = el("li", done ? "done" : "");
+  const head = el("div", "setup-head");
+  head.append(el("span", "setup-n", String(index)), el("b", "", title));
+  const state = done
+    ? el("span", "pill ok", busy ? "Received · setting up" : "Received")
+    : el("span", "pill", address ? "Waiting" : "Next");
+  head.append(state);
+  item.append(head, el("p", "sub", note));
+  if (address) {
+    const row = el("div", "setup-addr");
+    row.append(el("code", "", address));
+    row.append(action("btn sm quiet", "Copy", (event) => {
+      void copyToClipboard(event.currentTarget, address);
+    }));
+    item.append(row);
+    item.append(el("p", "setup-bal", `${int(BigInt(balance || 0))} of ${int(BigInt(need))} sats${waiting ? " · checking every few seconds" : ""}`));
+  }
+  return item;
+}
+
+function renderSetup(next) {
+  const host = $("demo-setup");
+  if (next.stage === "ready") {
+    host.hidden = true;
+    return;
+  }
+  const oracleDone = BigInt(next.oracle.balance || 0) >= BigInt(next.oracle.need) || ["deploying", "desk", "fund-desk"].includes(next.stage);
+  const deskDone = BigInt(next.desk.balance || 0) >= BigInt(next.desk.need) / 4n;
+  const steps = el("ol", "setup-steps");
+  steps.append(
+    setupStep(1, {
+      title: "Fund the price oracle",
+      need: next.oracle.need,
+      note: oracleDone
+        ? next.stage === "deploying" ? "Setting up the price feed on Mutinynet. This takes a few seconds." : "The price feed is set up."
+        : `Send ${int(BigInt(next.oracle.need))} sats. The oracle signs the price that settles every bet.`,
+      address: next.oracle.wallet,
+      balance: next.oracle.balance,
+      done: oracleDone,
+      busy: next.stage === "deploying",
+      waiting: !oracleDone,
+    }),
+    setupStep(2, {
+      title: "Fund the desk",
+      need: next.desk.need,
+      note: next.desk.address
+        ? `Send about ${int(BigInt(next.desk.need))} sats. The desk takes the other side and pays winning bets from this.`
+        : "Its address shows here once the price feed is set up.",
+      address: next.desk.address,
+      balance: next.desk.balance,
+      done: deskDone,
+      waiting: Boolean(next.desk.address) && !deskDone,
+    }),
+  );
+  const open = el("a", "btn go", "Open your wallet");
+  open.href = next.wallet || WALLET_URL;
+  open.target = "_blank";
+  open.rel = "noopener";
+  const acts = el("div", "acts");
+  acts.append(open, el("span", "sub", "Send from your Mutinynet wallet; this page updates as each deposit lands."));
+  host.replaceChildren(el("h2", "", "Two deposits and the demo is ready."), steps, acts);
+  host.hidden = false;
+}
+
+function startSetupWatch() {
+  if (!DEMO_SETUP) return;
+  void readSetup();
+  setInterval(() => {
+    if (setupSeen !== "ready") void readSetup();
+  }, 4_000);
+}
+
 function bindBet() {
   document.querySelectorAll("[data-call]").forEach((btn) => {
     btn.addEventListener("click", () => setCall(Number(btn.dataset.call), state.view === "predict" ? "replace" : "push"));
@@ -3308,4 +3409,5 @@ if (!consumeWalletHandoff()) {
     void loadPrices();
   }, REFRESH_MS);
   void hydrateMissing();
+  startSetupWatch();
 }

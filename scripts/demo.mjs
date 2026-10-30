@@ -1,6 +1,8 @@
 // COINFLIP demo on Mutinynet. One command runs the whole system on this
 // machine: an oracle with its own beacon, a desk, a settler, and the page built
-// against them, served locally and through a Cloudflare tunnel URL.
+// against them, served locally and through a Cloudflare tunnel URL. The page
+// and its link come up first; the page then walks through funding the oracle
+// and the desk, so the rest happens in the browser.
 //
 //   pnpm demo                start, or resume, the demo
 //   pnpm demo -- --pages     also publish the page to Cloudflare Pages (needs `wrangler login`)
@@ -17,6 +19,8 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { getPublicKey } from "nostr-tools/pure";
+
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const home = path.resolve(process.env.COINFLIP_DEMO_DIR?.trim() || path.join(os.homedir(), ".coinflip-demo"));
 const args = new Set(process.argv.slice(2));
@@ -30,6 +34,13 @@ const deskUrl = `http://127.0.0.1:${PORTS.desk}`;
 
 const children = [];
 let stopping = false;
+/** What the page shows while the demo sets itself up. Served at /demo.json. */
+const setup = {
+  stage: "starting",
+  oracle: { wallet: "", balance: "0", need: ORACLE_FUND.toString() },
+  desk: { address: "", balance: "0", need: DESK_FUND.toString() },
+  wallet: "https://mutinynet.arkade.money",
+};
 
 function say(line = "") {
   process.stdout.write(`${line}\n`);
@@ -142,24 +153,30 @@ async function oracleUp(key) {
     const body = (await json(`${oracleUrl}/api/status`)).body;
     return body.wallet && body;
   }, "Starting the oracle…");
+  setup.oracle.wallet = status.wallet;
+  setup.oracle.balance = String(status.balance ?? "0");
   if (status.deployTxid && status.assetId) return status;
 
   if (!status.issueTxid) {
     if (BigInt(status.balance ?? 0) < ORACLE_FUND) {
+      setup.stage = "fund-oracle";
       say("");
       say(`Fund the oracle: send at least ${sats(ORACLE_FUND)} Mutinynet sats to`);
       say(`  ${status.wallet}`);
-      say("from your wallet at https://mutinynet.arkade.money. This waits until they arrive.");
+      say("The page shows this too. This waits until they arrive.");
       status = await until(async () => {
         const next = (await json(`${oracleUrl}/api/status`)).body;
+        setup.oracle.balance = String(next.balance ?? "0");
         return BigInt(next.balance ?? 0) >= ORACLE_FUND && next;
       });
       say(`Oracle funded: ${sats(status.balance)} sats.`);
     }
+    setup.stage = "deploying";
     const issued = await json(`${oracleUrl}/api/issue`, { method: "POST", headers: admin(key.admin), body: "{}" });
     if (!issued.ok) die(`Issuing the beacon asset failed: ${issued.body.error ?? issued.status}`);
     say(`Beacon asset issued: ${issued.body.txid ?? ""}`);
   }
+  setup.stage = "deploying";
   await until(async () => {
     const deployed = await json(`${oracleUrl}/api/deploy`, { method: "POST", headers: admin(key.admin), body: "{}" });
     return deployed.ok;
@@ -179,17 +196,22 @@ async function deskUp(key, beacon) {
     DATA_DIR: path.join(home, "desk"),
     PORT: String(PORTS.desk),
   });
+  setup.stage = "desk";
   const status = await until(async () => {
     const body = (await json(`${deskUrl}/status`)).body;
     return body.pubkey && body.address && body;
   }, "Starting the desk…");
+  setup.desk.address = status.address;
+  setup.desk.balance = String(status.balance ?? "0");
   if (BigInt(status.balance ?? 0) < DESK_FUND / 4n) {
     say("");
     say(`Fund the desk: it pays out every winning bet, so send about ${sats(DESK_FUND)} Mutinynet sats to`);
     say(`  ${status.address}`);
-    say("The page works before the float lands, but the desk refuses quotes it can't cover.");
+    say("The page shows this too. The desk refuses quotes it can't cover until the float lands.");
+    setup.stage = "fund-desk";
   } else {
     say(`Desk float: ${sats(status.balance)} sats.`);
+    setup.stage = "ready";
   }
   return status;
 }
@@ -203,17 +225,18 @@ function settlerUp(key) {
   });
 }
 
-/** The page, pinned to this desk and this beacon instead of arkade.trade's. */
-function buildPage(desk, beacon) {
+/**
+ * The page, pinned to this desk and, once it exists, this beacon instead of
+ * arkade.trade's. The desk's nostr key is known before the desk starts, so the
+ * page can go up first and be rebuilt when the beacon is deployed.
+ */
+function buildPage(key, beacon) {
   const config = path.join(home, "site.json");
-  const status = {
-    pubkeys: beacon.pubkeys,
-    assetId: beacon.assetId,
-    issueTxid: beacon.issueTxid,
-    address: beacon.address,
-    args: beacon.args,
-  };
-  writeFileSync(config, JSON.stringify({ desks: [{ name: "Demo desk", pubkey: desk.pubkey }], beacon: status }, null, 2));
+  const status = beacon
+    ? { pubkeys: beacon.pubkeys, assetId: beacon.assetId, issueTxid: beacon.issueTxid, address: beacon.address, args: beacon.args }
+    : null;
+  const pubkey = getPublicKey(Uint8Array.from(Buffer.from(key.deskKey, "hex")));
+  writeFileSync(config, JSON.stringify({ desks: [{ name: "Demo desk", pubkey }], beacon: status, setup: true }, null, 2));
   const built = spawnSync(process.execPath, [path.join(root, "scripts/build.mjs")], {
     cwd: root,
     env: { ...process.env, COINFLIP_DEMO: config, OUT_DIR: path.join(home, "site") },
@@ -233,6 +256,11 @@ function servePage() {
   return new Promise((resolve) => {
     http.createServer((req, res) => {
       const url = new URL(req.url ?? "/", "http://localhost");
+      if (url.pathname === "/demo.json") {
+        res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+        res.end(JSON.stringify(setup));
+        return;
+      }
       let rel = decodeURIComponent(url.pathname);
       if (rel.endsWith("/")) rel += "index.html";
       const file = path.join(site, rel.replace(/^\//, ""));
@@ -301,25 +329,51 @@ function pages() {
   return match[0];
 }
 
+/** The desk float and the oracle balance move as deposits land; the page reads them here. */
+async function watchSetup() {
+  for (;;) {
+    try {
+      const desk = (await json(`${deskUrl}/status`)).body;
+      if (desk.address) {
+        setup.desk.address = desk.address;
+        setup.desk.balance = String(desk.balance ?? "0");
+        const funded = BigInt(desk.balance ?? 0) >= DESK_FUND / 4n;
+        if (setup.stage === "fund-desk" && funded) say(`Desk funded: ${sats(desk.balance)} sats. Ready to bet.`);
+        setup.stage = funded ? "ready" : "fund-desk";
+      }
+    } catch {
+      // The desk is restarting; keep the last reading.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5_000));
+  }
+}
+
 preflight();
 const key = keys();
 say(`COINFLIP demo · Mutinynet · state in ${home}`);
-const beacon = await oracleUp(key);
-const desk = await deskUp(key, beacon);
-settlerUp(key);
-buildPage(desk, beacon);
+buildPage(key, null);
 await servePage();
 const publicUrl = args.has("--no-tunnel") ? null : await tunnel();
 const pagesUrl = args.has("--pages") ? pages() : null;
+say("");
+say("Open the page. It walks you through funding the demo, then you can bet:");
+say(`  Page      http://127.0.0.1:${PORTS.page}/#/predict`);
+if (publicUrl) say(`  Public    ${publicUrl}/#/predict`);
+if (pagesUrl) say(`  Pages     ${pagesUrl}/#/predict  (setup steps show on the local and public links)`);
+say("");
+const beacon = await oracleUp(key);
+buildPage(key, beacon);
+const desk = await deskUp(key, beacon);
+settlerUp(key);
+void watchSetup();
 
 say("");
 say("The demo is running.");
 say(`  Page      http://127.0.0.1:${PORTS.page}/#/predict`);
 if (publicUrl) say(`  Public    ${publicUrl}/#/predict`);
-if (pagesUrl) say(`  Pages     ${pagesUrl}/#/predict`);
 say(`  Oracle    ${oracleUrl}/  (admin token in ${path.join(home, "keys.json")})`);
 say(`  Desk      ${deskUrl}/status  (float ${desk.address})`);
 say(`  Settler   http://127.0.0.1:${PORTS.settler}/status`);
 say(`  Logs      ${path.join(home, "logs")}`);
 say("");
-say("Connect a Mutinynet wallet from https://mutinynet.arkade.money on the page to bet. Ctrl-C stops everything.");
+say("Ctrl-C stops everything.");
