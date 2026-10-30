@@ -1977,7 +1977,13 @@ function renderPredict() {
   });
   renderMarket();
   if (beats(payout, t.stake)) {
-    note.replaceChildren("You win about ", el("b", "", `${int(won(payout))} sats`), ` if you’re right · ${timesX(m)} your stake, less the 1,000‑sat fee`);
+    // Phones show the short form; the fee is spelled out in the drawer either way.
+    note.replaceChildren(
+      "You win about ",
+      el("b", "", `${int(won(payout))} sats`),
+      el("span", "est-long", ` if you’re right · ${timesX(m)} your stake, less the 1,000‑sat fee`),
+      el("span", "est-short", ` if you’re right · ${timesX(m)}`),
+    );
   } else if (m == null) {
     note.textContent = "The desk doesn’t quote this line for this close. Pick one nearer the current price.";
   } else {
@@ -1998,7 +2004,13 @@ function optionRow({ pick, on, label, note, side, off, tag, until }) {
   if (tag) name.append(el("i", "tag", tag));
   left.append(name);
   if (note) left.append(el("small", "", note));
-  const right = until ? clockEl("o-r", until) : el("span", "o-r", side || "");
+  // A pair puts the figure that decides the pick on top, and its detail under it.
+  const right = until
+    ? clockEl("o-r", until)
+    : Array.isArray(side)
+      ? el("span", "o-r o-pair")
+      : el("span", "o-r", side || "");
+  if (!until && Array.isArray(side)) right.append(el("b", "", side[0]), el("small", "", side[1]));
   btn.append(left, right);
   if (off) {
     btn.className = "off";
@@ -2083,7 +2095,7 @@ function renderBetPop(focus = false) {
         on: step === t.step,
         label: usd0(spotDollars() + step),
         note: lineNote(step),
-        side: ok ? `${timesX(m)} · ${int(won(payout))} sats` : "",
+        side: ok ? [timesX(m), `${int(won(payout))} sats`] : "",
         off: ok ? "" : m == null
           ? `Too ${(t.kind === 2) === (step < 0) ? "likely" : "unlikely"} for the desk to quote.`
           : `Wins ${int(won(payout))} sats after the fee, not more than you put in.`,
@@ -2217,7 +2229,10 @@ function renderBet() {
   $("bet-rows-when").textContent = `If BTC at ${at} is`;
   const rows = [
     [`${capital(DIR[t.kind])} ${line}`, payout != null ? amount(won(payout)) : "—",
-      payout != null ? `${int(won(payout))} sats · your ${int(t.stake)} back plus ${int(won(payout) - t.stake)}` : "", false],
+      // Sats are spelled out only when the amount above is in ₿.
+      payout != null
+        ? `${won(payout) < 100_000n ? "" : `${int(won(payout))} sats · `}your ${int(t.stake)} back plus ${int(won(payout) - t.stake)}`
+        : "", false],
     [`At or ${OTHER[t.kind]} ${line}`, "Nothing", `your ${int(t.stake)} sats go to the desk`, true],
   ];
   $("bet-rows").replaceChildren(...rows.map(([when, get, small, zero]) => {
@@ -2934,7 +2949,7 @@ function marketClock(now) {
 
 function drawMarket(host, { points, line, kind, close, now }) {
   const W = Math.max(280, Math.floor(host.clientWidth));
-  const H = W < 520 ? 128 : 212;
+  const H = W < 420 ? 104 : W < 520 ? 128 : 212;
   const top = 14;
   const bottom = H - 24;
   const t0 = now - MARKET_SPAN_S;
