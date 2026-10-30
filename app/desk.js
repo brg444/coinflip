@@ -3072,6 +3072,7 @@ async function readSetup() {
     next = null;
   }
   if (!next) {
+    $("setup-pill").hidden = true;
     $("demo-setup").hidden = true;
     return;
   }
@@ -3084,73 +3085,99 @@ async function readSetup() {
   renderSetup(next);
 }
 
-function setupStep(index, { title, need, note, address, balance, done, busy, waiting }) {
+/** Shorten an address for the panel; the copy button copies it whole. */
+function shortAddress12(address) {
+  return address.length > 24 ? `${address.slice(0, 12)}…${address.slice(-8)}` : address;
+}
+
+function setupStep(index, { title, note, address, balance, need, done, busy }) {
   const item = el("li", done ? "done" : "");
   const head = el("div", "setup-head");
   head.append(el("span", "setup-n", String(index)), el("b", "", title));
-  const state = done
-    ? el("span", "pill ok", busy ? "Received · setting up" : "Received")
-    : el("span", "pill", address ? "Waiting" : "Next");
-  head.append(state);
+  head.append(el("span", done ? "pill ok" : "pill", done ? (busy ? "Setting up" : "Received") : address ? "Waiting" : "Next"));
   item.append(head, el("p", "sub", note));
-  if (address) {
+  if (address && !done) {
     const row = el("div", "setup-addr");
-    row.append(el("code", "", address));
-    row.append(action("btn sm quiet", "Copy", (event) => {
+    const code = el("code", "", shortAddress12(address));
+    code.title = address;
+    row.append(code, action("btn sm quiet", "Copy", (event) => {
       void copyToClipboard(event.currentTarget, address);
     }));
-    item.append(row);
-    item.append(el("p", "setup-bal", `${int(BigInt(balance || 0))} of ${int(BigInt(need))} sats${waiting ? " · checking every few seconds" : ""}`));
+    item.append(row, el("p", "setup-bal", `${int(BigInt(balance || 0))} of ${int(BigInt(need))} sats`));
   }
   return item;
 }
 
+let setupOpen = false;
+
 function renderSetup(next) {
-  const host = $("demo-setup");
+  const pill = $("setup-pill");
+  const panel = $("demo-setup");
   if (next.stage === "ready") {
-    host.hidden = true;
+    pill.hidden = true;
+    panel.hidden = true;
     return;
   }
   const oracleDone = BigInt(next.oracle.balance || 0) >= BigInt(next.oracle.need) || ["deploying", "desk", "fund-desk"].includes(next.stage);
   const deskDone = BigInt(next.desk.balance || 0) >= BigInt(next.desk.need) / 4n;
+  const count = Number(oracleDone) + Number(deskDone);
+  pill.hidden = false;
+  $("setup-pill-text").replaceChildren(el("span", "long", "Fund demo "), `${count}/2`);
+  pill.setAttribute("aria-label", `Demo setup, ${count} of 2 deposits in`);
+  pill.setAttribute("aria-expanded", String(setupOpen));
   const steps = el("ol", "setup-steps");
   steps.append(
     setupStep(1, {
-      title: "Fund the price oracle",
-      need: next.oracle.need,
+      title: "Price oracle",
       note: oracleDone
-        ? next.stage === "deploying" ? "Setting up the price feed on Mutinynet. This takes a few seconds." : "The price feed is set up."
-        : `Send ${int(BigInt(next.oracle.need))} sats. The oracle signs the price that settles every bet.`,
+        ? next.stage === "deploying" ? "Setting up the price feed." : "Signs the price that settles every bet."
+        : `Send ${int(BigInt(next.oracle.need))} sats. It signs the price that settles every bet.`,
       address: next.oracle.wallet,
       balance: next.oracle.balance,
+      need: next.oracle.need,
       done: oracleDone,
       busy: next.stage === "deploying",
-      waiting: !oracleDone,
     }),
     setupStep(2, {
-      title: "Fund the desk",
-      need: next.desk.need,
+      title: "Desk",
       note: next.desk.address
-        ? `Send about ${int(BigInt(next.desk.need))} sats. The desk takes the other side and pays winning bets from this.`
-        : "Its address shows here once the price feed is set up.",
+        ? `Send about ${int(BigInt(next.desk.need))} sats. It pays winning bets.`
+        : "Its address appears once the price feed is set up.",
       address: next.desk.address,
       balance: next.desk.balance,
+      need: next.desk.need,
       done: deskDone,
-      waiting: Boolean(next.desk.address) && !deskDone,
     }),
   );
-  const open = el("a", "btn go", "Open your wallet");
+  const open = el("a", "textbtn", "Open your Mutinynet wallet");
   open.href = next.wallet || WALLET_URL;
   open.target = "_blank";
   open.rel = "noopener";
-  const acts = el("div", "acts");
-  acts.append(open, el("span", "sub", "Send from your Mutinynet wallet; this page updates as each deposit lands."));
-  host.replaceChildren(el("h2", "", "Two deposits and the demo is ready."), steps, acts);
-  host.hidden = false;
+  const title = el("p", "setup-title", "Two deposits before the first bet");
+  title.id = "setup-title";
+  const foot = el("p", "setup-foot");
+  foot.append(open, " · updates as they land");
+  panel.replaceChildren(title, steps, foot);
+  panel.hidden = !setupOpen;
+}
+
+function toggleSetup(open = !setupOpen) {
+  setupOpen = open;
+  const panel = $("demo-setup");
+  panel.style.top = `${Math.round($("bar").getBoundingClientRect().bottom) + 8}px`;
+  panel.hidden = !open;
+  $("setup-pill").setAttribute("aria-expanded", String(open));
 }
 
 function startSetupWatch() {
   if (!DEMO_SETUP) return;
+  listen("setup-pill", "click", () => toggleSetup());
+  document.addEventListener("click", (event) => {
+    if (setupOpen && !event.target.closest("#demo-setup, #setup-pill")) toggleSetup(false);
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && setupOpen) toggleSetup(false);
+  });
   void readSetup();
   setInterval(() => {
     if (setupSeen !== "ready") void readSetup();
