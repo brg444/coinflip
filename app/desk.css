@@ -145,6 +145,7 @@ input { font: inherit; color: inherit; caret-color: var(--purple); }
 .brandmark { display: flex; align-items: center; gap: 10px; font-weight: 600; font-size: 20px; letter-spacing: -.02em; text-decoration: none; white-space: nowrap; color: var(--ink); }
 .brandmark svg { width: 22px; height: 22px; fill: var(--purple); }
 .brandmark .lite { font-weight: 400; color: var(--muted); }
+.brandmark .wordmark { font-weight: 600; letter-spacing: .06em; font-size: 18px; }
 .nav { display: flex; gap: 4px; margin-left: auto; }
 .nav button { display: flex; align-items: center; padding: 8px 14px; color: var(--muted); font-weight: 500; transition: background 180ms var(--ease-out), color 180ms var(--ease-out); }
 .nav button:hover { color: var(--ink); }

@@ -907,10 +907,10 @@ function show(view, mode = "push") {
     closeBet();
   }
   const predicting = view === "predict";
-  $("note-lead").textContent = predicting ? "Predictions are an educational demo" : "Arkade Options is an educational demo";
+  $("note-lead").textContent = "Coinflip is an educational demo";
   $("note-body").textContent = predicting
-    ? "built on the same contracts as Arkade Options: one price fixing, one vault, paid in sats."
-    : "showing that selling BTC options works on Arkade.";
+    ? "of calls on where bitcoin closes: one price fixing, one vault, paid in sats."
+    : "of BTC options settled by a contract on bitcoin.";
   const next = pageHash(view);
   if (mode !== "quiet" && location.hash !== next) {
     if (mode === "replace") history.replaceState(null, "", next);
@@ -3015,12 +3015,27 @@ function effectiveTheme() {
   return window.matchMedia?.("(prefers-color-scheme: dark)").matches ? "dark" : "light";
 }
 
+/** The toggle shows where it goes: a moon in light, a sun in dark. */
+function themeIcon(theme) {
+  const svg = svgEl("svg", { viewBox: "0 0 20 20", "aria-hidden": "true", fill: "none", stroke: "currentColor", "stroke-width": "1.5", "stroke-linecap": "square" });
+  if (theme === "dark") {
+    svg.append(svgEl("circle", { cx: 10, cy: 10, r: 3.5 }));
+    for (const [x1, y1, x2, y2] of [[10, 1.5, 10, 3.5], [10, 16.5, 10, 18.5], [1.5, 10, 3.5, 10], [16.5, 10, 18.5, 10], [4, 4, 5.4, 5.4], [14.6, 14.6, 16, 16], [4, 16, 5.4, 14.6], [14.6, 5.4, 16, 4]]) {
+      svg.append(svgEl("line", { x1, y1, x2, y2 }));
+    }
+  } else {
+    svg.append(svgEl("path", { d: "M16.5 12.2A6.75 6.75 0 0 1 7.8 3.5a6.75 6.75 0 1 0 8.7 8.7z" }));
+  }
+  return svg;
+}
+
 function syncTheme() {
   const theme = effectiveTheme();
   const button = $("theme");
   if (button) {
     button.setAttribute("aria-label", theme === "dark" ? "Switch to light theme" : "Switch to dark theme");
     button.setAttribute("aria-pressed", String(theme === "dark"));
+    button.replaceChildren(themeIcon(theme));
   }
   document.querySelector('meta[name="theme-color"]')?.setAttribute("content", theme === "dark" ? "#0f0d17" : "#ffffff");
 }
