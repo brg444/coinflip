@@ -911,7 +911,9 @@ function show(view, mode = "push") {
   $("note-lead").textContent = "Coinflip is an educational demo";
   $("note-body").textContent = predicting
     ? "of calls on where bitcoin closes: one price fixing, one vault, paid in sats."
-    : "of BTC options settled by a contract on bitcoin.";
+    : view === "how"
+      ? "of bets and BTC options, each settled by a contract on bitcoin."
+      : "of BTC options settled by a contract on bitcoin.";
   const next = pageHash(view);
   if (mode !== "quiet" && location.hash !== next) {
     if (mode === "replace") history.replaceState(null, "", next);

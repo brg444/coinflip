@@ -20,7 +20,7 @@
     <a class="brandmark" href="#/"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 19.1A11 11 0 0 1 19.1 3.5Z"/><path d="M20.5 4.9A11 11 0 0 1 4.9 20.5Z"/></svg><span class="wordmark">COINFLIP</span></a>
     <nav class="nav" aria-label="Main">
       <button type="button" data-tab="predict">Predict</button>
-      <button type="button" data-tab="sell">New</button>
+      <button type="button" data-tab="sell">Options</button>
       <button type="button" data-tab="home">Positions<span class="count" id="count" hidden></span></button>
       <button type="button" data-tab="how">How it works</button>
     </nav>
@@ -146,10 +146,67 @@
       </div>
     </section>
 
-    <section id="how" hidden aria-labelledby="how-title">
-      <div class="opener"><span class="av"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 19.1A11 11 0 0 1 19.1 3.5Z"/><path d="M20.5 4.9A11 11 0 0 1 4.9 20.5Z"/></svg></span><p>You get paid now for agreeing to a limit on the price.</p></div>
-      <article class="card how-card">
-        <h1 id="how-title">Locking BTC against a price move</h1>
+    <section id="how" hidden aria-label="How it works">
+      <div class="opener"><span class="av"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 19.1A11 11 0 0 1 19.1 3.5Z"/><path d="M20.5 4.9A11 11 0 0 1 4.9 20.5Z"/></svg></span><p>Every bet and every option here is one contract, settled by one signed bitcoin price.</p></div>
+      <article class="card how-card" aria-labelledby="how-predict-title">
+        <h1 id="how-predict-title">Predict: call where bitcoin closes</h1>
+        <p>Pick a line, a close a few minutes away, and whether BTC finishes above or below the line. Your stake and the desk’s side of the bet go into one contract. At the close, the price oracle signs the BTC price for that minute, and the contract pays the whole pot to whoever was right.</p>
+
+        <div class="how-pair">
+          <section class="how-choice" aria-labelledby="how-higher">
+            <h2 id="how-higher"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M2.5 16.5l4.5-4.5 3 2.5 6-7"/><path d="M2.5 9.5h15" stroke-dasharray="2.2 2.4"/></svg>Higher</h2>
+            <p>You win if BTC closes above your line. The further above today’s price the line sits, the less likely that is, and the bigger the multiple.</p>
+          </section>
+          <section class="how-choice" aria-labelledby="how-lower">
+            <h2 id="how-lower"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M2.5 3.5l4.5 4.5 3-2.5 6 7"/><path d="M2.5 10.5h15" stroke-dasharray="2.2 2.4"/></svg>Lower</h2>
+            <p>You win if BTC closes below your line. A line further below today’s price pays more, for the same reason.</p>
+          </section>
+        </div>
+
+        <p class="how-names">A close exactly on the line goes to the desk. There are no partial payouts.</p>
+
+        <h2>What the multiple means</h2>
+        <p>The multiple is what you get back for every sat you stake if you are right. It comes from how likely the price is to finish on your side, read from Deribit’s bitcoin options, less the desk’s 5% edge, so an even call pays 1.90×. A 1,000-sat fee for the price check comes out of the payout. Windows close every 5 minutes, and 15-minute windows close on the quarter hour.</p>
+
+        <h2>Three steps</h2>
+        <figure class="how-flow">
+          <div class="how-step">
+            <div class="how-pic" aria-hidden="true">
+              <span class="how-tag you">Your stake</span>
+              <span class="how-arrow"></span>
+              <span class="how-tag vault">Bet</span>
+            </div>
+            <strong>Stake in</strong>
+            <p>When you place the bet, the desk fixes your multiple, and you have 60 seconds to send the stake from your wallet.</p>
+          </div>
+          <div class="how-join" aria-hidden="true"></div>
+          <div class="how-step">
+            <div class="how-pic" aria-hidden="true">
+              <span class="how-tag desk">Desk payout</span>
+              <span class="how-plus">+</span>
+              <span class="how-tag vault">Vault</span>
+            </div>
+            <strong>The desk matches it</strong>
+            <p>The desk adds the payout, and the whole amount is locked in the vault until the close. If it doesn’t take your stake in time, the stake stays yours to take back from Positions.</p>
+          </div>
+          <div class="how-join" aria-hidden="true"></div>
+          <div class="how-step">
+            <div class="how-pic" aria-hidden="true">
+              <span class="how-tag vault">Vault</span>
+              <span class="how-arrow"></span>
+              <span class="how-outs">
+                <span class="how-tag you">You</span>
+                <span class="how-tag desk">The desk</span>
+              </span>
+            </div>
+            <strong>Settlement</strong>
+            <p>At the close, the vault pays everything to you if you were right, or to the desk if not.</p>
+          </div>
+        </figure>
+      </article>
+
+      <article class="card how-card" aria-labelledby="how-title">
+        <h1 id="how-title">Options: get paid to lock BTC</h1>
         <p>Bitcoin’s price moves. Locking some of it until a date is useful: you get paid now for agreeing to a limit on that move.</p>
 
         <div class="how-pair">
