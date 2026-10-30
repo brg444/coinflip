@@ -138,7 +138,7 @@ railway domain --port 4173
 
 The last command prints the `up.railway.app` address. Open it: the page comes up first and the header pill walks through the two deposits, as in [Demo](#demo); the addresses are in the deploy log too. A later `railway up` redeploys and keeps the volume.
 
-On Dokploy, create an Application from this repository with Build Type Dockerfile, Docker File `coinflip.Dockerfile` and Docker Context Path `.`, add a volume mount at `/data`, and add a domain on container port 4173. A generated `traefik.me` host has no trusted certificate, so leave HTTPS off there; the page needs no secure context.
+On Dokploy, create an Application from this repository with Build Type Dockerfile, Docker File `coinflip.Dockerfile` and Docker Context Path `.`, add a volume mount at `/data`, and add a domain on container port 4173. A generated `traefik.me` host has no trusted certificate, and the Arkade wallet returns only to an https callback (or localhost), so connecting a wallet needs a real domain with HTTPS there.
 
 Once `coinflip.casino` has DNS, either host can serve it with a managed certificate.
 
