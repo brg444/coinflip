@@ -1,6 +1,8 @@
-# Arkade Options
+# COINFLIP
 
-Cash-settled covered calls and limited puts on Mutinynet. The desk pays the premium. The seller sends collateral to the address on the page.
+Bet whether bitcoin closes higher or lower than a line in five minutes. Each bet is an all-or-nothing contract on Arkade: the stake and the desk's payout sit in a vault that only the oracle's fixing can settle. Closed beta on Mutinynet. Domain: coinflip.casino.
+
+Forked from [ArkLabsHQ/arkade-options](https://github.com/ArkLabsHQ/arkade-options), which keeps its cash-settled covered calls and limited puts. The bet is in [Predict](#predict); `pnpm demo` runs it all on one machine ([Demo](#demo)).
 
 Day-to-day work is funding the desk. The oracle signs BTCUSD itself and keeps the history. The settler publishes a fixing after expiry and settles the vault. A new beacon is a new identity. Deploy and bootstrap steps are in [docs/runbook.md](docs/runbook.md).
 
@@ -111,9 +113,11 @@ All-or-nothing calls on where BTC closes at the end of a short window: higher (k
 
 ## Demo
 
-`pnpm demo` runs the whole system on one machine against Mutinynet, so the page can be tried end to end without the hosted services: an oracle with its own beacon, a desk, a settler, and the page built against that desk and beacon. It needs Node 22.12 or later and `pnpm install`. On first start it makes the keys, then asks you to send 10,000 Mutinynet sats to the oracle wallet it prints and waits until they arrive, issues and deploys the beacon, starts the desk and asks for its float (about 1,000,000 sats, since the desk funds whole payouts), and starts the settler.
+`pnpm demo` runs the whole system on one machine against Mutinynet, so the page can be tried end to end without the hosted services: an oracle with its own beacon, a desk, a settler, and the page built against that desk and beacon. It needs Node 22.12 or later and `pnpm install`.
 
-The page is served on <http://127.0.0.1:4173/#/predict>. With [`cloudflared`](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/) installed it also opens a quick tunnel and prints a public `trycloudflare.com` URL, which needs no Cloudflare account and changes on every start. `pnpm demo -- --pages` also publishes the page to Cloudflare Pages as the `coinflip` project after `npx wrangler login`. Either URL works only while the demo is running, because the desk, oracle and settler run on this machine. `--no-tunnel` serves locally only.
+The page comes up first. Until the demo is funded, a pill in the header reads "Fund demo 1/2" and opens the two steps: send 10,000 Mutinynet sats to the oracle wallet, which issues and deploys the beacon, then about 1,000,000 sats to the desk, since the desk funds whole payouts. Each step ticks off when the sats arrive and the pill goes away once the desk is quoting.
+
+The page is served on <http://127.0.0.1:4173/>. With [`cloudflared`](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/) installed it also opens a quick tunnel and prints a public `trycloudflare.com` URL, which needs no Cloudflare account and changes on every start. `pnpm demo -- --pages` also publishes the page to Cloudflare Pages as the `coinflip` project after `npx wrangler login`. Either URL works only while the demo is running, because the desk, oracle and settler run on this machine. `--no-tunnel` serves locally only.
 
 Keys, data and logs live in `~/.coinflip-demo`; delete it to start over with a new beacon and desk. The demo listens on the same nostr relay as the hosted services, so its oracle and settler also see their positions and skip any vault bound to another beacon.
 
