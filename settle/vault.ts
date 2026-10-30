@@ -7,7 +7,8 @@ import { PRICE_MAX } from "../protocol/constants.ts";
 import { bindContracts, type Terms } from "../protocol/contracts.ts";
 import { buildSettle, submit } from "../protocol/cospend.ts";
 import { bytesToHex } from "../protocol/hex.ts";
-import { vaultProgram } from "../protocol/programs.ts";
+import type { Kind } from "../protocol/constants.ts";
+import { vaultProgramFor } from "../protocol/programs.ts";
 import type { BeaconSpec } from "./oracle.ts";
 
 export type ChainCoin = {
@@ -59,7 +60,7 @@ export function slotPrice(state: Uint8Array, expiry: bigint): bigint | null {
 
 /** Payout outputs after the beacon continuation. Amounts sum to the locked coin. */
 export function settlePayouts(input: {
-  kind: 0 | 1;
+  kind: Kind;
   price: bigint;
   strike: bigint;
   collateral: bigint;
@@ -139,7 +140,7 @@ function liveBeacon(coins: readonly ChainCoin[], txs: readonly string[]): { coin
 
 /**
  * Settle one vault. The price is the fixing in the beacon coin's state packet,
- * which is what `OptionVault.settle` reads. One beacon coin means one settle
+ * which is what `OptionVault.settle` and `PredictVault.settle` read. One beacon coin means one settle
  * at a time; the caller refetches the coin for the next vault.
  */
 export async function settleQuote(env: {
@@ -220,7 +221,7 @@ export async function settleQuote(env: {
   });
   if ("error" in payout) throw new Error(payout.error);
 
-  const script = new arkade.ArkadeProgramScript(vaultProgram(), bound.vault, {
+  const script = new arkade.ArkadeProgramScript(vaultProgramFor(env.terms.kind), bound.vault, {
     serverKey: env.serverKey,
     emulatorKey: env.emulatorKey,
   });

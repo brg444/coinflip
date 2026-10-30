@@ -1,0 +1,120 @@
+pragma arkade ^0.1.0;
+
+// All-or-nothing call on where BTC closes: higher (kind 2) or lower (kind 3)
+// than a line. The settlement price comes from the same AttestationBeacon
+// OptionVault reads, spent in the same transaction.
+//
+// The desk is the writer and funds `collateral`, the payout. The holder paid
+// the stake to the desk when the intent filled. Settle spends this coin as
+// input 0 and the beacon as input 1. Output 0 is the beacon's continuation,
+// with readFee sats of this coin added to it. Payouts start at output 1 and
+// sum to the locked value minus readFee.
+//
+// The settlement price is the newest fixing whose key equals `expiry` in the
+// beacon state packet, the first 8 bytes of that slot's value, in USD cents.
+//   higher: ST >  K -> holder gets the collateral, else 0
+//   lower:  ST <  K -> holder gets the collateral, else 0
+// A close exactly on the line pays the writer for both kinds.
+// A leg of DUST sats or less is folded into the other output.
+//
+// Spend paths: settle (anyone, once the emulator clock reaches expiry), close
+// (writer and holder together), unilateral (writer, after CSV). Same as
+// OptionVault; only the payoff differs.
+
+contract PredictVault(
+  int kind,
+  pubkey writerPk,
+  pubkey holderPk,
+  bytes32 writerScript,
+  bytes32 holderScript,
+  int strike,
+  int collateral,
+  int expiry,
+  bytes32 beaconTxid,
+  int beaconGidx,
+  int readFee,
+  int exit
+) {
+  const int DUST = 330;
+  const int PRICE_MAX = 1000000000;
+  const int Q_MAX = 1000000000;
+  const int STATE = 32;
+  const int SIZE = 329;
+
+  function settle() {
+    require(kind == 2 || kind == 3, "kind");
+    require(strike > 0, "strike");
+    require(strike <= PRICE_MAX, "strike cap");
+    require(collateral > DUST, "collateral");
+    require(collateral <= Q_MAX, "collateral cap");
+    require(checkTime(expiry), "before expiry");
+    require(this.activeInputIndex == 0, "vault is input 0");
+    require(tx.numInputs >= 2, "vault and beacon");
+    require(tx.inputs[1].assets.lookup(beaconTxid, beaconGidx) == 1, "beacon");
+
+    bytes state = tx.inputs[1].packet(STATE);
+    require(size(state) == SIZE, "state size");
+    require(substr(state, 0, 1) == 0x01, "state version");
+
+    int st = 0;
+    int found = 0;
+    int[8] slots = [9, 49, 89, 129, 169, 209, 249, 289];
+    for (i, offset) in slots {
+      if (found == 0 && substr(state, offset, 8) == num2bin(expiry, 8)) {
+        st = bin2num(substr(state, (offset + 8), 8));
+        found = 1;
+      }
+    }
+    require(found == 1, "no fixing for expiry");
+    require(st > 0, "price");
+    require(st <= PRICE_MAX, "price cap");
+
+    int ph = 0;
+    if (kind == 2) {
+      if (st > strike) {
+        ph = collateral;
+      }
+    }
+    if (kind == 3) {
+      if (st < strike) {
+        ph = collateral;
+      }
+    }
+
+    int locked = tx.input.current.value;
+    require(locked >= collateral, "underfunded");
+    require(readFee >= 0, "fee");
+    require(locked >= readFee, "fee");
+    int pot = locked - readFee;
+    int phPay = ph;
+    if (phPay > pot) {
+      phPay = pot;
+    }
+    int writerAmt = pot - phPay;
+
+    if (phPay > DUST && writerAmt > DUST) {
+      require(tx.outputs[1].value >= phPay, "holder short");
+      require(tx.outputs[1].scriptPubKey == holderScript, "holder script");
+      require(tx.outputs[2].value >= writerAmt, "writer short");
+      require(tx.outputs[2].scriptPubKey == writerScript, "writer script");
+    }
+    if (phPay <= DUST) {
+      require(tx.outputs[1].value >= pot, "writer short");
+      require(tx.outputs[1].scriptPubKey == writerScript, "writer script");
+    }
+    if (writerAmt <= DUST && phPay > DUST) {
+      require(tx.outputs[1].value >= pot, "holder short");
+      require(tx.outputs[1].scriptPubKey == holderScript, "holder script");
+    }
+  }
+
+  function close(signature writerSig, signature holderSig) {
+    require(checkSig(writerSig, writerPk), "writer");
+    require(checkSig(holderSig, holderPk), "holder");
+  }
+
+  function unilateral(signature writerSig) tapscript {
+    require(older(exit));
+    require(checkSig(writerSig, writerPk));
+  }
+}

@@ -10,7 +10,7 @@
     "dev": "node scripts/dev.mjs",
     "build": "node scripts/build.mjs",
     "check": "node scripts/check.mjs",
-    "test": "node --experimental-strip-types --test app/settle-math.test.mjs app/account.test.mjs app/wallet-link.test.mjs app/src/browser-crypto.test.ts app/src/restore.test.ts app/src/position-status.test.ts protocol/protocol.test.ts protocol/lifecycle.test.ts protocol/intent-state.test.ts protocol/deribit.test.ts protocol/beacon.test.ts protocol/sqlite-storage.test.ts oracle/service.test.ts oracle/preview.test.ts desk/book.test.ts desk/digest.test.ts desk/fill.test.ts desk/finalize.test.ts settle/settle.test.ts viz/flow.test.mjs && pnpm check",
+    "test": "node --experimental-strip-types --test app/settle-math.test.mjs app/account.test.mjs app/wallet-link.test.mjs app/src/browser-crypto.test.ts app/src/restore.test.ts app/src/position-status.test.ts protocol/protocol.test.ts protocol/lifecycle.test.ts protocol/intent-state.test.ts protocol/deribit.test.ts protocol/beacon.test.ts protocol/sqlite-storage.test.ts oracle/service.test.ts oracle/preview.test.ts desk/book.test.ts desk/digest.test.ts desk/fill.test.ts desk/finalize.test.ts settle/settle.test.ts settle/predict.test.ts viz/flow.test.mjs && pnpm check",
     "settle": "node --experimental-strip-types settle/main.ts",
     "desk": "node --experimental-strip-types --experimental-eventsource desk/main.ts",
     "oracle:page": "esbuild oracle/page.ts --bundle --format=esm --platform=browser --outfile=oracle/page.js --log-level=warning",

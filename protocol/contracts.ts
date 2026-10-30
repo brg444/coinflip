@@ -1,12 +1,13 @@
 import { arkade, DefaultVtxo, networks, RestArkProvider } from "@arkade-os/sdk";
 
 import type { BeaconId } from "./beacon-id.ts";
-import { ARK_URL, EXIT } from "./constants.ts";
+import { ARK_URL, EXIT, isPredict, type Kind } from "./constants.ts";
 import { bytesToHex, hexToBytes, xOnly } from "./hex.ts";
-import { intentProgram, swapProgram, vaultProgram } from "./programs.ts";
+import { intentProgram, swapProgram, vaultProgramFor } from "./programs.ts";
 
 export type Terms = {
-  kind: 0 | 1;
+  /** 0 covered call, 1 limited put: the user writes. 2 higher, 3 lower: the user holds. */
+  kind: Kind;
   strike: bigint;
   collateral: bigint;
   premium: bigint;
@@ -17,6 +18,8 @@ export type Terms = {
   /** Taproot output key of the writer's Arkade address. Premium and settlement pay this key. */
   payoutKey?: Uint8Array;
   holderPk: Uint8Array;
+  /** Taproot output key of the bettor's Arkade address. A predict payout and a refund pay this key. */
+  holderPayoutKey?: Uint8Array;
   /** Identity asset of the AttestationBeacon that settle reads. */
   beacon: BeaconId;
   /** Sats this settle leaves on the beacon. Must match the beacon's readFee. */
@@ -30,6 +33,10 @@ export type Bound = {
   vaultAddress: string;
   writerPkScript: Uint8Array;
   holderPkScript: Uint8Array;
+  /** The page's side: the writer for options, the holder for predict. Refunds pay this. */
+  userPkScript: Uint8Array;
+  /** The desk's side: the holder for options, the writer for predict. Fills pay this. */
+  solverPkScript: Uint8Array;
   vaultPkScript: Uint8Array;
   intentPkScript: Uint8Array;
   writerProgram: Uint8Array;
@@ -82,8 +89,13 @@ export function addressOf(script: { address: (hrp: string, server: Uint8Array) =
 }
 
 /**
- * OptionVault and OptionIntent for one quote. The page and the desk both call
+ * The vault and OptionIntent for one quote. The page and the desk both call
  * this. A quote whose addresses differ from this derivation is refused.
+ *
+ * Options (kinds 0 and 1) are intent side 0: the user is the writer and locks
+ * the notional, the desk pays the premium. Predict (kinds 2 and 3) is side 1:
+ * the user is the holder and pays the stake as the premium, the desk is the
+ * writer and funds the payout as the collateral of a PredictVault.
  */
 export function bindContracts(terms: Terms): Bound {
   const serverKey = xOnly(terms.serverKey);
@@ -94,8 +106,9 @@ export function bindContracts(terms: Terms): Bound {
   }
   if (terms.beacon.txid.length !== 32) throw new Error("beacon txid must be 32 bytes");
 
+  const predict = isPredict(terms.kind);
   const writer = terms.payoutKey ? directPayout(terms.payoutKey) : payoutVtxo(writerPk, serverKey, terms.exit);
-  const holder = payoutVtxo(holderPk, serverKey, terms.exit);
+  const holder = terms.holderPayoutKey ? directPayout(terms.holderPayoutKey) : payoutVtxo(holderPk, serverKey, terms.exit);
   const keys = { serverKey, emulatorKey: terms.emulatorKey };
 
   const vaultArgs: Record<string, bigint | Uint8Array> = {
@@ -113,14 +126,16 @@ export function bindContracts(terms: Terms): Bound {
     exit: terms.exit,
     server: serverKey,
   };
-  const vaultScript = new arkade.ArkadeProgramScript(vaultProgram(), vaultArgs, keys);
+  const vaultScript = new arkade.ArkadeProgramScript(vaultProgramFor(terms.kind), vaultArgs, keys);
 
+  const user = predict ? { pk: holderPk, program: holder } : { pk: writerPk, program: writer };
+  const solver = predict ? writer : holder;
   const intentArgs: Record<string, bigint | Uint8Array> = {
-    userPk: writerPk,
-    userScript: writer.tweakedPublicKey,
-    solverScript: holder.tweakedPublicKey,
+    userPk: user.pk,
+    userScript: user.program.tweakedPublicKey,
+    solverScript: solver.tweakedPublicKey,
     optionScript: vaultScript.tweakedPublicKey,
-    side: 0n,
+    side: predict ? 1n : 0n,
     collateral: terms.collateral,
     premium: terms.premium,
     deadline: terms.deadline,
@@ -134,6 +149,8 @@ export function bindContracts(terms: Terms): Bound {
     vaultAddress: addressOf(vaultScript, serverKey),
     writerPkScript: writer.pkScript,
     holderPkScript: holder.pkScript,
+    userPkScript: user.program.pkScript,
+    solverPkScript: solver.pkScript,
     vaultPkScript: vaultScript.pkScript,
     intentPkScript: intentScript.pkScript,
     writerProgram: writer.tweakedPublicKey,

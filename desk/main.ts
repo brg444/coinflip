@@ -18,8 +18,11 @@ import {
   DEFAULT_RELAYS,
   EMULATOR_URL,
   EXIT,
+  isPredict,
   LOCK_S,
   PAIR,
+  PREDICT_EDGE,
+  PREDICT_LOCK_S,
   QUOTE_TTL_S,
 } from "../protocol/constants.ts";
 import { assertServerExit, bindContracts, directPayoutKey, payoutVtxo, type Terms } from "../protocol/contracts.ts";
@@ -27,19 +30,22 @@ import { bytesToHex, hexToBytes } from "../protocol/hex.ts";
 import { networkByName } from "../protocol/network.ts";
 import { intentProgram } from "../protocol/programs.ts";
 import {
+  isPredictRequest,
   parsePosition,
+  payoutRefusal,
   premiumRefusal,
   requestRefusal,
   type OptionPosition,
+  type PredictRequestProfile,
   type RfqQuote,
   type RfqRequest,
   type RfqStatus,
 } from "../protocol/messages.ts";
 import { connectTransport, nostrPubkey, type Incoming } from "../protocol/nostr.ts";
-import { deribitPremium, fetchSurface, surfaceStatus } from "../protocol/deribit.ts";
-import { premiumSats, quotedPremium } from "../protocol/pricing.ts";
+import { deribitMultiplier, deribitPremium, fetchSurface, surfaceStatus } from "../protocol/deribit.ts";
+import { predictMultiplier, predictPayout, premiumSats, quotedPremium } from "../protocol/pricing.ts";
 import { openSqliteStorage, revision } from "../protocol/sqlite-storage.ts";
-import { Book, hasBeacon, openPremium, pageQuotes, quoteCounts, type QuoteFilter, type QuoteRow } from "./book.ts";
+import { Book, hasBeacon, openPremium, outlay, pageQuotes, quoteCounts, type QuoteFilter, type QuoteRow } from "./book.ts";
 import { countFill, countQuote, emptyHour, hourLine, msUntilNextHour } from "./digest.ts";
 import { finalizeDeskSpends } from "./finalize.ts";
 import { fillQuote } from "./fill.ts";
@@ -59,6 +65,7 @@ import { spotCents } from "./spot.ts";
  *   DESK_STRIKE_CAP per-strike collateral cap in sats. Default 1 BTC
  *   DESK_TOTAL_CAP  total collateral cap in sats. Default 5 BTC
  *   DESK_VOL        optional vol override. Default is the Deribit mark.
+ *   DESK_EDGE       predict: the desk's share of a fair price. Default 0.05 (1.90× at even odds)
  *   DESK_LOG        set to debug to print each quote. Default is one line per hour.
  */
 
@@ -93,6 +100,8 @@ if (volOverride != null && !(volOverride > 0 && volOverride < 5)) {
   throw new Error("DESK_VOL must be a vol between 0 and 5");
 }
 if (!Number.isInteger(port) || port < 1) throw new Error("PORT");
+const edge = process.env.DESK_EDGE?.trim() ? Number(process.env.DESK_EDGE) : PREDICT_EDGE;
+if (!(edge >= 0 && edge < 0.5)) throw new Error("DESK_EDGE must be a share between 0 and 0.5");
 
 const identity = SingleKey.fromHex(deskKeyHex);
 const book = await Book.open(dataDir);
@@ -210,6 +219,7 @@ function termsFor(row: QuoteRow): Terms {
     writerPk: hexToBytes(row.writerPubkey),
     payoutKey: directPayoutKey(row.writerPubkey, row.writerPkScript),
     holderPk: hexToBytes(row.holderPubkey),
+    holderPayoutKey: row.holderPkScript ? directPayoutKey(row.holderPubkey, row.holderPkScript) : undefined,
     beacon: beaconIdOf(asset.AssetId.create(row.beaconTxid, row.beaconGidx)),
     readFee: BEACON_READ_FEE,
     serverKey: client.serverKey,
@@ -219,6 +229,29 @@ function termsFor(row: QuoteRow): Terms {
 
 function quoteMessage(row: QuoteRow): RfqQuote {
   const bound = bindContracts(termsFor(row));
+  if (isPredict(row.kind)) {
+    // The bettor sent the stake as the amount. The desk answers with the payout it locks.
+    return {
+      v: 1,
+      type: "rfq_quote",
+      rfq_id: row.rfqId,
+      pair: PAIR,
+      from_amount: row.premium,
+      to_amount: row.collateral,
+      solver_pubkey: row.writerPubkey,
+      valid_until: row.validUntil,
+      profile: {
+        writer_pubkey: row.writerPubkey,
+        writer_pk_script: bytesToHex(bound.writerPkScript),
+        beacon_txid: row.beaconTxid,
+        beacon_gidx: row.beaconGidx,
+        deadline: row.deadline,
+        exit: row.exit,
+        intent_address: row.intentAddress,
+        vault_address: row.vaultAddress,
+      },
+    };
+  }
   return {
     v: 1,
     type: "rfq_quote",
@@ -245,6 +278,124 @@ async function refuse(to: string, rfqId: string, reason: string) {
   await transport.publish(to, { v: 1, type: "rfq_refusal", rfq_id: rfqId, reason });
 }
 
+/** Register the quote's intent, then answer. Shared by options and predict. */
+async function offer(row: QuoteRow, from: string) {
+  if (!book.hold(row, caps, row.createdAt)) {
+    await refuse(from, row.rfqId, "exposure");
+    return;
+  }
+  await book.save();
+  try {
+    await track(row);
+  } catch (err) {
+    console.error("register", row.rfqId, err instanceof Error ? err.message : err);
+    book.mark(row.rfqId, "expired");
+    await book.save();
+    await refuse(from, row.rfqId, "register");
+    return;
+  }
+  await transport.publish(from, quoteMessage(row));
+  countQuote(hour);
+  if (process.env.DESK_LOG?.trim() === "debug") {
+    console.log("quote", row.rfqId, row.kind, row.premium, row.collateral, row.intentAddress);
+  }
+}
+
+/**
+ * Predict: the bettor holds and pays the stake. The desk writes, quotes the
+ * multiplier and funds the payout. The lock is short, so the bettor cannot
+ * watch most of the window before paying.
+ */
+async function onPredict(message: RfqRequest & { profile: PredictRequestProfile }, from: string, now: number) {
+  let tick;
+  try {
+    tick = await spotCents();
+    spot = tick;
+  } catch {
+    await refuse(from, message.rfq_id, "spot unavailable");
+    return;
+  }
+  const kind = message.profile.kind;
+  let multiplier: number | null;
+  if (volOverride != null) {
+    multiplier = predictMultiplier({
+      kind,
+      spotCents: Number(tick.cents),
+      lineCents: message.profile.strike,
+      years: Math.max(message.profile.expiry - now, 1) / (365 * 24 * 60 * 60),
+      vol: volOverride,
+      edge,
+    });
+  } else {
+    let points;
+    try {
+      points = await fetchSurface();
+    } catch {
+      await refuse(from, message.rfq_id, "deribit unavailable");
+      return;
+    }
+    multiplier = deribitMultiplier({
+      kind,
+      lineCents: message.profile.strike,
+      expiry: message.profile.expiry,
+      now,
+      spotCents: Number(tick.cents),
+      points,
+      edge,
+    });
+  }
+  if (multiplier == null) {
+    await refuse(from, message.rfq_id, "line");
+    return;
+  }
+  const stake = BigInt(message.amount);
+  const payout = predictPayout(stake, multiplier);
+  const bad = payoutRefusal(payout, stake, BEACON_READ_FEE);
+  if (bad) {
+    await refuse(from, message.rfq_id, bad);
+    return;
+  }
+  if (balance < openPremium(book.list(), now) + payout) await refreshFloat();
+  if (balance < openPremium(book.list(), now) + payout) {
+    await refuse(from, message.rfq_id, "float short");
+    return;
+  }
+  const row: QuoteRow = {
+    rfqId: message.rfq_id,
+    collateral: payout.toString(),
+    premium: stake.toString(),
+    kind,
+    strike: String(message.profile.strike),
+    expiry: message.profile.expiry,
+    deadline: now + PREDICT_LOCK_S,
+    validUntil: now + QUOTE_TTL_S,
+    exit: Number(EXIT),
+    writerPubkey: bytesToHex(holderPk),
+    writerPkScript: bytesToHex(deskScript.pkScript),
+    holderPubkey: message.profile.holder_pubkey,
+    holderPkScript: message.profile.holder_pk_script,
+    beaconTxid: beaconDisplay.txid,
+    beaconGidx: beaconDisplay.gidx,
+    intentAddress: "",
+    vaultAddress: "",
+    status: "open",
+    createdAt: now,
+    clientPubkey: from,
+  };
+  const bound = bindContracts(termsFor(row));
+  if (bytesToHex(bound.holderPkScript) !== message.profile.holder_pk_script) {
+    await refuse(from, message.rfq_id, "holder script");
+    return;
+  }
+  if (bytesToHex(bound.writerPkScript) !== row.writerPkScript) {
+    await refuse(from, message.rfq_id, "desk script");
+    return;
+  }
+  row.intentAddress = bound.intentAddress;
+  row.vaultAddress = bound.vaultAddress;
+  await offer(row, from);
+}
+
 async function onRequest(message: RfqRequest, from: string) {
   const now = Math.floor(Date.now() / 1000);
   const existing = book.get(message.rfq_id);
@@ -259,6 +410,11 @@ async function onRequest(message: RfqRequest, from: string) {
     await refuse(from, message.rfq_id, bad);
     return;
   }
+  if (isPredictRequest(message.profile)) {
+    await onPredict(message as RfqRequest & { profile: PredictRequestProfile }, from, now);
+    return;
+  }
+  const profile = message.profile;
   let tick;
   try {
     tick = await spotCents();
@@ -269,11 +425,11 @@ async function onRequest(message: RfqRequest, from: string) {
   }
   let sats: bigint;
   if (volOverride != null) {
-    const years = (message.profile.expiry - now) / (365 * 24 * 60 * 60);
+    const years = (profile.expiry - now) / (365 * 24 * 60 * 60);
     sats = premiumSats({
-      kind: message.profile.kind,
+      kind: profile.kind,
       spotCents: Number(tick.cents),
-      strikeCents: message.profile.strike,
+      strikeCents: profile.strike,
       years,
       collateralSats: BigInt(message.amount),
       vol: volOverride,
@@ -287,9 +443,9 @@ async function onRequest(message: RfqRequest, from: string) {
       return;
     }
     const priced = deribitPremium({
-      kind: message.profile.kind,
-      strikeUsd: message.profile.strike / 100,
-      expiry: message.profile.expiry,
+      kind: profile.kind,
+      strikeUsd: profile.strike / 100,
+      expiry: profile.expiry,
       now,
       collateralSats: BigInt(message.amount),
       spotUsd: Number(tick.cents) / 100,
@@ -301,7 +457,7 @@ async function onRequest(message: RfqRequest, from: string) {
     }
     sats = priced.sats;
   }
-  sats = quotedPremium(sats, message.profile.expiry, now);
+  sats = quotedPremium(sats, profile.expiry, now);
   const dust = premiumRefusal(sats, BigInt(message.amount));
   if (dust) {
     await refuse(from, message.rfq_id, dust);
@@ -317,14 +473,14 @@ async function onRequest(message: RfqRequest, from: string) {
     rfqId: message.rfq_id,
     collateral: message.amount,
     premium: sats.toString(),
-    kind: message.profile.kind,
-    strike: String(message.profile.strike),
-    expiry: message.profile.expiry,
+    kind: profile.kind,
+    strike: String(profile.strike),
+    expiry: profile.expiry,
     deadline,
     validUntil: now + QUOTE_TTL_S,
     exit: Number(EXIT),
-    writerPubkey: message.profile.writer_pubkey,
-    writerPkScript: message.profile.writer_pk_script,
+    writerPubkey: profile.writer_pubkey,
+    writerPkScript: profile.writer_pk_script,
     holderPubkey: bytesToHex(holderPk),
     beaconTxid: beaconDisplay.txid,
     beaconGidx: beaconDisplay.gidx,
@@ -335,31 +491,13 @@ async function onRequest(message: RfqRequest, from: string) {
     clientPubkey: from,
   };
   const bound = bindContracts(termsFor(row));
-  if (bytesToHex(bound.writerPkScript) !== message.profile.writer_pk_script) {
+  if (bytesToHex(bound.writerPkScript) !== profile.writer_pk_script) {
     await refuse(from, message.rfq_id, "writer script");
     return;
   }
   row.intentAddress = bound.intentAddress;
   row.vaultAddress = bound.vaultAddress;
-  if (!book.hold(row, caps, now)) {
-    await refuse(from, message.rfq_id, "exposure");
-    return;
-  }
-  await book.save();
-  try {
-    await track(row);
-  } catch (err) {
-    console.error("register", row.rfqId, err instanceof Error ? err.message : err);
-    book.mark(row.rfqId, "expired");
-    await book.save();
-    await refuse(from, message.rfq_id, "register");
-    return;
-  }
-  await transport.publish(from, quoteMessage(row));
-  countQuote(hour);
-  if (process.env.DESK_LOG?.trim() === "debug") {
-    console.log("quote", row.rfqId, row.premium, row.intentAddress);
-  }
+  await offer(row, from);
 }
 
 async function onStatus(rfqId: string, from: string) {
@@ -402,6 +540,7 @@ function filledPosition(row: QuoteRow): OptionPosition | null {
     writer_pubkey: row.writerPubkey,
     writer_pk_script: row.writerPkScript,
     holder_pubkey: row.holderPubkey,
+    ...(isPredict(row.kind) ? { holder_pk_script: row.holderPkScript } : {}),
     beacon_txid: row.beaconTxid,
     beacon_gidx: row.beaconGidx,
     vault_address: row.vaultAddress,
@@ -554,7 +693,8 @@ async function pump() {
             const stuck = book.get(row.rfqId);
             if (stuck) delete stuck.fillTxid;
           }
-          if (fresh) countFill(hour, BigInt(row.premium), BigInt(row.collateral));
+          // A prediction's stake is paid to the desk, not by it.
+          if (fresh) countFill(hour, isPredict(row.kind) ? 0n : BigInt(row.premium), BigInt(row.collateral));
           console.log("filled", row.rfqId, outcome.txid ?? "");
           void announceFilled();
           await refreshFloat();
@@ -565,7 +705,7 @@ async function pump() {
         } else if (outcome.result === "short") {
           if (!shortLogged.has(row.rfqId)) {
             shortLogged.add(row.rfqId);
-            console.error("float short", row.rfqId, "have", balance.toString(), "need", row.premium);
+            console.error("float short", row.rfqId, "have", balance.toString(), "need", outlay(row).toString());
           }
         }
       } catch (err) {

@@ -1,4 +1,5 @@
-import { bsCall, bsPut } from "./pricing.ts";
+import type { PredictKind } from "./constants.ts";
+import { bsCall, bsPut, predictMultiplier } from "./pricing.ts";
 
 /**
  * Deribit BTC option marks, in BTC per 1 BTC of notional.
@@ -158,6 +159,43 @@ export function deribitPremium(input: {
   const sats = BigInt(Math.max(0, Math.round(mark * Number(input.collateralSats))));
   const usd = mark * (Number(input.collateralSats) / 1e8) * input.spotUsd;
   return { markBtc: mark, iv, sats, usd };
+}
+
+/**
+ * Annualized vol for a window of minutes: the at-the-money call IV of the
+ * nearest listed expiry at least six hours out. A daily that is about to
+ * expire has an IV that says little about the next five minutes.
+ */
+export function predictVol(points: SurfacePoint[], spotUsd: number, now: number): number | null {
+  const calls = points.filter((point) => point.call && point.expiry >= now + 6 * 3600);
+  if (!calls.length || !(spotUsd > 0)) return null;
+  const nearest = Math.min(...calls.map((point) => point.expiry));
+  const at = atExpiry(calls, nearest, spotUsd, now, spotUsd);
+  if (!at || !(at.iv > 0)) return null;
+  return Math.min(2, Math.max(0.2, at.iv));
+}
+
+/** The multiplier the page estimates and the desk quotes, from the Deribit surface. */
+export function deribitMultiplier(input: {
+  kind: PredictKind;
+  lineCents: number;
+  expiry: number;
+  now: number;
+  spotCents: number;
+  points: SurfacePoint[];
+  vol?: number | null;
+  edge?: number;
+}): number | null {
+  const vol = input.vol ?? predictVol(input.points, input.spotCents / 100, input.now);
+  if (vol == null) return null;
+  return predictMultiplier({
+    kind: input.kind,
+    spotCents: input.spotCents,
+    lineCents: input.lineCents,
+    years: Math.max(input.expiry - input.now, 1) / YEAR,
+    vol,
+    edge: input.edge,
+  });
 }
 
 let cache: { at: number; points: SurfacePoint[] } | null = null;
