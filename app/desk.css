@@ -631,6 +631,35 @@ button.chip:not(:disabled):hover { transform: translateY(-1px); }
   .btn.cta { width: 100%; }
 }
 
+
+/* pnpm demo: a pill in the bar, and a small panel under it for the two deposits */
+.setup-pill { display: inline-flex; align-items: center; gap: 8px; height: 40px; padding: 0 12px; flex: none; color: var(--ink2); background: var(--card); box-shadow: inset 0 0 0 1px var(--rule); font: 500 12.5px/1 var(--mono); white-space: nowrap; transition: color 180ms var(--ease-out), box-shadow 180ms var(--ease-out); }
+.setup-pill:hover, .setup-pill[aria-expanded="true"] { color: var(--ink); box-shadow: inset 0 0 0 1px var(--purple); }
+.setup-pill .dot { width: 7px; height: 7px; background: var(--purple); animation: blink 1.6s ease-in-out infinite; }
+@keyframes blink { 50% { opacity: .25; } }
+.setup-panel { position: fixed; z-index: 35; top: 108px; right: max(var(--gutter), calc((100vw - var(--shell)) / 2 + var(--gutter))); width: 360px; padding: 16px; background: var(--card); color: var(--ink); border-radius: 4px; box-shadow: var(--pop-shadow), inset 0 0 0 1px var(--card-edge); animation: pop-in 180ms var(--ease-out); }
+.setup-title { margin: 0 0 10px; font-weight: 600; font-size: 15px; letter-spacing: -.01em; }
+.setup-steps { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.setup-steps li { padding: 12px; background: var(--fill); }
+.setup-steps li.done { background: transparent; box-shadow: inset 0 0 0 1px var(--hairline); }
+.setup-steps .sub { margin: 4px 0 0; font-size: 13px; }
+.setup-head { display: flex; align-items: center; gap: 10px; font-size: 14.5px; }
+.setup-head b { font-weight: 600; }
+.setup-head .pill { margin-left: auto; height: 22px; font-size: 11.5px; }
+.setup-n { display: grid; place-items: center; width: 20px; height: 20px; background: var(--lav); color: var(--purple); font: 500 11.5px/1 var(--mono); }
+.setup-steps li.done .setup-n { background: var(--purple); color: var(--card); }
+.setup-addr { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
+.setup-addr code { flex: 1; min-width: 0; padding: 9px 10px; background: var(--card); box-shadow: inset 0 0 0 1px var(--rule); font: 400 12.5px/1.2 var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.setup-addr .btn.sm { height: 34px; padding: 0 12px; font-size: 11.5px; }
+.setup-bal { margin: 6px 0 0; color: var(--muted); font: 400 12px/1.4 var(--mono); }
+.setup-foot { margin: 12px 0 0; color: var(--muted); font-size: 13px; }
+.setup-foot .textbtn { font-size: 13px; }
+@media (max-width: 700px) {
+  .setup-pill { height: 36px; padding: 0 10px; }
+  .setup-pill .long { display: none; }
+  .setup-panel { position: fixed; top: auto !important; bottom: 0; left: 0; right: 0; width: auto; border-radius: 4px 4px 0 0; padding: 18px 16px calc(18px + env(safe-area-inset-bottom)); box-shadow: 0 0 0 100vmax var(--scrim); }
+}
+
 @media (max-width: 700px) {
   :root { --gutter: 16px; }
   .strip { font-size: 10px; letter-spacing: .05em; }

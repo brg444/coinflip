@@ -3,7 +3,12 @@
  * trusted by the browser, so this is a copy of GET /api/status on the
  * Mutinynet oracle. Replace it when that beacon changes.
  */
-export const LIVE_BEACON_STATUS = {
+declare const __COINFLIP_DEMO__: { beacon?: typeof PINNED_BEACON_STATUS } | null | undefined;
+
+/** `pnpm demo` swaps in its own oracle's status. Every other build uses the pinned one. */
+const demoBeacon = typeof __COINFLIP_DEMO__ !== "undefined" && __COINFLIP_DEMO__?.beacon ? __COINFLIP_DEMO__.beacon : null;
+
+const PINNED_BEACON_STATUS = {
   pubkeys: ["e96d459a88359d713db09e7b226644b84765ac33b0b84f4cb60bc9d39ffb5bbe"],
   assetId: "c919606acba781572d5f72e53ffc6d125c98fbbd36df69eaf6f9613bae25499d0000",
   issueTxid: "c919606acba781572d5f72e53ffc6d125c98fbbd36df69eaf6f9613bae25499d",
@@ -19,3 +24,5 @@ export const LIVE_BEACON_STATUS = {
     exit: 2048,
   },
 };
+
+export const LIVE_BEACON_STATUS = demoBeacon ?? PINNED_BEACON_STATUS;
