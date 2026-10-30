@@ -125,11 +125,11 @@ Keys, data and logs live in `~/.coinflip-demo`; delete it to start over with a n
 
 `coinflip.Dockerfile` runs the same system as `pnpm demo` on a server: the page, an oracle with its own beacon, a desk and a settler in one container, started with `pnpm demo -- --server`. Only the page port, 4173, is exposed. The services talk to each other on loopback inside the container, and their logs go to the container log with an `[oracle]`, `[desk]` or `[settler]` prefix as well as to `/data/logs`. It needs a volume at `/data`, which holds the keys, the beacon, the desk's book and the settler's progress. That volume has to outlive redeploys: a new one is a new beacon and a new, unfunded desk. The image has no secrets in it, since the keys are made on first start and stay in `/data/keys.json`.
 
-On Railway, `railway.toml` picks the Dockerfile, the health check and the restart policy. From a checkout, with the CLI logged in:
+On Railway, `railway.toml` sets the health check and the restart policy. Railway still builds the repository's own `Dockerfile` (the desk image) unless the service sets `RAILWAY_DOCKERFILE_PATH`, so the commands set it. From a checkout, with the CLI logged in:
 
 ```sh
 railway init --name coinflip
-railway add --service coinflip --variables PORT=4173
+railway add --service coinflip --variables PORT=4173 --variables RAILWAY_DOCKERFILE_PATH=coinflip.Dockerfile
 railway service link coinflip
 railway volume add --mount-path /data
 railway up --detach
