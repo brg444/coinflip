@@ -21,10 +21,19 @@ import {
   walletAppUrl,
   walletMessageTarget,
 } from "./src/wallet-link.ts";
-import { requestQuotes } from "./src/rfq.ts";
-import { btcUsdCents, deribitPremium, fetchSurface } from "../protocol/deribit.ts";
-import { BEACON_READ_FEE, QUOTE_TTL_S } from "../protocol/constants.ts";
-import { quotedPremium } from "../protocol/pricing.ts";
+import { requestPredictQuotes, requestQuotes } from "./src/rfq.ts";
+import { btcUsdCents, deribitMultiplier, deribitPremium, fetchSurface } from "../protocol/deribit.ts";
+import {
+  BEACON_READ_FEE,
+  isPredict,
+  PREDICT_GRID_S,
+  PREDICT_LOCK_S,
+  PREDICT_MIN_LEFT_S,
+  QUOTE_TTL_S,
+  STAKE_MAX,
+  STAKE_MIN,
+} from "../protocol/constants.ts";
+import { predictPayout, quotedPremium } from "../protocol/pricing.ts";
 import { bestQuote } from "./quote.js";
 import { PINNED_DESKS, RELAYS } from "./rfq-config.js";
 import { holderPayoff, settlementOutputs } from "./settle-math.js";
@@ -72,6 +81,20 @@ const state = {
   positions: loadPositions(),
   restored: [],
   selected: null,
+  /** Predict: what the sentence says, and the drawer's offer. */
+  bet: {
+    kind: 2,
+    stake: 50_000n,
+    step: 0,
+    close: 0,
+    open: "",
+    checkout: false,
+    agree: false,
+    offer: null,
+    quoting: false,
+    quoteNote: "",
+    fault: null,
+  },
 };
 
 let quoteGen = 0;
@@ -135,6 +158,11 @@ function persist() {
     writerKeep: p.writerKeep || "",
     deskTake: p.deskTake || "",
     settleCents: p.settleCents || "",
+    deskPkHex: p.deskPkHex || "",
+    holderAddress: p.holderAddress || "",
+    placedCents: p.placedCents || "",
+    windowMin: p.windowMin || 0,
+    ticks: Array.isArray(p.ticks) ? p.ticks : [],
   }));
   localStorage.setItem(STORE, JSON.stringify(rows));
 }
@@ -364,6 +392,7 @@ function progressSteps(status, received) {
 }
 
 function statusLabel(position) {
+  if (isPredict(position.kind)) return betStatusLabel(position);
   if (position.status === "locking") return position.walletTxid ? "Waiting for your BTC" : "Send your BTC";
   if (position.status === "deposited") return "Paying you";
   if (position.status === "settled" || settlementKnown(position)) return "Done";
@@ -740,9 +769,7 @@ function onPick(event) {
 function renderCheckout() {
   const open = state.checkout && state.view === "sell" && ready();
   $("checkout").hidden = !open;
-  $("scrim").hidden = !open;
-  document.body.classList.toggle("locked", open);
-  for (const id of ["top", "main", "note"]) $(id).inert = open;
+  syncScrim();
   if (!open) return;
   const t = terms();
   const { kind, line: k, size: q } = t;
@@ -845,6 +872,7 @@ function pageHash(view) {
   if (view === "connect") return "#/connect";
   if (view === "home") return state.selected ? `#/positions/${state.selected}` : "#/positions";
   if (view === "how") return "#/how";
+  if (view === "predict") return state.bet.kind === 3 ? "#/predict/lower" : "#/predict";
   return state.kind === 1 ? "#/quote/put" : "#/quote/call";
 }
 
@@ -855,19 +883,34 @@ function routeFromHash() {
   if (path.startsWith("/positions")) return { view: "home", kind: state.kind, id: path.slice("/positions/".length) || null };
   if (path.startsWith("/connect")) return { view: "connect", kind: state.kind };
   if (path === "/how" || path.startsWith("/how/")) return { view: "how", kind: state.kind };
+  if (path.startsWith("/predict/lower")) return { view: "predict", kind: 3 };
+  if (path.startsWith("/predict")) return { view: "predict", kind: 2 };
   return { view: "sell", kind: state.kind };
 }
 
+let lastCompose = "sell";
+
 function show(view, mode = "push") {
+  if (view === "sell" || view === "predict") lastCompose = view;
   state.view = view;
   $("connect").hidden = view !== "connect";
   $("home").hidden = view !== "home";
   $("sell").hidden = view !== "sell";
+  $("predict").hidden = view !== "predict";
   $("how").hidden = view !== "how";
   if (view !== "sell") {
     state.open = "";
     closeCheckout();
   }
+  if (view !== "predict") {
+    state.bet.open = "";
+    closeBet();
+  }
+  const predicting = view === "predict";
+  $("note-lead").textContent = predicting ? "Predictions are an educational demo" : "Arkade Options is an educational demo";
+  $("note-body").textContent = predicting
+    ? "built on the same contracts as Arkade Options: one price fixing, one vault, paid in sats."
+    : "showing that selling BTC options works on Arkade.";
   const next = pageHash(view);
   if (mode !== "quiet" && location.hash !== next) {
     if (mode === "replace") history.replaceState(null, "", next);
@@ -876,6 +919,11 @@ function show(view, mode = "push") {
   renderTop();
   if (view === "home") renderBlotter();
   if (view === "sell") renderSell();
+  if (view === "predict") {
+    renderPredict();
+    void loadHistory();
+  }
+  syncIndexPolling();
   if (view === "connect") {
     $("connect-current").hidden = !state.address;
     $("connect-address").textContent = shortAddress(state.address);
@@ -919,11 +967,15 @@ function renderBlotter() {
   host.replaceChildren();
   if (!rows.length) {
     host.append(el("p", "empty", state.address
-      ? "No positions yet. Lock some BTC and it shows up here."
+      ? "No positions yet. Lock some BTC or make a prediction and it shows up here."
       : "Connect your wallet to see your positions."));
     return;
   }
   for (const position of rows) {
+    if (isPredict(position.kind)) {
+      host.append(betRow(position));
+      continue;
+    }
     const row = el("a", "prow");
     row.href = `#/positions/${position.id}`;
     const icon = el("span", position.kind === 1 ? "kindico put" : "kindico");
@@ -955,6 +1007,11 @@ function sendClock(node) {
 }
 
 function renderPosition(p) {
+  if (isPredict(p.kind)) {
+    renderPrediction(p);
+    return;
+  }
+  optionChrome();
   const k = Number(p.strike) / 100;
   const q = p.collateral;
   const pay = p.premiumSats || 0n;
@@ -979,7 +1036,7 @@ function renderPosition(p) {
     acts.append(
       action("btn sm", "Reopen wallet", () => openWallet(p)),
       action("textbtn", "Copy payment link", (event) => {
-        void copyToClipboard(event.currentTarget, p.uri || paymentUri(p.address, p.collateral));
+        void copyToClipboard(event.currentTarget, p.uri || paymentUri(p.address, sendAmount(p)));
       }),
       action("textbtn", "Cancel", (event) => {
         void abortLock(p, event.currentTarget);
@@ -1077,7 +1134,7 @@ function renderPosition(p) {
 function canSettle(position) {
   if (position.restored) return false;
   if (position.status !== "filled") return false;
-  if (!position.vaultAddress || !position.holderPkHex || !position.beaconTxid) return false;
+  if (!position.vaultAddress || !(position.holderPkHex || position.deskPkHex) || !position.beaconTxid) return false;
   const expiry = Number(position.expiry) || 0;
   if (!expiry || expiry > Math.floor(Date.now() / 1000)) return false;
   if (position.settleTxid && position.settleTxid !== position.closeTxid) return false;
@@ -1095,7 +1152,7 @@ function settleFault(outcome) {
 
 async function settlePosition(position, button) {
   button.disabled = true;
-  button.textContent = "Paying out";
+  button.textContent = isPredict(position.kind) ? "Settling" : "Paying out";
   try {
     const outcome = await settleFromPage({
       ...(await fundRequest(position)),
@@ -1110,8 +1167,12 @@ async function settlePosition(position, button) {
     }
     position.status = "settled";
     position.settleTxid = outcome.txid;
-    if (outcome.writer != null) position.writerKeep = outcome.writer.toString();
-    if (outcome.holder != null) position.deskTake = outcome.holder.toString();
+    // `writerKeep` is what came back to this page's user: the writer of an
+    // option, the holder of a prediction.
+    const mineOut = isPredict(position.kind) ? outcome.holder : outcome.writer;
+    const deskOut = isPredict(position.kind) ? outcome.writer : outcome.holder;
+    if (mineOut != null) position.writerKeep = mineOut.toString();
+    if (deskOut != null) position.deskTake = deskOut.toString();
     if (outcome.price != null) position.settleCents = outcome.price.toString();
     persist();
     renderBlotter();
@@ -1124,7 +1185,7 @@ async function settlePosition(position, button) {
 
 function settleButton(position) {
   if (!canSettle(position)) return null;
-  return action("btn sm", "Pay out now", (event) => {
+  return action("btn sm", isPredict(position.kind) ? "Settle now" : "Pay out now", (event) => {
     void settlePosition(position, event.currentTarget);
   });
 }
@@ -1336,7 +1397,7 @@ function connectAddress() {
     state.address = saveAddress($("account-key").value);
     $("account-error").textContent = "";
     $("account-key").value = "";
-    show("sell");
+    show(lastCompose);
   } catch (err) {
     $("account-error").textContent = err instanceof Error ? err.message : "That address was not saved.";
   }
@@ -1369,6 +1430,21 @@ async function hydrateMissing() {
 }
 
 async function fundRequest(position) {
+  if (isPredict(position.kind)) {
+    return {
+      kind: position.kind,
+      strike: position.strike,
+      collateral: position.collateral,
+      premium: position.premiumSats,
+      expiry: position.expiry,
+      deadline: BigInt(position.deadline),
+      writerPkHex: position.deskPkHex,
+      holderAddress: position.holderAddress || position.payoutAddress,
+      beaconTxidHex: position.beaconTxid,
+      beaconGidx: position.beaconGidx,
+      exit: position.exit != null ? BigInt(position.exit) : undefined,
+    };
+  }
   const base = {
     kind: position.kind,
     strike: position.strike,
@@ -1466,7 +1542,8 @@ function applyChain(position, update) {
 function watchRow(position) {
   return {
     address: position.address,
-    writerAddress: position.writerAddress || position.payoutAddress || "",
+    side: isPredict(position.kind) ? 1 : 0,
+    writerAddress: position.writerAddress || position.holderAddress || position.payoutAddress || "",
     collateral: BigInt(position.collateral),
     premium: BigInt(position.premiumSats),
     deadline: Number(position.deadline),
@@ -1479,7 +1556,7 @@ let watchAbort = null;
 let watchKey = "";
 
 function startWatch() {
-  const rows = state.positions.filter((position) => position.address && position.writerAddress && !["refunded", "settled"].includes(position.status));
+  const rows = state.positions.filter((position) => position.address && (position.writerAddress || position.holderAddress) && !["refunded", "settled"].includes(position.status));
   const key = rows.map((position) => position.address).sort().join("|");
   if (key === watchKey) return;
   watchAbort?.abort();
@@ -1490,7 +1567,7 @@ function startWatch() {
   const watched = rows.map((position) => ({
     ...watchRow(position),
     register: async () => {
-      if (!position.holderPkHex || !position.beaconTxid) return "";
+      if (!(position.holderPkHex || position.deskPkHex) || !position.beaconTxid) return "";
       return registerIntent(await fundRequest(position));
     },
   }));
@@ -1505,7 +1582,9 @@ function startWatch() {
 function tick() {
   const now = Math.floor(Date.now() / 1000);
   document.querySelectorAll("[data-until]").forEach(sendClock);
+  document.querySelectorAll("[data-close]").forEach(closeClock);
   renderFoot();
+  betTick(now);
   for (const position of state.positions) {
     if (position.status !== "deposited" || !position.deadline || now < Number(position.deadline)) continue;
     if (!position.address || expiring.has(position.address)) continue;
@@ -1578,8 +1657,10 @@ function walletSentence(kind, detail) {
 function walletError(position, sentence, detail = "") {
   if (!sentence) {
     state.walletFault = null;
-    renderStatus(position ? $("status") : state.checkout ? $("checkout-status") : $("account-error"), "", "");
+    state.bet.fault = null;
+    renderStatus(position ? $("status") : state.checkout ? $("checkout-status") : state.bet.checkout ? $("bet-status") : $("account-error"), "", "");
     if (!position && state.checkout) renderFoot();
+    if (!position && state.bet.checkout) renderBetFoot();
     return;
   }
   const fault = { sentence, detail: clipDetail(detail) };
@@ -1592,12 +1673,17 @@ function walletError(position, sentence, detail = "") {
     renderFoot();
     return;
   }
+  if (state.bet.checkout) {
+    state.bet.fault = fault;
+    renderBetFoot();
+    return;
+  }
   renderStatus($("account-error"), fault.sentence, fault.detail);
 }
 
 function openWallet(position) {
   if (position && position.status !== "locking") return;
-  const request = position ? (position.uri || paymentUri(position.address, position.collateral)) : "";
+  const request = position ? (position.uri || paymentUri(position.address, sendAmount(position))) : "";
   const params = position ? { flow: "send", position: position.id } : { flow: "connect" };
   const back = pageCallback(location.href, params);
   if (!callbackAllowed(back)) {
@@ -1652,8 +1738,11 @@ function showWalletHandoff(handoff) {
     if (state.checkout) {
       renderCheckout();
       void askQuote();
+    } else if (state.bet.checkout) {
+      renderBet();
+      void askBet();
     } else {
-      show("sell");
+      show(lastCompose);
     }
   }
   if (handoff.kind === "sent" && handoff.txid) renderBlotter();
@@ -1701,6 +1790,1284 @@ function consumeWalletHandoff() {
   return false;
 }
 
+// ---------------------------------------------------------------------------
+// Predict: an all-or-nothing call on where BTC closes, against the desk.
+// The page holds and pays the stake; the desk writes and funds the payout.
+// ---------------------------------------------------------------------------
+
+const STAKES = [20_000n, 50_000n, 100_000n, 200_000n];
+/** Lines offered around the current price, in dollars. */
+const LINE_STEPS = [-100, -50, 0, 50, 100];
+/** A close is offered while the 60s lock, a minute of window and the round trip still fit. */
+const CLOSE_LEAD_S = PREDICT_LOCK_S + PREDICT_MIN_LEFT_S + 10;
+const INDEX_MS = 2_000;
+const TICKS_KEPT = 400;
+const DIR = { 2: "above", 3: "below" };
+const OTHER = { 2: "below", 3: "above" };
+
+let betGen = 0;
+let indexTimer = null;
+let ticksSavedAt = 0;
+/** Index prices this page has seen, newest last: [unix, cents]. */
+const seen = [];
+
+const localTime = (unix) => new Date(Number(unix) * 1000).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
+const utcTime = (unix) => `${hhmm(new Date(Number(unix) * 1000))} UTC`;
+const usdCents = (cents) => `$${usdFromCents(BigInt(cents))}`;
+const timesX = (m) => `${m.toFixed(2)}×`;
+const won = (payout) => payout - BEACON_READ_FEE;
+/** The review's units rule: sats under 0.001 BTC, ₿ at or above it. */
+const amount = (sats) => (sats < 100_000n ? `${int(sats)} sats` : `₿${fmtBtc(sats)}`);
+
+/** What the user sends: the stake for a prediction, the collateral for an option. */
+function sendAmount(position) {
+  return isPredict(position.kind) ? position.premiumSats : position.collateral;
+}
+
+/** The next closes on the 5-minute grid, then the quarter hours after them. */
+function closes(now = Math.floor(Date.now() / 1000)) {
+  const first = Math.ceil((now + CLOSE_LEAD_S) / PREDICT_GRID_S) * PREDICT_GRID_S;
+  const list = [0, 1, 2].map((i) => ({ unix: first + i * PREDICT_GRID_S, min: 5 }));
+  let quarter = Math.ceil((first + 3 * PREDICT_GRID_S) / 900) * 900;
+  while (list.length < 5) {
+    list.push({ unix: quarter, min: 15 });
+    quarter += 900;
+  }
+  return list;
+}
+
+function betClose() {
+  const list = closes();
+  if (!list.some((item) => item.unix === state.bet.close)) state.bet.close = list[0].unix;
+  return state.bet.close;
+}
+
+function betWindow(expiry) {
+  return closes().find((item) => item.unix === Number(expiry))?.min ?? 5;
+}
+
+const priced = () => state.spotCents != null && state.points != null;
+const spotDollars = () => Math.round(Number(state.spotCents) / 100);
+
+function betTerms() {
+  const line = spotDollars() + state.bet.step;
+  return {
+    kind: state.bet.kind,
+    line,
+    lineCents: BigInt(line) * 100n,
+    stake: state.bet.stake,
+    expiry: BigInt(betClose()),
+    step: state.bet.step,
+  };
+}
+
+function betMultiplier(kind, lineCents, expiry) {
+  if (!priced()) return null;
+  return deribitMultiplier({
+    kind,
+    lineCents: Number(lineCents),
+    expiry: Number(expiry),
+    now: Math.floor(Date.now() / 1000),
+    spotCents: Number(state.spotCents),
+    points: state.points,
+  });
+}
+
+/** Payout before the fee, or null when the desk would not quote it or it cannot beat the stake. */
+function betPayout(stake, multiplier) {
+  if (multiplier == null) return null;
+  return predictPayout(stake, multiplier);
+}
+
+const beats = (payout, stake) => payout != null && won(payout) > stake;
+
+function lineNote(step) {
+  if (step === 0) return "Current price";
+  return `$${Math.abs(step)} ${step > 0 ? "above" : "under"} current price`;
+}
+
+function lineTag(step) {
+  if (step === 0) return "now";
+  return `${step > 0 ? "+" : "−"}$${Math.abs(step)}`;
+}
+
+function closeClock(node) {
+  const left = Number(node.dataset.close) - Math.floor(Date.now() / 1000);
+  const text = left > 0 ? mmss(left) : "0:00";
+  node.textContent = node.dataset.form === "left" ? `${text} left` : `in ${text}`;
+}
+
+function clockEl(className, unix, form = "in") {
+  const node = el("span", className);
+  node.dataset.close = String(unix);
+  node.dataset.form = form;
+  closeClock(node);
+  return node;
+}
+
+function betSentenceInto(node, terms, tense) {
+  const lead = { now: "I bet", past: "You bet", none: "You were going to bet" }[tense];
+  node.replaceChildren(
+    `${lead} `,
+    el("span", "chip", `₿${fmtBtc(terms.stake)}`),
+    " that BTC closes ",
+    el("span", "chip", DIR[terms.kind]),
+    " ",
+    el("span", "chip", usd0(Number(terms.lineCents) / 100)),
+    " at ",
+    el("span", "chip", localTime(terms.expiry)),
+    ".",
+  );
+}
+
+function setCall(kind, mode) {
+  if (state.bet.kind !== kind) {
+    state.bet.kind = kind;
+    state.bet.open = "";
+    closeBet();
+    dropBet();
+  }
+  show("predict", mode);
+}
+
+function renderPredict() {
+  if (state.view !== "predict") return;
+  document.querySelectorAll("[data-call]").forEach((btn) => {
+    btn.setAttribute("aria-checked", String(Number(btn.dataset.call) === state.bet.kind));
+  });
+  const chip = (name) => document.querySelector(`[data-bchip="${name}"]`);
+  const ok = priced();
+  for (const name of ["stake", "dir", "line", "close"]) chip(name).disabled = !ok;
+  const coin = el("span", "btc", "₿");
+  coin.setAttribute("aria-hidden", "true");
+  chip("stake").replaceChildren(coin, fmtBtc(state.bet.stake));
+  chip("stake").setAttribute("aria-label", `Stake, ${fmtBtc(state.bet.stake)} BTC`);
+  chip("dir").textContent = DIR[state.bet.kind];
+  chip("dir").setAttribute("aria-label", `Closes ${DIR[state.bet.kind]}. Switch to ${OTHER[state.bet.kind]}`);
+  const expiry = betClose();
+  chip("close").replaceChildren(localTime(expiry), clockEl("delta", expiry));
+  chip("close").setAttribute("aria-label", `Close, ${localTime(expiry)}, ${utcTime(expiry)}`);
+  const see = $("bet-see");
+  const note = $("bet-estimate");
+  chip("line").classList.toggle("skel-chip", !ok);
+  if (!ok) {
+    chip("line").textContent = "$00,000";
+    document.querySelectorAll("[data-mult]").forEach((node) => {
+      node.textContent = "";
+    });
+    renderMarket();
+    note.textContent = state.loaded ? "We can’t get a fair price right now. Try again in a minute." : "Getting the current price…";
+    see.disabled = true;
+    see.textContent = "See what happens";
+    renderBetPop();
+    renderBet();
+    return;
+  }
+  const t = betTerms();
+  chip("line").replaceChildren(usd0(t.line), el("span", "delta", lineTag(t.step)));
+  chip("line").setAttribute("aria-label", `Line, ${usd0(t.line)}, ${lineNote(t.step).toLowerCase()}`);
+  const m = betMultiplier(t.kind, t.lineCents, t.expiry);
+  const payout = betPayout(t.stake, m);
+  document.querySelectorAll("[data-mult]").forEach((node) => {
+    const each = betMultiplier(Number(node.dataset.mult), t.lineCents, t.expiry);
+    node.textContent = each == null ? "" : timesX(each);
+  });
+  renderMarket();
+  if (beats(payout, t.stake)) {
+    note.replaceChildren("You win about ", el("b", "", `${int(won(payout))} sats`), ` if you’re right · ${timesX(m)} your stake, less the 1,000‑sat fee`);
+  } else if (m == null) {
+    note.textContent = "The desk doesn’t quote this line for this close. Pick one nearer the current price.";
+  } else {
+    note.textContent = `This wins about ${int(won(payout))} sats, which doesn’t beat your stake after the 1,000-sat fee. Bet more or pick a further line.`;
+  }
+  see.disabled = !beats(payout, t.stake);
+  see.textContent = `See what happens at ${localTime(t.expiry)}`;
+  renderBetPop();
+  renderBet();
+}
+
+function optionRow({ pick, on, label, note, side, off, tag, until }) {
+  const btn = el("button", on ? "on" : "");
+  btn.type = "button";
+  btn.dataset.pick = pick;
+  const left = el("span", "o-l");
+  const name = el("b", "", label);
+  if (tag) name.append(el("i", "tag", tag));
+  left.append(name);
+  if (note) left.append(el("small", "", note));
+  const right = until ? clockEl("o-r", until) : el("span", "o-r", side || "");
+  btn.append(left, right);
+  if (off) {
+    btn.className = "off";
+    btn.setAttribute("aria-disabled", "true");
+    btn.append(el("em", "", off));
+  } else {
+    btn.setAttribute("aria-pressed", String(on));
+  }
+  return btn;
+}
+
+/** The list under a chip. A choice the desk would not quote stays listed, greyed out, with the reason. */
+function renderBetPop(focus = false) {
+  const pop = $("bet-pop");
+  document.querySelectorAll("[data-bchip][aria-haspopup]").forEach((chip) => {
+    chip.setAttribute("aria-expanded", String(chip.dataset.bchip === state.bet.open));
+  });
+  if (!state.bet.open || state.view !== "predict" || !priced()) {
+    pop.hidden = true;
+    return;
+  }
+  const had = pop.contains(document.activeElement) ? document.activeElement.dataset.pick || document.activeElement.id : "";
+  const typedBefore = $("bet-typed-input")?.value ?? "";
+  const t = betTerms();
+  const at = localTime(t.expiry);
+  const parts = [];
+  let title;
+  let hint;
+  if (state.bet.open === "stake") {
+    title = "How much BTC to bet?";
+    hint = `The 1,000-sat price-check fee comes out of the payout at ${at}.`;
+    const m = betMultiplier(t.kind, t.lineCents, t.expiry);
+    const list = el("div", "opts");
+    for (const stake of STAKES) {
+      const payout = betPayout(stake, m);
+      const ok = beats(payout, stake);
+      list.append(optionRow({
+        pick: `stake:${stake}`,
+        on: stake === t.stake,
+        label: `${fmtBtc(stake)} BTC`,
+        note: `${int(stake)} sats`,
+        side: ok ? `Win about ${int(won(payout))} sats` : "",
+        off: ok ? "" : m == null
+          ? "The desk doesn’t quote this line."
+          : `Wins ${int(won(payout))} sats after the fee, not more than you put in.`,
+      }));
+    }
+    const typed = el("form", "typed");
+    typed.id = "bet-typed";
+    const label = el("label", "", "Or type an amount");
+    const field = el("span", "field");
+    const sign = el("span", "btc", "₿");
+    sign.setAttribute("aria-hidden", "true");
+    const input = document.createElement("input");
+    input.id = "bet-typed-input";
+    input.inputMode = "decimal";
+    input.autocomplete = "off";
+    input.spellcheck = false;
+    input.placeholder = fmtBtc(t.stake);
+    input.value = typedBefore;
+    input.setAttribute("aria-describedby", "bet-typed-error");
+    field.append(sign, input, el("span", "unit", "BTC"));
+    label.append(field);
+    const error = el("p", "error");
+    error.id = "bet-typed-error";
+    error.setAttribute("role", "status");
+    const use = el("button", "btn sm", "Use this amount");
+    use.type = "submit";
+    typed.append(label, error, use);
+    parts.push(list, typed);
+  } else if (state.bet.open === "line") {
+    title = "Your line";
+    hint = `A ${t.kind === 2 ? "higher" : "lower"} line is less likely, so it pays more. The desk quotes your multiplier when you confirm.`;
+    const list = el("div", "opts");
+    for (const step of LINE_STEPS) {
+      const lineCents = BigInt(spotDollars() + step) * 100n;
+      const m = betMultiplier(t.kind, lineCents, t.expiry);
+      const payout = betPayout(t.stake, m);
+      const ok = beats(payout, t.stake);
+      list.append(optionRow({
+        pick: `line:${step}`,
+        on: step === t.step,
+        label: usd0(spotDollars() + step),
+        note: lineNote(step),
+        side: ok ? `${timesX(m)} · ${int(won(payout))} sats` : "",
+        off: ok ? "" : m == null
+          ? `Too ${(t.kind === 2) === (step < 0) ? "likely" : "unlikely"} for the desk to quote.`
+          : `Wins ${int(won(payout))} sats after the fee, not more than you put in.`,
+      }));
+    }
+    parts.push(list);
+  } else {
+    title = "When it closes";
+    hint = `A new window closes every 5 minutes; 15-minute windows close on the quarter hour. The fixing is the price in that UTC minute: ${utcTime(t.expiry)}.`;
+    const list = el("div", "opts");
+    for (const item of closes()) {
+      list.append(optionRow({
+        pick: `close:${item.unix}`,
+        on: item.unix === Number(t.expiry),
+        label: localTime(item.unix),
+        tag: `${item.min} min`,
+        until: item.unix,
+      }));
+    }
+    parts.push(el("p", "lede", "The BTC price at that minute decides it."), list);
+  }
+  const heading = el("p", "q", title);
+  heading.id = "bet-pop-title";
+  pop.replaceChildren(heading, ...parts, el("p", "hint", hint));
+  pop.hidden = false;
+  const chip = document.querySelector(`[data-bchip="${state.bet.open}"]`);
+  pop.style.left = `${Math.max(0, Math.min(chip.offsetLeft, pop.parentElement.clientWidth - pop.offsetWidth))}px`;
+  pop.style.top = `${chip.offsetTop + chip.offsetHeight + 12}px`;
+  const target = had || (focus ? pop.querySelector(".on, [data-pick]")?.dataset.pick : "");
+  if (target) (pop.querySelector(`[data-pick="${target}"]`) || $(target))?.focus();
+}
+
+/** "0.0005" → 50,000 sats. Eight decimals at most. */
+function parseStake(raw) {
+  const text = String(raw).trim().replace(",", ".");
+  if (!/^\d*\.?\d{0,8}$/.test(text) || !/\d/.test(text)) return null;
+  const [whole, frac = ""] = text.split(".");
+  return BigInt(whole || "0") * 100_000_000n + BigInt(frac.padEnd(8, "0"));
+}
+
+function onBetPick(event) {
+  const btn = event.target.closest("[data-pick]");
+  if (!btn || btn.getAttribute("aria-disabled") === "true") return;
+  const [what, value] = btn.dataset.pick.split(":");
+  if (what === "stake") state.bet.stake = BigInt(value);
+  if (what === "line") state.bet.step = Number(value);
+  if (what === "close") state.bet.close = Number(value);
+  const chip = document.querySelector(`[data-bchip="${state.bet.open}"]`);
+  state.bet.open = "";
+  dropBet();
+  renderPredict();
+  chip?.focus();
+}
+
+function onTypedStake(event) {
+  event.preventDefault();
+  const sats = parseStake($("bet-typed-input")?.value ?? "");
+  const error = $("bet-typed-error");
+  if (sats == null || sats < STAKE_MIN || sats > STAKE_MAX) {
+    if (error) error.textContent = `Bet between ${fmtBtc(STAKE_MIN)} and ${fmtBtc(STAKE_MAX)} BTC.`;
+    return;
+  }
+  state.bet.stake = sats;
+  state.bet.open = "";
+  dropBet();
+  renderPredict();
+  document.querySelector('[data-bchip="stake"]')?.focus();
+}
+
+function dropBet() {
+  betGen += 1;
+  state.bet.quoting = false;
+  state.bet.offer = null;
+  state.bet.quoteNote = "";
+}
+
+function syncScrim() {
+  const optionsOpen = state.checkout && state.view === "sell";
+  const betOpen = state.bet.checkout && state.view === "predict";
+  const open = optionsOpen || betOpen;
+  $("scrim").hidden = !open;
+  document.body.classList.toggle("locked", open);
+  for (const id of ["top", "main", "note"]) $(id).inert = open;
+}
+
+function openBet() {
+  state.bet.open = "";
+  state.bet.checkout = true;
+  state.bet.agree = false;
+  state.bet.fault = null;
+  dropBet();
+  renderPredict();
+  $("bet-change").focus();
+}
+
+function closeBet() {
+  if (!state.bet.checkout) return;
+  state.bet.checkout = false;
+  state.bet.agree = false;
+  state.bet.fault = null;
+  dropBet();
+  renderBet();
+  if (state.view === "predict") $("bet-see").focus();
+}
+
+/** The drawer. An estimate until the box is ticked; then the desk's offer, with its terms frozen. */
+function renderBet() {
+  const open = state.bet.checkout && state.view === "predict" && priced();
+  $("bet").hidden = !open;
+  syncScrim();
+  if (!open) return;
+  const offer = state.bet.offer;
+  const t = offer ? offer.terms : betTerms();
+  const m = offer ? offer.quote.multiplier : betMultiplier(t.kind, t.lineCents, t.expiry);
+  const payout = offer ? offer.quote.payout : betPayout(t.stake, m);
+  const at = localTime(t.expiry);
+  const line = usd0(Number(t.lineCents) / 100);
+  betSentenceInto($("bet-said"), t, "now");
+  if (beats(payout, t.stake)) {
+    $("bet-head").replaceChildren(offer ? "You win " : "You win about ", el("span", "amt", amount(won(payout))), " if you’re right.");
+    const sub = el("span", "", `₿${fmtBtc(won(payout))} · about ${usd0(worth(won(payout), spotUsd()))} at the current ${usd0(spotUsd())} · window closes `);
+    sub.append(clockEl("", t.expiry));
+    $("bet-sub").replaceChildren(sub);
+  } else {
+    $("bet-head").textContent = "This doesn’t beat your stake.";
+    $("bet-sub").textContent = m == null
+      ? "The desk doesn’t quote this line for this close."
+      : `It wins ${int(won(payout))} sats after the 1,000-sat fee, not more than the ${int(t.stake)} you put in.`;
+  }
+  $("bet-fee-label").textContent = `Price-check fee at ${at}`;
+  $("bet-rows-when").textContent = `If BTC at ${at} is`;
+  const rows = [
+    [`${capital(DIR[t.kind])} ${line}`, payout != null ? amount(won(payout)) : "—",
+      payout != null ? `${int(won(payout))} sats · your ${int(t.stake)} back plus ${int(won(payout) - t.stake)}` : "", false],
+    [`At or ${OTHER[t.kind]} ${line}`, "Nothing", `your ${int(t.stake)} sats go to the desk`, true],
+  ];
+  $("bet-rows").replaceChildren(...rows.map(([when, get, small, zero]) => {
+    const row = el("div", "row");
+    const value = el("span", zero ? "get zero" : "get", get);
+    if (small) value.append(el("small", "", small));
+    row.append(el("span", "when", when), value);
+    return row;
+  }));
+  $("bet-agree-text").textContent = `I understand that if BTC is at or ${OTHER[t.kind]} ${line} at ${at}, I lose the ${int(t.stake)} sats I put in.`;
+  $("bet-chart-title").textContent = `What you get back at ${at}`;
+  drawStep($("bet-chart"), { kind: t.kind, line: Number(t.lineCents) / 100, stake: t.stake, payout: payout ?? 0n, now: t.step === 0 });
+  renderBetFoot();
+}
+
+function betFault(note) {
+  const detail = clipDetail(note);
+  if (note.includes("float short")) return ["The desk can’t cover this payout right now. Bet less, or try again later.", detail];
+  if (/refused: (spot|deribit) unavailable/.test(note)) return ["We can’t get a fair price right now. Try again in a moment.", detail];
+  if (note.includes("refused: expiry")) return ["That window is closing too soon. Pick a later close.", detail];
+  if (note.includes("refused: line")) return ["The desk doesn’t quote this line right now. Pick one nearer the current price.", detail];
+  if (note.includes("refused: payout")) return ["This payout doesn’t beat your stake after the fee. Bet more or pick a further line.", detail];
+  if (note.includes("refused: stake")) return [`Bet between ${fmtBtc(STAKE_MIN)} and ${fmtBtc(STAKE_MAX)} BTC.`, detail];
+  if (note.includes("exposure")) return ["The desk has taken all it can for now. Try a smaller bet or a later close.", detail];
+  if (note.includes("did not answer")) return ["The desk didn’t answer. Try again in a moment.", detail];
+  return ["Try again in a moment.", detail];
+}
+
+/** The button, the firm multiplier and its ring. Runs every second while the drawer is open. */
+function renderBetFoot() {
+  if (!state.bet.checkout) return;
+  const now = Math.floor(Date.now() / 1000);
+  const quote = state.bet.offer?.quote;
+  const left = quote ? Math.min(quote.validUntil, quote.deadline) - now : 0;
+  const firm = $("bet-firm");
+  let label = "Place bet";
+  let off = false;
+  let sentence = state.bet.fault?.sentence || "";
+  let detail = state.bet.fault?.detail || "";
+  firm.replaceChildren();
+  $("bet-agree").checked = state.bet.agree;
+  if (!state.address) {
+    label = "Connect wallet";
+  } else if (!state.bet.agree) {
+    off = true;
+  } else if (state.bet.quoting) {
+    label = "Getting your offer…";
+    off = true;
+    sentence = "";
+    detail = "";
+  } else if (quote && left > 0) {
+    const ring = el("span", "ring", `Offer holds ${mmss(left)}`);
+    ring.style.setProperty("--left", String(Math.min(100, (left / QUOTE_TTL_S) * 100)));
+    firm.append(el("span", "", timesX(quote.multiplier)), ring);
+    sentence = "";
+    detail = "";
+  } else if (quote) {
+    label = "Refresh offer";
+    firm.append(el("span", "ring", "Offer expired"));
+    sentence = "Offers hold for 30 seconds. Refresh it.";
+    detail = "offer expired";
+  } else if (state.bet.quoteNote) {
+    label = "Try again";
+    [sentence, detail] = betFault(state.bet.quoteNote);
+  }
+  $("bet-confirm").textContent = label;
+  $("bet-confirm").disabled = off;
+  renderStatus($("bet-status"), sentence, detail);
+}
+
+/** The only desk request: sent when "I understand" is ticked, or on Refresh offer. */
+async function askBet() {
+  if (!state.bet.checkout || !state.bet.agree || !state.address || state.bet.quoting || !priced()) return;
+  const gen = ++betGen;
+  const asked = betTerms();
+  state.bet.quoting = true;
+  state.bet.offer = null;
+  state.bet.quoteNote = "";
+  renderBetFoot();
+  try {
+    const live = await requestPredictQuotes({
+      relays: RELAYS,
+      desks: PINNED_DESKS,
+      kind: asked.kind,
+      line: asked.lineCents,
+      stake: asked.stake,
+      expiry: asked.expiry,
+      holderAddress: state.address,
+    });
+    if (gen !== betGen) return;
+    const quote = live.quotes[0];
+    if (!quote) throw new Error(live.note || "The desk did not answer.");
+    const deposit = await depositAddress({
+      kind: asked.kind,
+      strike: asked.lineCents,
+      collateral: quote.payout,
+      premium: asked.stake,
+      expiry: asked.expiry,
+      deadline: BigInt(quote.deadline),
+      holderAddress: state.address,
+      writerPkHex: quote.deskPkHex,
+      beaconTxidHex: quote.beaconTxid,
+      beaconGidx: quote.beaconGidx,
+      exit: BigInt(quote.exit),
+    });
+    if (gen !== betGen) return;
+    if (deposit.address !== quote.intentAddress || deposit.vaultAddress !== quote.vaultAddress) {
+      throw new Error("The desk address does not match this page.");
+    }
+    state.bet.offer = { quote, deposit, terms: asked };
+  } catch (err) {
+    if (gen !== betGen) return;
+    state.bet.quoteNote = err instanceof Error ? err.message : "The desk did not answer.";
+  }
+  if (gen !== betGen) return;
+  state.bet.quoting = false;
+  renderBet();
+}
+
+function onBetConfirm() {
+  if (!state.address) {
+    openWallet();
+    return;
+  }
+  const quote = state.bet.offer?.quote;
+  const now = Math.floor(Date.now() / 1000);
+  if (quote && state.bet.offer.deposit && quote.validUntil > now && quote.deadline > now) placeBet();
+  else void askBet();
+}
+
+/** Synchronous from the click to window.open, so the wallet popup is not blocked. */
+function placeBet() {
+  const { quote, deposit, terms: placed } = state.bet.offer;
+  const now = Math.floor(Date.now() / 1000);
+  let position = state.positions.find((item) => item.address === deposit.address && item.status === "locking");
+  if (!position) {
+    position = {
+      id: crypto.randomUUID(),
+      kind: placed.kind,
+      strike: placed.lineCents,
+      expiry: placed.expiry,
+      collateral: quote.payout,
+      premiumSats: placed.stake,
+      status: "locking",
+      deadline: quote.deadline,
+      address: deposit.address,
+      deskPkHex: quote.deskPkHex,
+      beaconTxid: deposit.beaconTxidHex,
+      beaconGidx: deposit.beaconGidx,
+      exit: deposit.exit,
+      vaultAddress: deposit.vaultAddress,
+      holderAddress: state.address,
+      payoutAddress: state.address,
+      placedCents: state.spotCents != null ? state.spotCents.toString() : "",
+      windowMin: betWindow(placed.expiry),
+      ticks: [],
+      createdAt: now,
+      uri: deposit.uri,
+    };
+    state.positions.unshift(position);
+  }
+  persist();
+  closeBet();
+  state.selected = position.id;
+  show("home");
+  startWatch();
+  openWallet(position);
+}
+
+// ----- positions -----
+
+function betOutcome(p) {
+  if (!(p.status === "settled" || settlementKnown(p))) return "";
+  if (p.writerKeep === "" || p.writerKeep == null) return "settled";
+  return BigInt(p.writerKeep) > 0n ? "won" : "lost";
+}
+
+function betStatusLabel(p) {
+  const now = Math.floor(Date.now() / 1000);
+  if (p.status === "locking") return p.walletTxid ? "Waiting for your BTC" : "Send your BTC";
+  if (p.status === "deposited") return "Placing your bet";
+  const outcome = betOutcome(p);
+  if (outcome === "won") return "Won";
+  if (outcome === "lost") return "Lost";
+  if (outcome === "settled") return "Settled";
+  if (p.status === "filled") return Number(p.expiry) > now ? "Live" : "Checking the price";
+  if (p.status === "expired") return "Time ran out";
+  if (p.status === "refunded") return "Refunded";
+  return "Open";
+}
+
+function betIcon(kind) {
+  const svg = svgEl("svg", { viewBox: "0 0 20 20", "aria-hidden": "true" });
+  svg.append(
+    svgEl("path", { d: kind === 2 ? "M2.5 15.5l4.5-4.5 3 2.5 6-8" : "M2.5 4.5l4.5 4.5 3-2.5 6 8" }),
+    svgEl("path", { d: kind === 2 ? "M13 5.5h3.5V9" : "M13 14.5h3.5V11" }),
+  );
+  return svg;
+}
+
+function betRow(p) {
+  const row = el("a", "prow");
+  row.href = `#/positions/${p.id}`;
+  const icon = el("span", p.kind === 3 ? "kindico put" : "kindico");
+  icon.append(betIcon(p.kind));
+  const what = el("span");
+  const now = Math.floor(Date.now() / 1000);
+  const live = p.status === "filled" && Number(p.expiry) > now;
+  const meta = live && state.spotCents != null
+    ? `Prediction · ₿${fmtBtc(p.premiumSats)} · BTC is ${usd0(spotUsd())} now`
+    : `Prediction · ₿${fmtBtc(p.premiumSats)} · ${p.windowMin || 5}-minute window`;
+  what.append(
+    el("b", "", `${capital(DIR[p.kind])} ${usd0(Number(p.strike) / 100)} at ${localTime(p.expiry)}`),
+    el("span", "m", meta),
+  );
+  if (live) {
+    const bar = el("span", "left-bar");
+    bar.dataset.barClose = String(p.expiry);
+    bar.dataset.barStart = String(Number(p.createdAt) || Number(p.expiry) - 300);
+    const fill = el("i");
+    const start = Number(bar.dataset.barStart);
+    fill.style.width = `${Math.min(100, Math.max(0, ((now - start) / Math.max(1, Number(p.expiry) - start)) * 100)).toFixed(1)}%`;
+    bar.append(fill);
+    what.append(bar);
+  }
+  const outcome = betOutcome(p);
+  const side = el("span", "r");
+  const pill = live ? clockEl("pill", p.expiry, "left") : el("span", outcome === "won" ? "pill ok" : outcome === "lost" ? "pill lost" : "pill", betStatusLabel(p));
+  side.append(pill);
+  let extra = "";
+  if (outcome === "won") extra = `+${int(BigInt(p.writerKeep))} sats paid`;
+  else if (outcome === "lost") extra = `−${int(p.premiumSats)} sats`;
+  else if (["locking", "deposited", "filled"].includes(p.status)) extra = `${int(p.premiumSats)} in → ${int(won(p.collateral))} if right`;
+  if (extra) side.append(el("small", "", extra));
+  row.append(icon, what, side);
+  return row;
+}
+
+/** The option chart card's title, caption and legend, after a prediction has used them. */
+function optionChrome() {
+  $("position-chart-cap").hidden = true;
+  $("position-legend").replaceChildren(...[["a", "What you end up with"], ["m", "More than you lock"], ["l", "Less than you lock"], ["d", "What you lock"]].map(([key, text]) => {
+    const item = el("span");
+    item.append(el("i", key), text);
+    return item;
+  }));
+}
+
+function betLegend() {
+  $("position-legend").replaceChildren(...[["p", "BTC price, Deribit index"], ["d", "Your line"], ["w", "You win"], ["k", "The desk wins"]].map(([key, text]) => {
+    const item = el("span");
+    item.append(el("i", key), text);
+    return item;
+  }));
+}
+
+function betSteps(p) {
+  const list = el("ol", "steps");
+  list.setAttribute("aria-label", "Progress");
+  let labels;
+  let at;
+  if (p.status === "expired" || p.status === "refunded") {
+    labels = ["Waiting for your BTC", p.status === "refunded" ? "Refunded" : "Time ran out"];
+    at = 1;
+  } else {
+    labels = ["Waiting for your BTC", "Bet placed", "Window closes", "Settled"];
+    const now = Math.floor(Date.now() / 1000);
+    at = { locking: 0, deposited: 1, filled: Number(p.expiry) > now ? 2 : 3, settled: 4 }[p.status] ?? 0;
+    if (betOutcome(p)) at = 4;
+  }
+  labels.forEach((label, index) => {
+    const item = el("li", "", label);
+    if (index < at) markStep(item, "done");
+    else if (index === at) markStep(item, "now", p.status !== "expired" && p.status !== "refunded");
+    list.append(item);
+  });
+  return list;
+}
+
+function renderPrediction(p) {
+  const now = Math.floor(Date.now() / 1000);
+  const line = Number(p.strike) / 100;
+  const lineUsd = usd0(line);
+  const at = localTime(p.expiry);
+  const stake = p.premiumSats;
+  const payout = p.collateral;
+  const outcome = betOutcome(p);
+  const unlocked = p.status === "expired" || p.status === "refunded";
+  betSentenceInto($("position-sentence"), { kind: p.kind, stake, lineCents: p.strike, expiry: p.expiry }, unlocked ? "none" : "past");
+  const head = el("h2");
+  const body = [];
+  let badge = null;
+  const pill = (text, className = "pill") => {
+    const box = el("p", "badge");
+    box.append(el("span", className, text));
+    return box;
+  };
+  const ledger = (rows) => {
+    const box = el("div", "ledger");
+    for (const [name, value, className] of rows) {
+      const row = el("div", className === "tot" ? "tot" : "");
+      row.append(el("span", "", name), el("span", className === "minus" ? "minus" : "", value));
+      box.append(row);
+    }
+    return box;
+  };
+  const fixing = p.settleCents ? Number(p.settleCents) / 100 : null;
+  const nextClose = closes()[0].unix;
+  const again = () => {
+    const box = el("div", "acts");
+    box.append(action("btn sm go", "Predict the next window", () => {
+      state.bet.close = nextClose;
+      show("predict");
+    }));
+    return [box, el("p", "sub", `The next window closes at ${localTime(nextClose)}.`)];
+  };
+  if (p.status === "locking") {
+    head.textContent = p.walletTxid ? "Your wallet sent it." : "Send your stake to place the bet.";
+    body.push(el("p", "sub", p.walletTxid
+      ? `Waiting for ₿${fmtBtc(stake)} to arrive. As soon as it lands, the desk locks ${int(payout)} sats in the vault.`
+      : `Send ₿${fmtBtc(stake)} from your wallet. As soon as it lands, the desk locks ${int(payout)} sats in the vault.`));
+    const timer = el("p", "clock");
+    timer.dataset.until = String(p.deadline);
+    sendClock(timer);
+    const acts = el("div", "acts");
+    acts.append(
+      action("btn sm", "Reopen wallet", () => openWallet(p)),
+      action("textbtn", "Copy payment link", (event) => {
+        void copyToClipboard(event.currentTarget, p.uri || paymentUri(p.address, stake));
+      }),
+      action("textbtn", "Cancel", (event) => {
+        void abortLock(p, event.currentTarget);
+      }),
+    );
+    body.push(timer, acts);
+  } else if (p.status === "deposited") {
+    head.textContent = "Your stake arrived.";
+    body.push(el("p", "sub", "The desk is funding the vault…"));
+  } else if (outcome === "won") {
+    const back = BigInt(p.writerKeep);
+    head.replaceChildren("You won ", el("span", "amt", `${int(back)} sats`), ".");
+    badge = pill(`Won · settled at ${at}`, "pill ok");
+    body.push(el("p", "sub", fixing != null
+      ? `The ${at} fixing was ${usd2(fixing)}, ${usd2(Math.abs(fixing - line))} ${DIR[p.kind]} your ${lineUsd} line. That’s your ${int(stake)} back plus ${int(back - stake)}.`
+      : `BTC closed ${DIR[p.kind]} your ${lineUsd} line. That’s your ${int(stake)} back plus ${int(back - stake)}.`));
+    body.push(ledger([
+      ["You bet", `${int(stake)} sats`],
+      ["From the desk", `+${int(payout - stake)}`],
+      [`Price-check fee at ${at}`, `−${int(payout - back)}`, "minus"],
+      ["Paid to you", `${int(back)} sats`, "tot"],
+    ]));
+    body.push(el("p", "sub", "Paid to your Arkade wallet. Nothing left to do."), ...again());
+  } else if (outcome === "lost") {
+    head.textContent = fixing != null
+      ? `BTC closed ${usd2(Math.abs(fixing - line))} ${fixing === line ? "on" : OTHER[p.kind]} your line.`
+      : `BTC closed at or ${OTHER[p.kind]} your line.`;
+    badge = pill(`Lost · settled at ${at}`, "pill lost");
+    body.push(el("p", "sub", `${fixing != null ? `The ${at} fixing was ${usd2(fixing)}. ` : ""}Your ${int(stake)} sats went to the desk.`));
+    body.push(ledger([
+      ["You bet", `${int(stake)} sats`],
+      [`To the desk, at or ${OTHER[p.kind]} ${lineUsd}`, `−${int(stake)}`, "minus"],
+      ["Paid to you", "0 sats", "tot"],
+    ]));
+    body.push(el("p", "sub", "One fixing decides it. All or nothing, no partial payouts."), ...again());
+  } else if (outcome === "settled") {
+    head.textContent = "Settled.";
+    body.push(el("p", "sub", "The vault paid out. Reading what came back…"));
+  } else if (p.status === "filled" && Number(p.expiry) > now) {
+    head.append(clockEl("", p.expiry, "left"));
+    badge = pill(`Live · ${p.windowMin || 5}-minute window`);
+    if (state.spotCents != null) {
+      const price = spotUsd();
+      const gap = Math.abs(price - line);
+      const ahead = p.kind === 2 ? price > line : price < line;
+      const where = price === line ? "on your line" : `${usd0(gap)} ${price > line ? "above" : "below"} your line`;
+      body.push(el("p", "sub", `BTC is ${usd0(price)} now, ${where}, ${ahead ? "winning so far" : "the desk is ahead so far"}.`));
+    }
+    body.push(ledger([
+      ["Your stake", `${int(stake)} sats`],
+      ["In the vault", `${int(payout)} sats`],
+      ["If you’re right", `${int(won(payout))} sats`],
+      ["Window closes", `${at} · ${utcTime(p.expiry)}`],
+    ]));
+    body.push(el("p", "sub", `Nothing for you to do. One price fixing at ${at} decides it and the payout goes to your Arkade wallet. At or ${OTHER[p.kind]} ${lineUsd}, the desk wins.`));
+  } else if (p.status === "filled") {
+    head.textContent = "Checking the price.";
+    body.push(el("p", "sub", `The fixing at ${at} decides it, and the payout goes to your Arkade wallet. Nothing for you to do.`));
+    const settle = settleButton(p);
+    if (settle) {
+      const acts = el("div", "acts");
+      acts.append(settle);
+      body.push(acts);
+    }
+  } else if (p.status === "expired") {
+    head.textContent = p.refundable ? "The desk didn’t take it in time." : "Time ran out before your BTC arrived.";
+    body.push(el("p", "sub", p.refundable ? `Your ₿${fmtBtc(stake)} is still yours. Take it back.` : "Nothing was bet."));
+    if (p.refundable) {
+      const acts = el("div", "acts");
+      acts.append(action("btn sm", "Take it back", (event) => {
+        void refund(p, event.currentTarget);
+      }));
+      body.push(acts);
+    }
+  } else if (p.status === "refunded") {
+    head.textContent = "Your stake is back in your wallet.";
+    body.push(el("p", "sub", "The desk didn’t take it, so nothing was bet."));
+  }
+  const host = $("position-body");
+  const opened = Boolean(host.querySelector("details")?.open);
+  host.replaceChildren(...(badge ? [badge] : []), head, ...body);
+  if (!outcome) host.append(betSteps(p));
+  const txs = el("div", "txs");
+  for (const [label, txid] of [
+    ["Stake", p.fundingTxid],
+    ["Vault tx", p.status === "refunded" ? "" : p.closeTxid],
+    ["Refund", p.status === "refunded" ? p.closeTxid : ""],
+    ["Payout tx", p.settleTxid && p.settleTxid !== p.closeTxid ? p.settleTxid : ""],
+  ]) {
+    const link = txLink(label, txid);
+    if (link) txs.append(link);
+  }
+  if (txs.childNodes.length) host.append(txs);
+  const more = el("details", "more");
+  more.open = opened;
+  const facts = el("dl", "kv");
+  for (const [name, value] of [
+    ["Vault", p.vaultAddress],
+    ["Paid to", p.holderAddress || p.payoutAddress],
+    ["Price check", `Deribit BTC index, ${utcTime(p.expiry)} on ${whenDay(p.expiry)}`],
+    ["Multiplier", timesX(payoutMultiplierOf(p))],
+  ]) {
+    if (value) facts.append(el("dt", "", name), el("dd", "", value));
+  }
+  more.append(el("summary", "", "Details"), facts);
+  host.append(more);
+  const card = $("position-chart").parentElement;
+  card.hidden = unlocked || p.status === "locking";
+  if (card.hidden) return;
+  const done = Boolean(outcome);
+  $("position-chart-title").textContent = done ? `How BTC got to ${at}` : "BTC since you placed it";
+  const cap = $("position-chart-cap");
+  cap.hidden = false;
+  cap.textContent = done && fixing != null
+    ? `One fixing decided it: ${usd2(fixing)}, ${fixing === line ? "on" : fixing > line ? "above" : "below"} your line.`
+    : `${capital(DIR[p.kind])} your line when the window closes and you win.`;
+  betLegend();
+  drawRace($("position-chart"), {
+    kind: p.kind,
+    line,
+    start: Number(p.createdAt) || Number(p.expiry) - 300,
+    expiry: Number(p.expiry),
+    ticks: p.ticks || [],
+    fixing,
+    now,
+  });
+}
+
+function payoutMultiplierOf(p) {
+  const stake = BigInt(p.premiumSats);
+  return stake > 0n ? Number((BigInt(p.collateral) * 100n) / stake) / 100 : 0;
+}
+
+/** Payout steps: nothing at or past the line on the losing side, the whole payout on the winning side. */
+function drawStep(host, { kind, line, stake, payout, now }) {
+  const W = Math.max(260, Math.floor(host.clientWidth));
+  const H = 190;
+  const top = 34;
+  const span = Math.max(300, Math.round(line * 0.004 / 50) * 50);
+  const x0 = line - span;
+  const x1 = line + span;
+  const back = payout > 0n ? Number(won(payout)) : 0;
+  const ymax = Math.max(back, Number(stake)) * 1.12 || 1;
+  const X = (p) => 2 + ((p - x0) / (x1 - x0)) * (W - 4);
+  const Y = (s) => top + (1 - s / ymax) * (H - top - 26);
+  const yb = Y(0);
+  const ys = Y(Number(stake));
+  const yw = Y(back);
+  const xl = X(line);
+  const winLeft = kind === 3;
+  const svg = svgEl("svg", {
+    width: W,
+    height: H,
+    viewBox: `0 0 ${W} ${H}`,
+    role: "img",
+    "aria-label": `You get back ${int(back)} sats if BTC closes ${DIR[kind]} ${usd0(line)}, and nothing at or ${OTHER[kind]} it.`,
+  });
+  const winX = winLeft ? [2, xl] : [xl, W - 2];
+  const loseX = winLeft ? [xl, W - 2] : [2, xl];
+  const curve = winLeft
+    ? `M2 ${yw}H${xl}V${yb}H${W - 2}`
+    : `M2 ${yb}H${xl}V${yw}H${W - 2}`;
+  svg.append(
+    svgEl("rect", { x: winX[0], y: yw, width: winX[1] - winX[0], height: yb - yw, class: "area" }),
+    svgEl("rect", { x: winX[0], y: yw, width: winX[1] - winX[0], height: Math.max(0, ys - yw), class: "more" }),
+    svgEl("rect", { x: loseX[0], y: ys, width: loseX[1] - loseX[0], height: yb - ys, class: "less" }),
+    svgEl("line", { x1: 2, x2: W - 2, y1: ys, y2: ys, class: "lock" }),
+    svgEl("path", { d: curve, class: "curve" }),
+    svgEl("line", { x1: 2, x2: W - 2, y1: yb, y2: yb, class: "base" }),
+    svgEl("line", { x1: xl, x2: xl, y1: 4, y2: yb, class: "mark" }),
+    svgEl("text", { x: winLeft ? xl - 7 : xl + 7, y: 14, "text-anchor": winLeft ? "end" : "start", class: "mark-label" }, `Your line${now ? " = now" : ""} · ${usd0(line)}`),
+    svgEl("text", { x: winLeft ? 8 : W - 8, y: yw - 8, "text-anchor": winLeft ? "start" : "end", class: "paid" }, `${int(back)} back`),
+    svgEl("text", { x: winLeft ? W - 8 : 8, y: ys - 7, "text-anchor": winLeft ? "end" : "start" }, `You put in ${int(stake)}`),
+    svgEl("text", { x: winLeft ? W - 8 : 8, y: yb - 9, "text-anchor": winLeft ? "end" : "start", class: "nothing" }, "Nothing back"),
+    svgEl("text", { x: 2, y: yb + 18, class: "tick" }, usd0(x0)),
+    svgEl("text", { x: W - 2, y: yb + 18, "text-anchor": "end", class: "tick" }, usd0(x1)),
+  );
+  host.replaceChildren(svg);
+}
+
+/** BTC against the line over the window. The zone above or below the line is the bettor's. */
+function drawRace(host, { kind, line, start, expiry, ticks, fixing, now }) {
+  const W = Math.max(260, Math.floor(host.clientWidth));
+  const H = 240;
+  const top = 26;
+  const points = ticks.filter(([t]) => t >= start - 5).map(([t, c]) => [t, c / 100]);
+  const t0 = Math.min(start, points[0]?.[0] ?? start);
+  const t1 = Math.max(expiry + 30, Math.min(now, expiry + 120));
+  const prices = [line, ...points.map(([, p]) => p), ...(fixing != null ? [fixing] : [])];
+  let lo = Math.min(...prices);
+  let hi = Math.max(...prices);
+  const pad = Math.max((hi - lo) * 0.25, 25);
+  lo -= pad;
+  hi += pad;
+  const X = (t) => 2 + ((t - t0) / (t1 - t0)) * (W - 4);
+  const Y = (p) => top + (1 - (p - lo) / (hi - lo)) * (H - top - 26);
+  const yl = Y(line);
+  const yb = H - 26;
+  const xe = X(expiry);
+  const mine = kind === 2 ? [top, yl] : [yl, yb];
+  const desk = kind === 2 ? [yl, yb] : [top, yl];
+  const svg = svgEl("svg", {
+    width: W,
+    height: H,
+    viewBox: `0 0 ${W} ${H}`,
+    role: "img",
+    "aria-label": fixing != null
+      ? `BTC against your ${usd0(line)} line. The fixing was ${usd2(fixing)}.`
+      : `BTC against your ${usd0(line)} line until ${localTime(expiry)}.`,
+  });
+  svg.append(
+    svgEl("rect", { x: 2, y: mine[0], width: W - 4, height: Math.max(0, mine[1] - mine[0]), class: "win" }),
+    svgEl("rect", { x: 2, y: desk[0], width: W - 4, height: Math.max(0, desk[1] - desk[0]), class: "desk" }),
+    svgEl("line", { x1: 2, x2: W - 2, y1: yl, y2: yl, class: "lock" }),
+    svgEl("text", { x: 8, y: kind === 2 ? yl - 7 : yl + 17, class: "halo" }, `Your line ${usd0(line)}`),
+    svgEl("line", { x1: xe, x2: xe, y1: top - 14, y2: yb, class: "mark" }),
+    svgEl("text", { x: xe - 6, y: top - 4, "text-anchor": "end", class: "mark-label" }, `Closes ${localTime(expiry)}`),
+    svgEl("line", { x1: 2, x2: W - 2, y1: yb, y2: yb, class: "base" }),
+    svgEl("text", { x: 2, y: yb + 18, class: "tick" }, localTime(t0)),
+    svgEl("text", { x: W - 2, y: yb + 18, "text-anchor": "end", class: "tick" }, localTime(t1)),
+  );
+  if (points.length > 1) {
+    const path = points.map(([t, p], i) => `${i ? "L" : "M"}${X(t).toFixed(1)} ${Y(p).toFixed(1)}`).join("");
+    svg.append(svgEl("path", { d: path, class: "price" }));
+  }
+  const last = points.at(-1);
+  if (last && fixing == null) {
+    svg.append(
+      svgEl("circle", { cx: X(last[0]), cy: Y(last[1]), r: 5, class: "dot" }),
+      svgEl("text", { x: Math.min(W - 8, X(last[0]) + 9), y: Y(last[1]) - 8, "text-anchor": X(last[0]) > W - 90 ? "end" : "start", class: "today-label halo" }, usd0(last[1])),
+    );
+  }
+  if (fixing != null) {
+    svg.append(
+      svgEl("circle", { cx: xe, cy: Y(fixing), r: 6, class: "dot fixing" }),
+      svgEl("text", { x: xe - 10, y: Y(fixing) + (Y(fixing) < yl ? -10 : 20), "text-anchor": "end", class: "today-label halo" }, `Fixing ${usd2(fixing)}`),
+    );
+  }
+  if (points.length < 2) {
+    svg.append(svgEl("text", { x: W / 2, y: (top + yb) / 2, "text-anchor": "middle", class: "tick" }, "The price draws here while this page is open."));
+  }
+  host.replaceChildren(svg);
+}
+
+// ----- the index, sampled while it matters -----
+
+function livePredictions(now) {
+  return state.positions.filter((p) => isPredict(p.kind) && (p.status === "filled" || p.status === "deposited" || p.status === "locking") && Number(p.expiry) + 90 > now);
+}
+
+function syncIndexPolling() {
+  const now = Math.floor(Date.now() / 1000);
+  const want = state.view === "predict" || livePredictions(now).length > 0;
+  if (want && !indexTimer) {
+    indexTimer = setInterval(() => {
+      void sampleIndex();
+    }, INDEX_MS);
+    void sampleIndex();
+  }
+  if (!want && indexTimer) {
+    clearInterval(indexTimer);
+    indexTimer = null;
+  }
+}
+
+async function sampleIndex() {
+  await loadSpot();
+  if (state.spotCents == null) return;
+  const now = Math.floor(Date.now() / 1000);
+  const cents = Number(state.spotCents);
+  seen.push([now, cents]);
+  while (seen.length > TICKS_KEPT) seen.shift();
+  let changed = false;
+  for (const p of livePredictions(now)) {
+    p.ticks = Array.isArray(p.ticks) ? p.ticks : [];
+    if (!p.ticks.length) {
+      for (const tick of seen) if (tick[0] >= (Number(p.createdAt) || now) - 5) p.ticks.push(tick);
+    } else if (p.ticks.at(-1)[0] !== now) {
+      p.ticks.push([now, cents]);
+    }
+    while (p.ticks.length > TICKS_KEPT) p.ticks.splice(0, 2);
+    changed = true;
+  }
+  if (changed && Date.now() - ticksSavedAt > 15_000) {
+    ticksSavedAt = Date.now();
+    persist();
+  }
+  $("spot-line").textContent = `BTC is $${usdFromCents(state.spotCents)} on the Deribit index.`;
+  if (state.view === "predict" && !state.bet.open) renderPredict();
+  else if (state.view === "predict") renderMarket();
+  const shown = state.view === "home" && state.selected
+    ? state.positions.find((p) => p.id === state.selected && isPredict(p.kind))
+    : null;
+  if (shown) renderPosition(shown);
+  if (!livePredictions(now).length && state.view !== "predict") syncIndexPolling();
+}
+
+/** Once a second: the windows move, so the close and the drawer follow the clock. */
+function betTick(now) {
+  marketClock(now);
+  windowBars(now);
+  if (state.view === "predict") {
+    const chosen = state.bet.close;
+    if (chosen && chosen < now + CLOSE_LEAD_S && !state.bet.offer) {
+      betClose();
+      if (state.bet.open !== "stake") renderPredict();
+    }
+  }
+  renderBetFoot();
+  if (state.view === "home" && state.selected) {
+    const p = state.positions.find((item) => item.id === state.selected && isPredict(item.kind));
+    if (p && p.status === "filled" && Math.abs(Number(p.expiry) - now) <= 1) renderPosition(p);
+  }
+}
+
+// ----- the market panel: the price, its last minutes, the line and the close -----
+
+const HISTORY_URL = "https://www.deribit.com/api/v2/public/get_index_chart_data?index_name=btc_usd&range=1h";
+const MARKET_SPAN_S = 8 * 60;
+let historyLoaded = false;
+
+/** Six-second index prices for the last hour, so the chart has a past on first paint. */
+async function loadHistory() {
+  if (historyLoaded) return;
+  historyLoaded = true;
+  try {
+    const res = await fetch(HISTORY_URL, { signal: AbortSignal.timeout(8_000) });
+    if (!res.ok) throw new Error(String(res.status));
+    const rows = (await res.json()).result;
+    if (!Array.isArray(rows)) throw new Error("history");
+    const past = rows
+      .filter((row) => Array.isArray(row) && Number.isFinite(row[0]) && Number.isFinite(row[1]))
+      .map(([ms, usd]) => [Math.floor(ms / 1000), Math.round(usd * 100)]);
+    const first = seen[0]?.[0] ?? Infinity;
+    seen.unshift(...past.filter(([t]) => t < first).slice(-(TICKS_KEPT - seen.length)));
+    renderMarket();
+  } catch {
+    historyLoaded = false;
+  }
+}
+
+/** Swap the figure's characters, rolling the ones that changed in the direction of the move. */
+function setFigure(node, text) {
+  const prev = node.dataset.text || "";
+  if (prev === text) return;
+  const value = (raw) => Number(raw.replace(/[^0-9.]/g, ""));
+  const up = value(text) >= value(prev);
+  const animate = prev.length === text.length;
+  node.replaceChildren(...[...text].map((ch, i) => {
+    const span = el("span", "digit", ch);
+    if (animate && prev[i] !== ch && /\d/.test(ch)) span.classList.add(up ? "roll-up" : "roll-down");
+    return span;
+  }));
+  node.dataset.text = text;
+  node.setAttribute("aria-label", text);
+}
+
+function renderMarket() {
+  if (state.view !== "predict") return;
+  const now = Math.floor(Date.now() / 1000);
+  const close = betClose();
+  $("mkt-close").textContent = `Closes ${localTime(close)}`;
+  marketClock(now);
+  if (state.spotCents == null) return;
+  const price = Number(state.spotCents) / 100;
+  setFigure($("mkt-price"), usd2(price));
+  const offer = state.bet.offer?.terms;
+  const kind = offer ? offer.kind : state.bet.kind;
+  const line = offer ? Number(offer.lineCents) / 100 : spotDollars() + state.bet.step;
+  const gap = price - line;
+  const sub = $("mkt-sub");
+  const arrow = el("span", gap >= 0 ? "up" : "down");
+  arrow.setAttribute("aria-hidden", "true");
+  const ahead = kind === 2 ? gap > 0 : gap < 0;
+  sub.replaceChildren(arrow, el("b", "", usd2(Math.abs(gap))), ` ${gap >= 0 ? "above" : "below"} your ${usd0(line)} line${Math.abs(gap) >= 0.01 ? ` · ${ahead ? "you’d win" : "the desk would win"} now` : ""}`);
+  drawMarket($("mkt-chart"), { points: seen, line, kind, close, now });
+}
+
+function marketClock(now) {
+  const node = $("mkt-count");
+  if (!node || state.view !== "predict") return;
+  const left = betClose() - now;
+  node.textContent = left > 0 ? mmss(left) : "0:00";
+}
+
+function drawMarket(host, { points, line, kind, close, now }) {
+  const W = Math.max(280, Math.floor(host.clientWidth));
+  const H = W < 520 ? 128 : 212;
+  const top = 14;
+  const bottom = H - 24;
+  const t0 = now - MARKET_SPAN_S;
+  const t1 = Math.max(close + 20, now + 60);
+  const pts = points.filter(([t]) => t >= t0 - 12).map(([t, c]) => [t, c / 100]);
+  if (pts.length < 2) {
+    const skel = el("div", "skel");
+    skel.style.height = `${H}px`;
+    host.replaceChildren(skel);
+    return;
+  }
+  const prices = [line, ...pts.map(([, p]) => p)];
+  let lo = Math.min(...prices);
+  let hi = Math.max(...prices);
+  const pad = Math.max((hi - lo) * 0.2, 8);
+  lo -= pad;
+  hi += pad;
+  const X = (t) => ((t - t0) / (t1 - t0)) * W;
+  const Y = (p) => top + (1 - (p - lo) / (hi - lo)) * (bottom - top);
+  const yl = Y(line);
+  const xn = X(pts.at(-1)[0]);
+  const xc = X(close);
+  const svg = svgEl("svg", {
+    width: W,
+    height: H,
+    viewBox: `0 0 ${W} ${H}`,
+    role: "img",
+    "aria-label": `BTC over the last ${MARKET_SPAN_S / 60} minutes against your ${usd0(line)} line, closing at ${localTime(close)}.`,
+  });
+  const defs = svgEl("defs", {});
+  const fade = svgEl("linearGradient", { id: "mkt-fade", x1: 0, y1: 0, x2: 0, y2: 1 });
+  fade.append(
+    svgEl("stop", { offset: "0%", style: "stop-color: var(--ink); stop-opacity: .14" }),
+    svgEl("stop", { offset: "100%", style: "stop-color: var(--ink); stop-opacity: 0" }),
+  );
+  defs.append(fade);
+  const path = pts.map(([t, p], i) => `${i ? "L" : "M"}${X(t).toFixed(1)} ${Y(p).toFixed(1)}`).join("");
+  const area = `${path}L${xn.toFixed(1)} ${bottom}L${X(pts[0][0]).toFixed(1)} ${bottom}Z`;
+  const zone = kind === 2 ? [top - 14, yl] : [yl, bottom];
+  const tagText = `Your line ${usd0(line)}`;
+  const tagW = tagText.length * 7.2 + 14;
+  // The tag sits in the time still to come, unless now is too close to the edge.
+  const tagX = xn + 12 + tagW <= W - 10 ? W - tagW - 10 : 10;
+  const tagY = Math.min(bottom - 22, Math.max(top - 6, yl - 11));
+  const tag = svgEl("g", { class: "mkt-tag" });
+  tag.append(svgEl("rect", { x: tagX, y: tagY, width: tagW, height: 22 }), svgEl("text", { x: tagX + 7, y: tagY + 15 }, tagText));
+  svg.append(
+    defs,
+    svgEl("rect", { x: 0, y: zone[0], width: W, height: Math.max(0, zone[1] - zone[0]), class: "mkt-zone" }),
+    svgEl("rect", { x: xn, y: top - 14, width: Math.max(0, W - xn), height: bottom - top + 14, class: "mkt-future" }),
+    svgEl("line", { x1: xc, x2: xc, y1: top - 14, y2: bottom, class: "mkt-close" }),
+    svgEl("path", { d: area, class: "mkt-area" }),
+    svgEl("path", { d: path, class: "mkt-line" }),
+    svgEl("line", { x1: 0, x2: W, y1: yl, y2: yl, class: "mkt-level" }),
+    tag,
+    svgEl("circle", { cx: xn, cy: Y(pts.at(-1)[1]), r: 4, class: "mkt-pulse" }),
+    svgEl("circle", { cx: xn, cy: Y(pts.at(-1)[1]), r: 4, class: "mkt-now" }),
+    svgEl("text", { x: 16, y: H - 6, class: "tick" }, localTime(t0)),
+    svgEl("text", { x: Math.min(W - 16, xc), y: H - 6, "text-anchor": xc > W - 60 ? "end" : "middle", class: "tick" }, `close ${localTime(close)}`),
+  );
+  host.replaceChildren(svg);
+}
+
+/** Live rows: the bar is how much of the window has gone. */
+function windowBars(now) {
+  document.querySelectorAll("[data-bar-close]").forEach((bar) => {
+    const close = Number(bar.dataset.barClose);
+    const start = Number(bar.dataset.barStart);
+    const done = Math.min(1, Math.max(0, (now - start) / Math.max(1, close - start)));
+    bar.firstElementChild.style.width = `${(done * 100).toFixed(1)}%`;
+  });
+}
+
+// ----- light and dark -----
+
+const THEME_KEY = "arkade-trade-theme";
+
+function effectiveTheme() {
+  const set = document.documentElement.dataset.theme;
+  if (set === "light" || set === "dark") return set;
+  return window.matchMedia?.("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+}
+
+function syncTheme() {
+  const theme = effectiveTheme();
+  const button = $("theme");
+  if (button) {
+    button.setAttribute("aria-label", theme === "dark" ? "Switch to light theme" : "Switch to dark theme");
+    button.setAttribute("aria-pressed", String(theme === "dark"));
+  }
+  document.querySelector('meta[name="theme-color"]')?.setAttribute("content", theme === "dark" ? "#0f0d17" : "#ffffff");
+}
+
+function bindTheme() {
+  syncTheme();
+  window.matchMedia?.("(prefers-color-scheme: dark)").addEventListener?.("change", syncTheme);
+  listen("theme", "click", () => {
+    const next = effectiveTheme() === "dark" ? "light" : "dark";
+    document.documentElement.dataset.theme = next;
+    try {
+      localStorage.setItem(THEME_KEY, next);
+    } catch {
+      // The choice holds for this visit.
+    }
+    syncTheme();
+  });
+}
+
+function bindBet() {
+  document.querySelectorAll("[data-call]").forEach((btn) => {
+    btn.addEventListener("click", () => setCall(Number(btn.dataset.call), state.view === "predict" ? "replace" : "push"));
+  });
+  document.querySelectorAll("[data-bchip]").forEach((chip) => {
+    chip.addEventListener("click", () => {
+      if (chip.dataset.bchip === "dir") {
+        setCall(5 - state.bet.kind, "replace");
+        chip.focus();
+        return;
+      }
+      state.bet.open = state.bet.open === chip.dataset.bchip ? "" : chip.dataset.bchip;
+      renderBetPop(true);
+    });
+  });
+  listen("bet-pop", "click", onBetPick);
+  listen("bet-pop", "submit", onTypedStake);
+  listen("bet-see", "click", openBet);
+  listen("bet-change", "click", closeBet);
+  listen("bet-agree", "change", () => {
+    state.bet.agree = $("bet-agree").checked;
+    if (state.bet.agree) void askBet();
+    else dropBet();
+    renderBetFoot();
+  });
+  listen("bet-confirm", "click", onBetConfirm);
+}
+
 function bind() {
   listen("wallet-connect", "click", () => openWallet());
   listen("account-save", "click", connectAddress);
@@ -1728,6 +3095,13 @@ function bind() {
   listen("pop", "click", onPick);
   // A tap outside an open list only closes it, the way a sheet's backdrop does.
   document.addEventListener("click", (event) => {
+    if (state.bet.open && !event.target.closest("#bet-pop, [data-bchip]")) {
+      event.preventDefault();
+      event.stopPropagation();
+      state.bet.open = "";
+      renderBetPop();
+      return;
+    }
     if (!state.open || event.target.closest("#pop, [data-chip]")) return;
     event.preventDefault();
     event.stopPropagation();
@@ -1736,6 +3110,17 @@ function bind() {
   }, true);
   document.addEventListener("keydown", (event) => {
     if (event.key !== "Escape") return;
+    if (state.bet.open) {
+      const chip = document.querySelector(`[data-bchip="${state.bet.open}"]`);
+      state.bet.open = "";
+      renderBetPop();
+      chip?.focus();
+      return;
+    }
+    if (state.bet.checkout) {
+      closeBet();
+      return;
+    }
     if (!state.open) {
       closeCheckout();
       return;
@@ -1747,7 +3132,12 @@ function bind() {
   });
   listen("see", "click", openCheckout);
   listen("checkout-change", "click", closeCheckout);
-  listen("scrim", "click", closeCheckout);
+  listen("scrim", "click", () => {
+    closeCheckout();
+    closeBet();
+  });
+  bindBet();
+  bindTheme();
   listen("agree", "change", () => {
     state.agree = $("agree").checked;
     if (state.agree) void askQuote();
@@ -1758,6 +3148,8 @@ function bind() {
   window.addEventListener("resize", () => {
     if (state.view === "home") renderBlotter();
     renderCheckout();
+    renderBet();
+    renderMarket();
   });
   document.querySelectorAll("[data-restore-kind]").forEach((btn) => {
     btn.addEventListener("click", () => {
@@ -1792,17 +3184,19 @@ async function fillKept() {
     if (position.keptChecked || position.writerKeep || !settlementKnown(position)) return;
     const script = writerScriptOf(position);
     if (!script) return;
-    const split = await readKept(position.settleTxid, script);
+    const split = await readKept(position.settleTxid, script, isPredict(position.kind) ? BigInt(position.expiry) : undefined);
     if (!split) return;
     position.keptChecked = true;
     position.writerKeep = split.writer.toString();
     position.deskTake = split.desk.toString();
+    if (split.cents != null && !position.settleCents) position.settleCents = split.cents.toString();
     any = true;
     if (!position.restored) localChanged = true;
   }));
   if (localChanged) persist();
   if (any && state.view === "home") renderBlotter();
   if (any && state.view === "sell") renderSell();
+  if (any && state.view === "predict") renderPredict();
 }
 
 async function submitRestore() {
@@ -1860,17 +3254,22 @@ async function loadPrices() {
     ? "Today’s BTC price isn’t loading."
     : `BTC is $${usdFromCents(state.spotCents)} on the Deribit index.`;
   renderSell();
+  renderPredict();
   if (state.view === "home") renderBlotter();
 }
 
 function showFromHash(mode = "quiet") {
   const route = routeFromHash();
   if (route.view === "connect" && state.address) {
-    show("sell", "replace");
+    show(lastCompose, "replace");
     return;
   }
   if (route.view === "sell") {
     setKind(route.kind, mode);
+    return;
+  }
+  if (route.view === "predict") {
+    setCall(route.kind, mode);
     return;
   }
   if (route.view === "home") state.selected = route.id;

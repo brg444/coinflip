@@ -1,20 +1,26 @@
-import { ArkAddress, RestIndexerProvider } from "@arkade-os/sdk";
+import { ArkAddress, RestIndexerProvider, Transaction } from "@arkade-os/sdk";
+import { base64 } from "@scure/base";
 
+import { statePacketOf } from "../../protocol/beacon.ts";
 import { ARK_URL } from "../../protocol/constants.ts";
 import { bytesToHex } from "../../protocol/hex.ts";
 import { classifyIntent, psbtView, type CoinView, type IntentPhase, type TxOutput } from "../../protocol/intent-state.ts";
+import { slotPrice } from "../../settle/vault.ts";
 import { intentCoins, onContractEvent } from "./fund.ts";
 import { splitPayouts } from "./position-status.ts";
 import { settlementTxid } from "./restore.ts";
 
 export type WatchRow = {
   address: string;
+  /** The user's address: the writer's for options, the bettor's for predict. */
   writerAddress?: string;
   vaultAddress?: string;
   collateral: bigint;
   premium: bigint;
   deadline: number;
   since?: number;
+  /** 1 for predict: the user's coin is the stake and a fill funds the vault. */
+  side?: 0 | 1;
   /** Register this intent with the contract manager. Returns its pkScript. */
   register?: () => Promise<string>;
 };
@@ -35,13 +41,32 @@ export function pkScriptOf(address: string): string {
   return bytesToHex(ArkAddress.decode(address).pkScript);
 }
 
-/** Writer and desk sats on a settlement transaction. Output 0 is the beacon. */
-export async function readKept(settleTxid: string, writerScript: string): Promise<{ writer: bigint; desk: bigint } | null> {
+/**
+ * The user's and the desk's sats on a settlement transaction, and the fixing it
+ * read. Output 0 is the beacon. `writerScript` is the user's script.
+ */
+export async function readKept(
+  settleTxid: string,
+  writerScript: string,
+  expiry?: bigint,
+): Promise<{ writer: bigint; desk: bigint; cents?: bigint } | null> {
   try {
     const page = await indexer.getVirtualTxs([settleTxid]);
     const raw = page.txs?.[0];
     if (!raw) return null;
-    return splitPayouts(psbtView(raw).outputs, writerScript);
+    const split = splitPayouts(psbtView(raw).outputs, writerScript);
+    if (!split) return null;
+    const cents = expiry == null ? null : fixingOf(raw, expiry);
+    return cents == null ? split : { ...split, cents };
+  } catch {
+    return null;
+  }
+}
+
+/** The settlement carries the beacon's state packet. The fixing for `expiry` is the price the vault read. */
+function fixingOf(raw: string, expiry: bigint): bigint | null {
+  try {
+    return slotPrice(statePacketOf(Transaction.fromPSBT(base64.decode(raw))), expiry);
   } catch {
     return null;
   }
@@ -99,6 +124,8 @@ async function payoutEvidence(writerScript: string, intentScript: string, since:
 export async function readIntent(row: WatchRow, now = Math.floor(Date.now() / 1000)): Promise<Omit<PhaseUpdate, "address">> {
   const intentScript = pkScriptOf(row.address).toLowerCase();
   const writerScript = row.writerAddress ? pkScriptOf(row.writerAddress) : "";
+  const side = row.side ?? 0;
+  const vaultScript = side === 1 && row.vaultAddress ? pkScriptOf(row.vaultAddress) : "";
   const coins = (await intentCoins(intentScript)) ?? [];
   const ids = [...new Set(coins.flatMap((coin) => coin.spent && coin.spentBy ? [coin.spentBy] : []))];
   const spends: Record<string, TxOutput[]> = {};
@@ -122,9 +149,12 @@ export async function readIntent(row: WatchRow, now = Math.floor(Date.now() / 10
     writerScript,
     now,
     deadline: row.deadline,
+    side,
+    vaultScript,
   });
   const settled = seen.phase === "filled" || seen.phase === "refunded" || seen.phase === "funded" || seen.refundable;
-  const classified = settled || !writerScript ? seen : await (async () => {
+  // A prediction's fill pays the user nothing, so there is no payout to look for.
+  const classified = settled || !writerScript || side === 1 ? seen : await (async () => {
     const extra = await payoutEvidence(writerScript, intentScript, row.since ?? 0);
     if (!extra.coins.length) return seen;
     return classifyIntent({
@@ -138,8 +168,10 @@ export async function readIntent(row: WatchRow, now = Math.floor(Date.now() / 10
     });
   })();
   let outcome = classified;
-  if (outcome.phase === "filled" && writerScript && outcome.closeTxid) {
-    const landed = await payoutLanded(writerScript, outcome.closeTxid);
+  // A fill counts once its output is a vtxo: the premium, or for predict the vault.
+  const landing = side === 1 ? vaultScript : writerScript;
+  if (outcome.phase === "filled" && landing && outcome.closeTxid) {
+    const landed = await payoutLanded(landing, outcome.closeTxid);
     if (!landed) {
       outcome = {
         phase: "funded",

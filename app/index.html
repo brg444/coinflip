@@ -5,7 +5,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Arkade Options</title>
-  <meta name="theme-color" content="#381993">
+  <meta name="theme-color" content="#ffffff">
+  <script>try{var t=localStorage.getItem("arkade-trade-theme");if(t==="light"||t==="dark")document.documentElement.dataset.theme=t}catch(e){}</script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -13,16 +14,20 @@
 </head>
 <body>
   <p class="strip" role="note"><span>Educational demo</span><span aria-hidden="true">·</span><span>Mutinynet</span><span aria-hidden="true">·</span><span>coins have no value</span></p>
+  <div class="bar" id="bar">
   <header class="top" id="top">
     <a class="brandmark" href="#/"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M0 6L6 0H18L24 6V12H18V6H6V12H0ZM6 18V12H18V18ZM6 24H0V18H6ZM24 18V24H18V18Z"/></svg><span>Arkade <span class="lite">Options</span></span></a>
     <nav class="nav" aria-label="Main">
       <button type="button" data-tab="sell">New</button>
+      <button type="button" data-tab="predict">Predict</button>
       <button type="button" data-tab="home">Positions<span class="count" id="count" hidden></span></button>
       <button type="button" data-tab="how">How it works</button>
     </nav>
+    <button type="button" class="theme" id="theme" aria-label="Switch to dark theme"><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="6.25" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M10 3.75a6.25 6.25 0 0 1 0 12.5z" fill="currentColor"/></svg></button>
     <button type="button" class="wallet" id="who" hidden><span class="dot" aria-hidden="true"></span><span class="addr-l" id="who-address"></span><span class="addr-s" id="who-tail"></span></button>
     <button type="button" class="connect" id="top-connect">Connect</button>
   </header>
+  </div>
 
   <main class="page" id="main">
     <section id="connect" class="card connect-card" aria-labelledby="connect-title" hidden>
@@ -49,7 +54,41 @@
         <div class="pop" id="pop" role="dialog" aria-labelledby="pop-title" hidden></div>
       </div>
       <p class="estimate" id="estimate" aria-live="polite"></p>
-      <button type="button" class="btn light go" id="see" disabled>See what happens</button>
+      <button type="button" class="btn go cta" id="see" disabled>See what happens</button>
+    </section>
+
+    <section id="predict" class="predict" hidden>
+      <div class="predict-grid">
+        <div class="compose">
+          <div class="opener"><span class="av"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M0 6L6 0H18L24 6V12H18V6H6V12H0ZM6 18V12H18V18ZM6 24H0V18H6ZM24 18V24H18V18Z"/></svg></span><p>Call where bitcoin closes in the next few minutes. Tap any highlighted part to change it.</p></div>
+          <div class="seg calls" role="radiogroup" aria-label="Your call">
+            <button type="button" role="radio" data-call="2" aria-checked="true"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M2.5 15.5l4.5-4.5 3 2.5 6-8"/><path d="M13 5.5h3.5V9"/></svg>Higher<span class="mult" data-mult="2"></span></button>
+            <button type="button" role="radio" data-call="3" aria-checked="false"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M2.5 4.5l4.5 4.5 3-2.5 6 8"/><path d="M13 14.5h3.5V11"/></svg>Lower<span class="mult" data-mult="3"></span></button>
+          </div>
+          <div class="sentence-wrap">
+            <h1 class="sentence" id="bet-sentence">I bet <button type="button" class="chip" data-bchip="stake" aria-haspopup="dialog" aria-expanded="false"></button> that BTC closes <button type="button" class="chip" data-bchip="dir"></button> <button type="button" class="chip" data-bchip="line" aria-haspopup="dialog" aria-expanded="false"></button> at&nbsp;<button type="button" class="chip" data-bchip="close" aria-haspopup="dialog" aria-expanded="false"></button>.</h1>
+            <div class="pop" id="bet-pop" role="dialog" aria-labelledby="bet-pop-title" hidden></div>
+          </div>
+          <p class="estimate" id="bet-estimate" aria-live="polite"></p>
+          <button type="button" class="btn go cta" id="bet-see" disabled>See what happens</button>
+          <p class="windows">A new window closes every 5 minutes. 15-minute windows close on the quarter hour.</p>
+        </div>
+        <aside class="card market" aria-labelledby="mkt-label">
+          <div class="mkt-head">
+            <div>
+              <p class="mkt-label" id="mkt-label">BTC · Deribit index</p>
+              <p class="mkt-price" id="mkt-price" aria-live="off"><span class="skel">$00,000.00</span></p>
+              <p class="mkt-sub" id="mkt-sub"></p>
+            </div>
+            <div class="mkt-clock">
+              <p class="mkt-label" id="mkt-close">Closes</p>
+              <p class="mkt-count" id="mkt-count">–:––</p>
+            </div>
+          </div>
+          <div class="chart mkt-chart" id="mkt-chart"></div>
+          <div class="legend mkt-legend"><span><i class="p"></i>BTC price</span><span><i class="d"></i>Your line</span><span><i class="w"></i>You win</span></div>
+        </aside>
+      </div>
     </section>
 
     <section id="home" hidden>
@@ -96,8 +135,9 @@
           </section>
           <section class="card chartcard">
             <h3 id="position-chart-title"></h3>
+            <p class="cap" id="position-chart-cap" hidden></p>
             <div class="chart" id="position-chart"></div>
-            <div class="legend"><span><i class="a"></i>What you end up with</span><span><i class="m"></i>More than you lock</span><span><i class="l"></i>Less than you lock</span><span><i class="d"></i>What you lock</span></div>
+            <div class="legend" id="position-legend"><span><i class="a"></i>What you end up with</span><span><i class="m"></i>More than you lock</span><span><i class="l"></i>Less than you lock</span><span><i class="d"></i>What you lock</span></div>
           </section>
         </div>
       </div>
@@ -163,7 +203,7 @@
       </article>
     </section>
   </main>
-  <p class="note" id="note"><b>Arkade Options is an educational demo</b> showing that selling BTC options works on Arkade. <span id="spot-line"></span></p>
+  <p class="note" id="note"><b id="note-lead">Arkade Options is an educational demo</b> <span id="note-body">showing that selling BTC options works on Arkade.</span> <span id="spot-line"></span></p>
 
   <div class="scrim" id="scrim" hidden></div>
   <aside class="drawer" id="checkout" role="dialog" aria-modal="true" aria-labelledby="checkout-sentence" hidden>
@@ -186,6 +226,28 @@
       <label class="check"><input type="checkbox" id="agree"><span id="agree-text"></span></label>
       <div class="sheet-foot"><button type="button" class="btn go" id="confirm">Lock and get paid</button><span class="firm" id="firm"></span></div>
       <p class="status" id="checkout-status" role="status"></p>
+    </div>
+  </aside>
+  <aside class="drawer" id="bet" role="dialog" aria-modal="true" aria-labelledby="bet-said" hidden>
+    <button type="button" class="back" id="bet-change"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M10 3.5L5.5 8l4.5 4.5"/></svg>Change</button>
+    <div class="scroll">
+      <p class="said" id="bet-said"></p>
+      <h2 id="bet-head"></h2>
+      <p class="sub" id="bet-sub"></p>
+      <p class="fee"><span id="bet-fee-label"></span><b>−1,000 sats</b></p>
+      <div class="rows-head"><span id="bet-rows-when"></span><span>You get back</span></div>
+      <div id="bet-rows"></div>
+      <section class="chartcard">
+        <h3 id="bet-chart-title"></h3>
+        <p class="cap">One fixing decides it. All or nothing, no partial payouts.</p>
+        <div class="chart" id="bet-chart"></div>
+        <div class="legend"><span><i class="a"></i>What you get back</span><span><i class="m"></i>More than you put in</span><span><i class="l"></i>Less than you put in</span><span><i class="d"></i>What you put in</span></div>
+      </section>
+    </div>
+    <div class="stick">
+      <label class="check"><input type="checkbox" id="bet-agree"><span id="bet-agree-text"></span></label>
+      <div class="sheet-foot"><button type="button" class="btn go" id="bet-confirm">Place bet</button><span class="firm" id="bet-firm"></span></div>
+      <p class="status" id="bet-status" role="status"></p>
     </div>
   </aside>
   <script type="module" src="./app.js"></script>

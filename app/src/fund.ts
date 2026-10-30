@@ -15,17 +15,23 @@ import {
 } from "@arkade-os/sdk";
 
 import { beaconIdOf } from "../../protocol/beacon-id.ts";
-import { ARK_URL, BEACON_READ_FEE, EMULATOR_URL, EXIT } from "../../protocol/constants.ts";
+import { ARK_URL, BEACON_READ_FEE, EMULATOR_URL, EXIT, isPredict, type Kind } from "../../protocol/constants.ts";
 import { assertServerExit, bindContracts, payoutVtxo, type Terms } from "../../protocol/contracts.ts";
 import { bytesToHex, hexToBytes, xOnly } from "../../protocol/hex.ts";
 import { networkByName } from "../../protocol/network.ts";
-import { intentProgram, vaultProgram } from "../../protocol/programs.ts";
+import { intentProgram, vaultProgram, vaultProgramFor } from "../../protocol/programs.ts";
 
 export const NETWORK_NAME = "Mutinynet";
 export const WALLET_URL = "https://mutinynet.arkade.money";
 
+/**
+ * Options: the page is the writer. `collateral` is what it locks, `premium`
+ * what the desk pays, `holderPkHex` the desk. Predict: the page is the holder.
+ * `premium` is the stake, `collateral` the payout, `writerPkHex` the desk, and
+ * `holderAddress` the bettor's own address.
+ */
 export type FundRequest = {
-  kind: 0 | 1;
+  kind: Kind;
   strike: bigint;
   collateral: bigint;
   premium: bigint;
@@ -36,6 +42,10 @@ export type FundRequest = {
   /** Older positions that stored a private key. */
   writerHex?: string;
   holderPkHex?: string;
+  /** Predict: the bettor's address. The payout and a refund pay its taproot key. */
+  holderAddress?: string;
+  /** Predict: the desk's key. */
+  writerPkHex?: string;
   /** Display txid of the beacon identity asset, from the desk's quote. Required to build a vault. */
   beaconTxidHex?: string;
   beaconGidx?: number;
@@ -49,6 +59,8 @@ export type Deposit = {
   amountSats: bigint;
   uri: string;
   holderPkHex: string;
+  /** Predict: the desk's key. */
+  writerPkHex: string;
   beaconTxidHex: string;
   beaconGidx: number;
   exit: number;
@@ -242,6 +254,7 @@ export async function writerPayoutAddress(writerHex: string): Promise<string> {
 }
 
 async function build(req: FundRequest) {
+  if (isPredict(req.kind)) return buildPredict(req);
   if (!req.holderPkHex || !req.beaconTxidHex) {
     throw new Error("Selling needs a desk quote that names the beacon.");
   }
@@ -295,7 +308,45 @@ async function build(req: FundRequest) {
   if (intent.address !== bound.intentAddress || vault.address !== bound.vaultAddress) {
     throw new Error("The contract address does not match the local derivation.");
   }
-  return { bound, intent, vault, holderPk, beaconTxidHex, beaconGidx, exit, client, terms };
+  return { bound, intent, vault, deskPk: holderPk, beaconTxidHex, beaconGidx, exit, client, terms };
+}
+
+/** Predict: the bettor holds, and their address is paid. The desk writes. */
+async function buildPredict(req: FundRequest) {
+  if (!req.writerPkHex || !req.beaconTxidHex) {
+    throw new Error("A prediction needs a desk quote that names the beacon.");
+  }
+  if (!req.holderAddress) throw new Error("Paste your Arkade address first.");
+  const binding = await writerBinding(req.holderAddress);
+  const { client } = await openSession(SingleKey.fromHex(sessionHex()));
+  const holderPk = binding.payoutKey;
+  const writerPk = hexToBytes(req.writerPkHex);
+  const beaconTxidHex = req.beaconTxidHex.toLowerCase();
+  const beaconGidx = req.beaconGidx ?? 0;
+  const exit = req.exit ?? EXIT;
+  const terms: Terms = {
+    kind: req.kind,
+    strike: req.strike,
+    collateral: req.collateral,
+    premium: req.premium,
+    expiry: req.expiry,
+    deadline: req.deadline,
+    exit,
+    writerPk,
+    holderPk,
+    holderPayoutKey: binding.payoutKey,
+    beacon: beaconIdOf(asset.AssetId.create(beaconTxidHex, beaconGidx)),
+    readFee: BEACON_READ_FEE,
+    serverKey: binding.serverKey,
+    emulatorKey: binding.emulatorKey,
+  };
+  const bound = bindContracts(terms);
+  const intent = client.contract(intentProgram(), bound.intent);
+  const vault = client.contract(vaultProgramFor(req.kind), bound.vault);
+  if (intent.address !== bound.intentAddress || vault.address !== bound.vaultAddress) {
+    throw new Error("The contract address does not match the local derivation.");
+  }
+  return { bound, intent, vault, deskPk: writerPk, beaconTxidHex, beaconGidx, exit, client, terms };
 }
 
 /** The same contract the quote was built from, plus the connected Arkade client. */
@@ -307,16 +358,21 @@ export async function openContract(req: FundRequest) {
   return built;
 }
 
-/** Mutinynet address the seller funds. Collateral stays with the seller until finalize. */
+/**
+ * Mutinynet address the user funds: the collateral a seller locks, or the
+ * stake a bettor puts in. It stays theirs until the desk finalizes.
+ */
 export async function depositAddress(req: FundRequest): Promise<Deposit> {
-  const { bound, holderPk, beaconTxidHex, beaconGidx, exit } = await build(req);
+  const { bound, deskPk, beaconTxidHex, beaconGidx, exit } = await build(req);
+  const amount = isPredict(req.kind) ? req.premium : req.collateral;
   return {
     network: NETWORK_NAME,
     address: bound.intentAddress,
     vaultAddress: bound.vaultAddress,
-    amountSats: req.collateral,
-    uri: paymentUri(bound.intentAddress, req.collateral),
-    holderPkHex: bytesToHex(holderPk),
+    amountSats: amount,
+    uri: paymentUri(bound.intentAddress, amount),
+    holderPkHex: isPredict(req.kind) ? "" : bytesToHex(deskPk),
+    writerPkHex: isPredict(req.kind) ? bytesToHex(deskPk) : "",
     beaconTxidHex,
     beaconGidx,
     exit: Number(exit),
@@ -347,7 +403,7 @@ export async function onContractEvent(cb: (event: ContractEvent) => void): Promi
   return manager.onContractEvent(cb);
 }
 
-/** After the deadline, cancel pays the whole coin back to the writer address. */
+/** After the deadline, cancel pays the whole coin back to the user's address. */
 export async function cancelIntent(req: FundRequest): Promise<string> {
   const { intent, bound } = await build(req);
   const manager = await contracts();
@@ -356,6 +412,6 @@ export async function cancelIntent(req: FundRequest): Promise<string> {
   const coins = await intent.getUtxos();
   const coin = coins[0];
   if (!coin) throw new Error("No coin on this address.");
-  const sent = await intent.functions.cancel().from(coin).to(bound.writerPkScript, BigInt(coin.value)).send();
+  const sent = await intent.functions.cancel().from(coin).to(bound.userPkScript, BigInt(coin.value)).send();
   return sent.txid;
 }
