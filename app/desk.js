@@ -71,7 +71,7 @@ const state = {
   tenorSec: 0,
   lines: { 0: 0, 1: 0 },
   open: "",
-  view: "sell",
+  view: "predict",
   checkout: false,
   agree: false,
   offer: null,
@@ -885,10 +885,11 @@ function routeFromHash() {
   if (path === "/how" || path.startsWith("/how/")) return { view: "how", kind: state.kind };
   if (path.startsWith("/predict/lower")) return { view: "predict", kind: 3 };
   if (path.startsWith("/predict")) return { view: "predict", kind: 2 };
-  return { view: "sell", kind: state.kind };
+  // Predict is the home page.
+  return { view: "predict", kind: state.bet.kind };
 }
 
-let lastCompose = "sell";
+let lastCompose = "predict";
 
 function show(view, mode = "push") {
   if (view === "sell" || view === "predict") lastCompose = view;
