@@ -109,6 +109,14 @@ All-or-nothing calls on where BTC closes at the end of a short window: higher (k
 
 `pnpm smoke:regtest` runs a prediction after the option: a fill from the desk float, a refund of an unfilled stake, a fixing above the line and the payout to the bettor.
 
+## Demo
+
+`pnpm demo` runs the whole system on one machine against Mutinynet, so the page can be tried end to end without the hosted services: an oracle with its own beacon, a desk, a settler, and the page built against that desk and beacon. It needs Node 22.12 or later and `pnpm install`. On first start it makes the keys, then asks you to send 10,000 Mutinynet sats to the oracle wallet it prints and waits until they arrive, issues and deploys the beacon, starts the desk and asks for its float (about 1,000,000 sats, since the desk funds whole payouts), and starts the settler.
+
+The page is served on <http://127.0.0.1:4173/#/predict>. With [`cloudflared`](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/) installed it also opens a quick tunnel and prints a public `trycloudflare.com` URL, which needs no Cloudflare account and changes on every start. `pnpm demo -- --pages` also publishes the page to Cloudflare Pages as the `coinflip` project after `npx wrangler login`. Either URL works only while the demo is running, because the desk, oracle and settler run on this machine. `--no-tunnel` serves locally only.
+
+Keys, data and logs live in `~/.coinflip-demo`; delete it to start over with a new beacon and desk. The demo listens on the same nostr relay as the hosted services, so its oracle and settler also see their positions and skip any vault bound to another beacon.
+
 ## Page
 
 ```bash
