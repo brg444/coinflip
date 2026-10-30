@@ -7,6 +7,9 @@
 //   pnpm demo                start, or resume, the demo
 //   pnpm demo -- --pages     also publish the page to Cloudflare Pages (needs `wrangler login`)
 //   pnpm demo -- --no-tunnel serve on http://127.0.0.1:4173 only
+//   pnpm demo -- --server    run on a server: serve on 0.0.0.0:$PAGE_PORT (default
+//                            4173), no tunnel, service logs on stdout as well.
+//                            coinflip.Dockerfile runs this.
 //
 // Keys, data and logs live in ~/.coinflip-demo (COINFLIP_DEMO_DIR to move it).
 // Delete that folder to start over with a new beacon and a new desk.
@@ -24,7 +27,9 @@ import { getPublicKey } from "nostr-tools/pure";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const home = path.resolve(process.env.COINFLIP_DEMO_DIR?.trim() || path.join(os.homedir(), ".coinflip-demo"));
 const args = new Set(process.argv.slice(2));
-const PORTS = { oracle: 8789, desk: 8788, settler: 8790, page: 4173 };
+/** On a server the page is the only port anyone reaches; the services stay on loopback. */
+const server = args.has("--server");
+const PORTS = { oracle: 8789, desk: 8788, settler: 8790, page: Number(process.env.PAGE_PORT?.trim() || 4173) };
 /** The oracle issues and deploys the beacon from this. Deploy keeps 330 sats on the beacon. */
 const ORACLE_FUND = 10_000n;
 /** The desk funds whole payouts. One 0.0005 BTC bet at 1.90x locks 95,000 sats. */
@@ -89,8 +94,22 @@ function start(name, script, env) {
   const child = spawn(process.execPath, ["--experimental-strip-types", "--experimental-eventsource", "--no-warnings", script], {
     cwd: root,
     env: { ...process.env, ...env },
-    stdio: ["ignore", out, out],
+    stdio: ["ignore", server ? "pipe" : out, server ? "pipe" : out],
   });
+  if (server) {
+    // The host's log viewer is where a server is read, so each line goes there too.
+    const relay = (stream) => {
+      let rest = "";
+      stream.on("data", (chunk) => {
+        writeFileSync(out, chunk);
+        const lines = (rest + chunk.toString()).split("\n");
+        rest = lines.pop() ?? "";
+        for (const line of lines) if (line.trim()) say(`[${name}] ${line}`);
+      });
+    };
+    relay(child.stdout);
+    relay(child.stderr);
+  }
   child.on("exit", (code) => {
     if (!stopping) die(`The ${name} stopped (exit ${code}). See ${log}`);
   });
@@ -271,7 +290,7 @@ function servePage() {
       }
       res.writeHead(200, { "content-type": types[path.extname(file)] ?? "application/octet-stream", "cache-control": "no-store" });
       createReadStream(file).pipe(res);
-    }).listen(PORTS.page, "127.0.0.1", resolve);
+    }).listen(PORTS.page, server ? "0.0.0.0" : "127.0.0.1", resolve);
   });
 }
 
@@ -353,11 +372,11 @@ const key = keys();
 say(`COINFLIP demo · Mutinynet · state in ${home}`);
 buildPage(key, null);
 await servePage();
-const publicUrl = args.has("--no-tunnel") ? null : await tunnel();
+const publicUrl = server || args.has("--no-tunnel") ? null : await tunnel();
 const pagesUrl = args.has("--pages") ? pages() : null;
 say("");
 say("Open the page. It walks you through funding the demo, then you can bet:");
-say(`  Page      http://127.0.0.1:${PORTS.page}/#/predict`);
+say(server ? `  Page      port ${PORTS.page} on this server, at the domain the host routes to it` : `  Page      http://127.0.0.1:${PORTS.page}/#/predict`);
 if (publicUrl) say(`  Public    ${publicUrl}/#/predict`);
 if (pagesUrl) say(`  Pages     ${pagesUrl}/#/predict  (setup steps show on the local and public links)`);
 say("");
@@ -369,11 +388,11 @@ void watchSetup();
 
 say("");
 say("The demo is running.");
-say(`  Page      http://127.0.0.1:${PORTS.page}/#/predict`);
+say(server ? `  Page      port ${PORTS.page}` : `  Page      http://127.0.0.1:${PORTS.page}/#/predict`);
 if (publicUrl) say(`  Public    ${publicUrl}/#/predict`);
 say(`  Oracle    ${oracleUrl}/  (admin token in ${path.join(home, "keys.json")})`);
 say(`  Desk      ${deskUrl}/status  (float ${desk.address})`);
 say(`  Settler   http://127.0.0.1:${PORTS.settler}/status`);
 say(`  Logs      ${path.join(home, "logs")}`);
 say("");
-say("Ctrl-C stops everything.");
+if (!server) say("Ctrl-C stops everything.");

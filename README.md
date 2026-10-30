@@ -121,6 +121,21 @@ The page is served on <http://127.0.0.1:4173/>. With [`cloudflared`](https://dev
 
 Keys, data and logs live in `~/.coinflip-demo`; delete it to start over with a new beacon and desk. The demo listens on the same nostr relay as the hosted services, so its oracle and settler also see their positions and skip any vault bound to another beacon.
 
+## Deploy
+
+`coinflip.Dockerfile` runs the same system as `pnpm demo` on a server: the page, an oracle with its own beacon, a desk and a settler in one container, started with `pnpm demo -- --server`. Only the page port, 4173, is exposed. The services talk to each other on loopback inside the container, and their logs go to the container log with a `[oracle]`, `[desk]` or `[settler]` prefix as well as to `/data/logs`.
+
+On Dokploy:
+
+1. In a project, create an Application named `coinflip`.
+2. Under Provider, choose Git with the repository `https://github.com/brg444/coinflip.git`, branch `main` and build path `/`.
+3. Under Build Type, choose Dockerfile, with Docker File `coinflip.Dockerfile` and Docker Context Path `.`.
+4. Under Advanced, add a volume mount named `coinflip-data` at `/data`. It holds the keys, the beacon, the desk's book and the settler's progress, so it has to outlive redeploys: a new volume is a new beacon and a new, unfunded desk.
+5. Under Domains, add a domain on container port 4173. Without a domain of our own, generate a `traefik.me` host and leave HTTPS off; the page needs no secure context, but some browsers warn before opening a plain HTTP site. Once `coinflip.casino` has DNS, point an A record at the server and add that host with HTTPS and Let's Encrypt.
+6. Deploy, then open the domain. The page comes up first and the header pill walks through the two deposits, as in [Demo](#demo); the addresses are in the container log too.
+
+A redeploy keeps everything on the volume, so the beacon, the desk float and open bets carry over. The image has no secrets in it: the keys are made on first start and stay in `/data/keys.json`.
+
 ## Page
 
 ```bash
