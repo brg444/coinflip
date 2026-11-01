@@ -2947,9 +2947,31 @@ function marketClock(now) {
   node.textContent = left > 0 ? mmss(left) : "0:00";
 }
 
+/**
+ * Chart height for the space the card has. Beside the bet it grows until the
+ * card ends level with the bet column, as long as the sticky card still fits
+ * on screen. Above the bet it takes a share of the width and of the screen.
+ * Phones keep a short chart so the bet and its button fit.
+ */
+function chartHeight(host, W) {
+  if (W < 420) return 104;
+  if (W < 520) return 128;
+  const card = host.closest(".market");
+  // Everything in the card that is not the chart: head, legend, padding, margins.
+  const rest = card ? card.offsetHeight - host.offsetHeight : 170;
+  const screen = window.innerHeight;
+  if (window.matchMedia("(min-width: 1101px)").matches) {
+    const compose = card?.parentElement?.querySelector(".compose");
+    const level = compose ? compose.offsetHeight - rest : 212;
+    const onScreen = screen - 96 - 24 - rest;
+    return Math.round(Math.max(212, Math.min(level, onScreen, W * 0.75)));
+  }
+  return Math.round(Math.max(160, Math.min(W * 0.3, screen * 0.28, 280)));
+}
+
 function drawMarket(host, { points, line, kind, close, now }) {
   const W = Math.max(280, Math.floor(host.clientWidth));
-  const H = W < 420 ? 104 : W < 520 ? 128 : 212;
+  const H = chartHeight(host, W);
   const top = 14;
   const bottom = H - 24;
   const t0 = now - MARKET_SPAN_S;
