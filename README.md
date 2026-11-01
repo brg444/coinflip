@@ -1,6 +1,6 @@
 # COINFLIP
 
-Bet whether bitcoin closes higher or lower than a line in five minutes. Each bet is an all-or-nothing contract on Arkade: the stake and the desk's payout sit in a vault that only the oracle's fixing can settle. Closed beta on Mutinynet. Domain: coinflip.casino.
+Bet whether Bitcoin closes higher or lower than a line in five minutes. Each bet is an all-or-nothing contract on Arkade: the stake goes to the desk, and the desk locks the payout in a vault that only the oracle's fixing can settle. Closed beta on Mutinynet. Domain: coinflip.casino.
 
 Forked from [ArkLabsHQ/arkade-options](https://github.com/ArkLabsHQ/arkade-options), which keeps its cash-settled covered calls and limited puts. The bet is in [Predict](#predict); `pnpm demo` runs it all on one machine ([Demo](#demo)).
 
@@ -162,7 +162,7 @@ docker run --rm -p 8080:80 arkade-options
 pnpm test
 ```
 
-Local arkade regtest (Docker, bitcoin regtest + arkd + emulator):
+Local arkade regtest (Docker, Bitcoin regtest + arkd + emulator):
 
 ```bash
 pnpm smoke:regtest
