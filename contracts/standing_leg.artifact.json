@@ -1,0 +1,349 @@
+{
+  "formatVersion": 1,
+  "contractName": "StandingLeg",
+  "constructorInputs": [
+    {
+      "name": "userPk",
+      "type": "pubkey"
+    },
+    {
+      "name": "userScript",
+      "type": "ScriptPubKey"
+    },
+    {
+      "name": "premiumScript",
+      "type": "ScriptPubKey"
+    },
+    {
+      "name": "vaultProgram",
+      "type": "ScriptPubKey"
+    },
+    {
+      "name": "side",
+      "type": "int"
+    },
+    {
+      "name": "collateral",
+      "type": "int"
+    },
+    {
+      "name": "premium",
+      "type": "int"
+    },
+    {
+      "name": "deadline",
+      "type": "int"
+    },
+    {
+      "name": "exit",
+      "type": "int"
+    }
+  ],
+  "functions": [
+    {
+      "name": "fill",
+      "arkade": {
+        "inputs": [],
+        "asm": [
+          "<premium>",
+          "<collateral>",
+          "<side>",
+          "<premiumScript.version>",
+          "<premiumScript.program>",
+          "<userScript.version>",
+          "<userScript.program>",
+          "OP_4",
+          "OP_PICK",
+          "0",
+          "OP_NUMEQUAL",
+          "OP_IF",
+          "OP_1",
+          "OP_ELSE",
+          "OP_4",
+          "OP_PICK",
+          "1",
+          "OP_NUMEQUAL",
+          "OP_ENDIF",
+          "OP_VERIFY",
+          "OP_5",
+          "OP_PICK",
+          "330",
+          "OP_GREATERTHAN",
+          "OP_VERIFY",
+          "OP_6",
+          "OP_PICK",
+          "330",
+          "OP_GREATERTHAN",
+          "OP_VERIFY",
+          "<deadline>",
+          "OP_CHECKTIME",
+          "OP_NOT",
+          "OP_VERIFY",
+          "OP_INSPECTNUMINPUTS",
+          "2",
+          "OP_NUMEQUALVERIFY",
+          "33",
+          "OP_INSPECTPACKET",
+          "OP_VERIFY",
+          "OP_DUP",
+          "OP_SIZE",
+          "OP_NIP",
+          "65",
+          "OP_NUMEQUALVERIFY",
+          "OP_DUP",
+          "0",
+          "1",
+          "OP_SUBSTR",
+          "0x01",
+          "OP_EQUALVERIFY",
+          "1",
+          "OP_INSPECTOUTPUTVALUE",
+          "OP_7",
+          "OP_PICK",
+          "OP_GREATERTHANOREQUAL",
+          "OP_VERIFY",
+          "1",
+          "OP_INSPECTOUTPUTSCRIPTPUBKEY",
+          "OP_SWAP",
+          "<vaultProgram.version>",
+          "<vaultProgram.program>",
+          "OP_ROT",
+          "OP_EQUALVERIFY",
+          "OP_NUMEQUALVERIFY",
+          "OP_PUSHCURRENTINPUTINDEX",
+          "OP_INSPECTINPUTVALUE",
+          "OP_6",
+          "OP_PICK",
+          "0",
+          "OP_NUMEQUAL",
+          "OP_IF",
+          "OP_5",
+          "OP_PICK",
+          "OP_5",
+          "OP_PICK",
+          "OP_5",
+          "OP_PICK",
+          "OP_5",
+          "OP_PICK",
+          "OP_ROT",
+          "OP_EQUALVERIFY",
+          "OP_NUMEQUALVERIFY",
+          "OP_DUP",
+          "OP_8",
+          "OP_PICK",
+          "OP_GREATERTHANOREQUAL",
+          "OP_VERIFY",
+          "OP_DUP",
+          "OP_8",
+          "OP_PICK",
+          "OP_SUB",
+          "0",
+          "OP_INSPECTOUTPUTVALUE",
+          "OP_10",
+          "OP_PICK",
+          "OP_ROT",
+          "OP_ADD",
+          "OP_GREATERTHANOREQUAL",
+          "OP_VERIFY",
+          "0",
+          "OP_INSPECTOUTPUTSCRIPTPUBKEY",
+          "OP_SWAP",
+          "OP_5",
+          "OP_PICK",
+          "OP_5",
+          "OP_PICK",
+          "OP_ROT",
+          "OP_EQUALVERIFY",
+          "OP_NUMEQUALVERIFY",
+          "OP_ENDIF",
+          "OP_6",
+          "OP_ROLL",
+          "1",
+          "OP_NUMEQUAL",
+          "OP_IF",
+          "OP_DUP",
+          "OP_8",
+          "OP_PICK",
+          "OP_GREATERTHANOREQUAL",
+          "OP_VERIFY",
+          "OP_OVER",
+          "1",
+          "32",
+          "OP_SUBSTR",
+          "<userPk>",
+          "OP_EQUALVERIFY",
+          "OP_OVER",
+          "33",
+          "32",
+          "OP_SUBSTR",
+          "OP_3",
+          "OP_PICK",
+          "OP_EQUALVERIFY",
+          "0",
+          "OP_INSPECTOUTPUTVALUE",
+          "OP_8",
+          "OP_PICK",
+          "OP_GREATERTHANOREQUAL",
+          "OP_VERIFY",
+          "0",
+          "OP_INSPECTOUTPUTSCRIPTPUBKEY",
+          "OP_SWAP",
+          "OP_7",
+          "OP_PICK",
+          "OP_7",
+          "OP_PICK",
+          "OP_ROT",
+          "OP_EQUALVERIFY",
+          "OP_NUMEQUALVERIFY",
+          "OP_DUP",
+          "OP_8",
+          "OP_PICK",
+          "OP_SUB",
+          "OP_DUP",
+          "330",
+          "OP_GREATERTHAN",
+          "OP_IF",
+          "2",
+          "OP_INSPECTOUTPUTVALUE",
+          "OP_OVER",
+          "OP_GREATERTHANOREQUAL",
+          "OP_VERIFY",
+          "2",
+          "OP_INSPECTOUTPUTSCRIPTPUBKEY",
+          "OP_SWAP",
+          "OP_6",
+          "OP_PICK",
+          "OP_6",
+          "OP_PICK",
+          "OP_ROT",
+          "OP_EQUALVERIFY",
+          "OP_NUMEQUALVERIFY",
+          "OP_ENDIF",
+          "OP_DROP",
+          "OP_ENDIF",
+          "OP_2DROP",
+          "OP_2DROP",
+          "OP_2DROP",
+          "OP_2DROP",
+          "OP_1"
+        ]
+      },
+      "leaves": [
+        {
+          "name": "fill",
+          "witness": [
+            {
+              "name": "serverSig",
+              "type": "signature",
+              "encoding": "schnorr-64",
+              "injected": true
+            },
+            {
+              "name": "emulatorSig",
+              "type": "signature",
+              "encoding": "schnorr-64",
+              "injected": true
+            }
+          ],
+          "asm": [
+            "<SERVER_KEY>",
+            "OP_CHECKSIGVERIFY",
+            "<EMULATOR_KEY:fill>",
+            "OP_CHECKSIG"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "cancel",
+      "arkade": {
+        "inputs": [],
+        "asm": [
+          "OP_INSPECTNUMINPUTS",
+          "1",
+          "OP_NUMEQUALVERIFY",
+          "<deadline>",
+          "OP_CHECKTIME",
+          "OP_VERIFY",
+          "0",
+          "OP_INSPECTOUTPUTVALUE",
+          "OP_PUSHCURRENTINPUTINDEX",
+          "OP_INSPECTINPUTVALUE",
+          "OP_GREATERTHANOREQUAL",
+          "OP_VERIFY",
+          "0",
+          "OP_INSPECTOUTPUTSCRIPTPUBKEY",
+          "OP_SWAP",
+          "<userScript.version>",
+          "<userScript.program>",
+          "OP_ROT",
+          "OP_EQUALVERIFY",
+          "OP_NUMEQUALVERIFY",
+          "OP_1"
+        ]
+      },
+      "leaves": [
+        {
+          "name": "cancel",
+          "witness": [
+            {
+              "name": "serverSig",
+              "type": "signature",
+              "encoding": "schnorr-64",
+              "injected": true
+            },
+            {
+              "name": "emulatorSig",
+              "type": "signature",
+              "encoding": "schnorr-64",
+              "injected": true
+            }
+          ],
+          "asm": [
+            "<SERVER_KEY>",
+            "OP_CHECKSIGVERIFY",
+            "<EMULATOR_KEY:cancel>",
+            "OP_CHECKSIG"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "unilateral",
+      "leaves": [
+        {
+          "name": "unilateral",
+          "witness": [
+            {
+              "name": "userSig",
+              "type": "signature",
+              "encoding": "schnorr-64"
+            }
+          ],
+          "asm": [
+            "<exit>",
+            "OP_CHECKSEQUENCEVERIFY",
+            "OP_DROP",
+            "<userPk>",
+            "OP_CHECKSIG"
+          ]
+        }
+      ]
+    }
+  ],
+  "source": {
+    "entry": "standing_leg.ark",
+    "files": {
+      "standing_leg.ark": "pragma arkade ^0.1.0;\n\n// One side of an open option offer. The writer funds side 0. A later holder\n// funds side 1. Neither coin names the holder. A matcher spends the two coins\n// in one transaction. fill has no user signature.\n//\n// The vault program is fixed when the writer funds. It names the writer and\n// the terms, not the holder. Packet 33 on the match names the holder. Side 1\n// requires that packet to be the holder who funded this coin. The premium is\n// paid to premiumScript. On side 0 that script is the writer's own payout.\n\ncontract StandingLeg(\n  pubkey userPk,\n  ScriptPubKey userScript,\n  ScriptPubKey premiumScript,\n  ScriptPubKey vaultProgram,\n  int side,\n  int collateral,\n  int premium,\n  int deadline,\n  int exit\n) {\n  const int DUST = 330;\n  const int PARTY = 33;\n  const int PARTY_SIZE = 65;\n\n  function fill() {\n    require(side == 0 || side == 1, \"side\");\n    require(collateral > DUST, \"collateral\");\n    require(premium > DUST, \"premium\");\n    require(!checkTime(deadline), \"expired\");\n    require(tx.numInputs == 2, \"two inputs\");\n\n    bytes party = tx.packet(PARTY);\n    require(size(party) == PARTY_SIZE, \"party\");\n    require(substr(party, 0, 1) == 0x01, \"party version\");\n\n    require(tx.outputs[1].value >= collateral, \"option size\");\n    require(tx.outputs[1].script == vaultProgram, \"vault\");\n\n    int locked = tx.input.current.value;\n    if (side == 0) {\n      require(premiumScript == userScript, \"writer premium\");\n      require(locked >= collateral, \"short collateral\");\n      int change = locked - collateral;\n      require(tx.outputs[0].value >= premium + change, \"premium\");\n      require(tx.outputs[0].script == userScript, \"user\");\n    }\n    if (side == 1) {\n      require(locked >= premium, \"short premium\");\n      require(substr(party, 1, 32) == userPk, \"holder\");\n      require(substr(party, 33, 32) == userScript.program, \"holder script\");\n      require(tx.outputs[0].value >= premium, \"premium\");\n      require(tx.outputs[0].script == premiumScript, \"writer\");\n      int change = locked - premium;\n      if (change > DUST) {\n        require(tx.outputs[2].value >= change, \"change\");\n        require(tx.outputs[2].script == userScript, \"change\");\n      }\n    }\n  }\n\n  function cancel() {\n    require(tx.numInputs == 1, \"one input\");\n    require(checkTime(deadline), \"open\");\n    require(tx.outputs[0].value >= tx.input.current.value, \"refund\");\n    require(tx.outputs[0].script == userScript, \"user\");\n  }\n\n  function unilateral(signature userSig) tapscript {\n    require(older(exit));\n    require(checkSig(userSig, userPk));\n  }\n}\n"
+    }
+  },
+  "compiler": {
+    "name": "arkadec",
+    "version": "0.1.0-rc.1",
+    "options": {
+      "optimize": true
+    }
+  },
+  "updatedAt": "2026-11-07T19:25:28.714151945+00:00",
+  "fingerprint": "sha256:e9b9d7e12c8a5408e57b3e003ef136753d0ca77a43d7ccc192a7b578b1235a9c"
+}

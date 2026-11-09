@@ -18,7 +18,7 @@ const PINNED_BEACON_STATUS = {
     signersN: 1,
     threshold: 1,
     domain: "4254435553442d464958",
-    keyLag: 60,
+    expiryLag: 60,
     readFee: 1000,
     adminPk: "e96d459a88359d713db09e7b226644b84765ac33b0b84f4cb60bc9d39ffb5bbe",
     exit: 2048,

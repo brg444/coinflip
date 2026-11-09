@@ -196,7 +196,7 @@
         <dt>Exit</dt><dd>2,048 seconds, unilateral leaves only</dd>
         <dt>Fill deadline</dt><dd>now + 3,600 seconds</dd>
         <dt>Cancel deadline</dt><dd>now + 45 seconds</dd>
-        <dt>Expiry</dt><dd>now + 120 seconds. Publish waits until expiry + keyLag 60.</dd>
+        <dt>Expiry</dt><dd>now + 120 seconds. Publish waits until expiry + expiryLag 60.</dd>
       </dl>
       <p class="note"><code>bindContracts</code> sets intent side to 0. The writer and holder programs are <code>payoutVtxo</code>. The smoke test does not set <code>payoutKey</code>. The 30-second <code>QUOTE_TTL_S</code> is <code>validUntil</code> on the quote row. It is not a script check.</p>
     </div>
@@ -290,7 +290,7 @@
       <div class="coin beacon covenant gain" data-sat="330" data-asset="unit:1" data-party="beacon">
         <div class="who"><svg class="lock" viewBox="0 0 16 16" aria-hidden="true"><path d="M5 7V5a3 3 0 0 1 6 0v2M3 7h10v7H3z" fill="none" stroke="currentColor"/></svg>AttestationBeacon · output 0</div>
         <strong>330</strong> sats
-        <p>Gain. 1 identity unit. Round 0, eight empty slots. The smoke test binds one oracle key, key lag 60, read fee 1,000, admin key the oracle wallet.</p>
+        <p>Gain. 1 identity unit. Round 0, eight empty slots. The smoke test binds one oracle key, expiry lag 60, read fee 1,000, admin key the oracle wallet.</p>
       </div>
       <div class="coin oracle" data-sat="9670" data-party="oracle">
         <div class="who">Oracle service · change</div>
@@ -449,7 +449,7 @@
 
 <article class="scenario" id="fixing">
   <h2>3. The oracle publishes the strike</h2>
-  <p>The smoke test uses one oracle key. <code>POST /api/samples</code> stores the strike, 9,700,000 cents, at the service clock, which is inside <code>[expiry, expiry + 60]</code>. <code>POST /api/publish</code> runs after <code>checkTime(expiry + keyLag)</code>. The sample digest is <code>sha256(ctrlTxid || BTCUSD || price_le64 || time_le64)</code>. The vault’s 50,000 does not move.</p>
+  <p>The smoke test uses one oracle key. <code>POST /api/samples</code> stores the strike, 9,700,000 cents, at the service clock, which is inside <code>[expiry, expiry + 60]</code>. <code>POST /api/publish</code> runs after <code>checkTime(expiry + expiryLag)</code>. The sample digest is <code>sha256(ctrlTxid || BTCUSD || price_le64 || time_le64)</code>. The vault’s 50,000 does not move.</p>
   <div class="band">Beacon · round 0 · eight empty slots · 330 sats · 1 identity unit. The next transaction writes the strike into slot 0.</div>
   <section class="tx" data-name="attest">
     <div class="col inputs">
@@ -470,7 +470,7 @@
       <div class="coin beacon covenant" data-sat="330" data-asset="unit:1" data-party="beacon">
         <div class="who"><svg class="lock" viewBox="0 0 16 16" aria-hidden="true"><path d="M5 7V5a3 3 0 0 1 6 0v2M3 7h10v7H3z" fill="none" stroke="currentColor"/></svg>AttestationBeacon</div>
         <strong>330</strong> sats
-        <p>Same script, same 330, same unit. Round 1. Newest slot: key is the test’s expiry, value <code>num2bin(9,700,000, 32)</code>. The vault reads the first 8 bytes.</p>
+        <p>Same script, same 330, same unit. Round 1. Newest slot: the expiry is the test’s expiry, value <code>num2bin(9,700,000, 32)</code>. The vault reads the first 8 bytes.</p>
       </div>
       <div class="tail">
         <div class="coin protocol opreturn" data-sat="0" data-party="protocol"><div class="who">Extension</div><strong>0</strong> sats<p>Asset packet, state packet, emulator packet with the 38-item witness.</p></div>
@@ -479,8 +479,8 @@
     </div>
   </section>
   <ul class="checks">
-    <li>Price 1 to 1,000,000,000 cents. Sample time &gt; 0 and ≤ key + keyLag. At least <code>threshold</code> signatures from the first <code>signersN</code> keys. The smoke test uses one key and threshold 1.</li>
-    <li>The new slot is (key, num2bin(price, 32)). Key &gt; 1,800, not already in a slot, and <code>checkTime(key + keyLag)</code>. Round + 1. Output 0 keeps the script, the value, and the unit.</li>
+    <li>Price 1 to 1,000,000,000 cents. Sample time is inside <code>[expiry, expiry + expiryLag]</code>. At least <code>threshold</code> signatures from the first <code>signersN</code> keys. The smoke test uses one key and threshold 1.</li>
+    <li>The new slot is (expiry, price || time). Expiry &gt; 1,800, not already in a slot, and <code>checkTime(expiry + expiryLag)</code>. Round + 1. Output 0 keeps the script, the value, and the unit.</li>
   </ul>
 </article>
 
@@ -909,14 +909,14 @@
 
   <section class="tx" data-name="reject-replay" data-reject="script">
     <div class="col inputs">
-      <div class="coin beacon covenant" data-sat="330" data-asset="unit:1" data-party="beacon"><div class="who">AttestationBeacon</div><strong>330</strong> sats<p>1 unit. A second attest of a key already in a slot.</p></div>
+      <div class="coin beacon covenant" data-sat="330" data-asset="unit:1" data-party="beacon"><div class="who">AttestationBeacon</div><strong>330</strong> sats<p>1 unit. A second attest of an expiry already in a slot.</p></div>
     </div>
     <div class="spine"><div class="tid">attest</div><div>330 in</div><div>330 out</div><div class="bad">script rejects</div></div>
     <div class="col outputs">
       <div class="coin beacon covenant" data-sat="330" data-asset="unit:1" data-party="beacon"><div class="who">Would be the beacon</div><strong>330</strong> sats<p>A second slot with the same price.</p></div>
     </div>
   </section>
-  <p><code>absent</code> rejects a key already in a slot. The same leaf also rejects a sample after key + keyLag, a publish before <code>checkTime(key + keyLag)</code>, and fewer signatures than <code>threshold</code>.</p>
+  <p><code>absent</code> rejects an expiry already in a slot. The same leaf also rejects a sample after expiry + expiryLag, a publish before <code>checkTime(expiry + expiryLag)</code>, and fewer signatures than <code>threshold</code>.</p>
 
   <section class="tx" data-name="reject-opreturn" data-reject="builder">
     <div class="col inputs">
@@ -1030,7 +1030,7 @@
     <li>The premium output exists before the vault output. Finalize will not pay the vault without paying the writer at least the premium.</li>
     <li>Settle pays from one slot whose key equals the expiry, newest first, using the integer formula above, and folds a leg of 330 sats or less.</li>
     <li>Settle sees that price only by spending the identity unit. The beacon’s read leaf carries the packet unchanged and adds <code>readFee</code>, 1,000 sats, on output 0. The vault pays it.</li>
-    <li>Attest stores the signed price. The sample is <code>sha256(ctrlTxid || BTCUSD || price || time)</code>. At least <code>threshold</code> of the oracle keys must sign. The smoke test uses one key. The sample time is at or before key + keyLag, and <code>checkTime(key + keyLag)</code> has passed.</li>
+    <li>Attest stores the signed price. The sample is <code>sha256(ctrlTxid || BTCUSD || expiry || price || time)</code>. At least <code>threshold</code> of the oracle keys must sign. The smoke test uses one key. The sample time is inside <code>[expiry, expiry + expiryLag]</code>, and <code>checkTime(expiry + expiryLag)</code> has passed.</li>
     <li>Attest moves the round by one, refuses a key already in a slot, and continues the same script and the same unit.</li>
     <li>Migrate needs three of the five oracle keys and the oracle service key, and continues the unit and the packet onto the signed next program. The vault’s constructor does not contain the beacon script or the committee keys.</li>
     <li>Cancel after the deadline returns the intent coin to the writer program. Unilateral leaves wait 2,048 seconds.</li>

@@ -1,0 +1,74 @@
+pragma arkade ^0.1.0;
+
+// One side of an open option offer. The writer funds side 0. A later holder
+// funds side 1. Neither coin names the holder. A matcher spends the two coins
+// in one transaction. fill has no user signature.
+//
+// The vault program is fixed when the writer funds. It names the writer and
+// the terms, not the holder. Packet 33 on the match names the holder. Side 1
+// requires that packet to be the holder who funded this coin. The premium is
+// paid to premiumScript. On side 0 that script is the writer's own payout.
+
+contract StandingLeg(
+  pubkey userPk,
+  ScriptPubKey userScript,
+  ScriptPubKey premiumScript,
+  ScriptPubKey vaultProgram,
+  int side,
+  int collateral,
+  int premium,
+  int deadline,
+  int exit
+) {
+  const int DUST = 330;
+  const int PARTY = 33;
+  const int PARTY_SIZE = 65;
+
+  function fill() {
+    require(side == 0 || side == 1, "side");
+    require(collateral > DUST, "collateral");
+    require(premium > DUST, "premium");
+    require(!checkTime(deadline), "expired");
+    require(tx.numInputs == 2, "two inputs");
+
+    bytes party = tx.packet(PARTY);
+    require(size(party) == PARTY_SIZE, "party");
+    require(substr(party, 0, 1) == 0x01, "party version");
+
+    require(tx.outputs[1].value >= collateral, "option size");
+    require(tx.outputs[1].script == vaultProgram, "vault");
+
+    int locked = tx.input.current.value;
+    if (side == 0) {
+      require(premiumScript == userScript, "writer premium");
+      require(locked >= collateral, "short collateral");
+      int change = locked - collateral;
+      require(tx.outputs[0].value >= premium + change, "premium");
+      require(tx.outputs[0].script == userScript, "user");
+    }
+    if (side == 1) {
+      require(locked >= premium, "short premium");
+      require(substr(party, 1, 32) == userPk, "holder");
+      require(substr(party, 33, 32) == userScript.program, "holder script");
+      require(tx.outputs[0].value >= premium, "premium");
+      require(tx.outputs[0].script == premiumScript, "writer");
+      int change = locked - premium;
+      if (change > DUST) {
+        require(tx.outputs[2].value >= change, "change");
+        require(tx.outputs[2].script == userScript, "change");
+      }
+    }
+  }
+
+  function cancel() {
+    require(tx.numInputs == 1, "one input");
+    require(checkTime(deadline), "open");
+    require(tx.outputs[0].value >= tx.input.current.value, "refund");
+    require(tx.outputs[0].script == userScript, "user");
+  }
+
+  function unilateral(signature userSig) tapscript {
+    require(older(exit));
+    require(checkSig(userSig, userPk));
+  }
+}

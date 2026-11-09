@@ -143,7 +143,7 @@ test("option intent fills, cancels, and settles at the strike on local arkade re
       signers: parsed.beacon.signers,
       threshold: parsed.beacon.threshold,
       domain: parsed.beacon.domain,
-      keyLag: parsed.beacon.keyLag,
+      expiryLag: parsed.beacon.expiryLag,
       readFee: parsed.beacon.readFee,
       adminPk: parsed.beacon.adminPk,
       exit: parsed.beacon.exit,
@@ -230,14 +230,14 @@ test("option intent fills, cancels, and settles at the strike on local arkade re
       "cancel refund",
     );
 
-    const keyLag = Number(parsed.beacon.keyLag);
+    const expiryLag = Number(parsed.beacon.expiryLag);
     await sleepUntil(Number(expiry), "sample");
-    if (Math.floor(Date.now() / 1000) > Number(expiry) + keyLag) {
+    if (Math.floor(Date.now() / 1000) > Number(expiry) + expiryLag) {
       throw new Error("missed the publish window");
     }
     const sample = (await oracleCall(oracle.url, "/api/samples", { price: strike.toString() })).json;
     assert.equal(sample.price, strike.toString(), `sample ${JSON.stringify(sample)}`);
-    await sleepUntil(Number(expiry) + keyLag, "publish");
+    await sleepUntil(Number(expiry) + expiryLag, "publish");
     const published = (await oracleCall(oracle.url, "/api/publish", { expiry: Number(expiry) })).json;
     console.log("publish", published.txid, published.price);
     assert.equal(published.price, strike.toString());
@@ -402,12 +402,12 @@ test("a prediction fills from the desk float, pays the bettor above the line, an
     console.log("predict refund", refunded.txid);
     await waitFor(async () => fresh(await scriptCoins(indexer, cancel.userPkScript), bettorAtCancel, stake), "refund");
 
-    const keyLag = Number(parsed.beacon.keyLag);
+    const expiryLag = Number(parsed.beacon.expiryLag);
     await sleepUntil(Number(expiry), "predict sample");
     const above = line + 3_710n;
     const sample = (await oracleCall(oracle.url, "/api/samples", { price: above.toString() })).json;
     assert.equal(sample.price, above.toString(), `sample ${JSON.stringify(sample)}`);
-    await sleepUntil(Number(expiry) + keyLag, "predict publish");
+    await sleepUntil(Number(expiry) + expiryLag, "predict publish");
     const published = (await oracleCall(oracle.url, "/api/publish", { expiry: Number(expiry) })).json;
     console.log("predict publish", published.txid, published.price);
     assert.equal(published.price, above.toString());
@@ -501,7 +501,7 @@ async function bootOracle(
     signers: parsed.beacon.signers,
     threshold: parsed.beacon.threshold,
     domain: parsed.beacon.domain,
-    keyLag: parsed.beacon.keyLag,
+    expiryLag: parsed.beacon.expiryLag,
     readFee: parsed.beacon.readFee,
     adminPk: parsed.beacon.adminPk,
     exit: parsed.beacon.exit,

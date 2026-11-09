@@ -10,8 +10,10 @@ pragma arkade ^0.1.0;
 // with readFee sats of this coin added to it. Payouts start at output 1 and
 // sum to the locked value minus readFee.
 //
-// The settlement price is the newest fixing whose key equals `expiry` in the
-// beacon state packet, the first 8 bytes of that slot's value, in USD cents.
+// The settlement price is the newest fixing for `expiry` in the beacon state
+// packet, the first 8 bytes of that slot's value, in USD cents. The next 8
+// bytes are the sample time. Settle rejects a time outside
+// [expiry, expiry + 60], the same window attest enforces when expiryLag is 60.
 //   higher: ST >  K -> holder gets the collateral, else 0
 //   lower:  ST <  K -> holder gets the collateral, else 0
 // A close exactly on the line pays the writer for both kinds.
@@ -25,8 +27,8 @@ contract PredictVault(
   int kind,
   pubkey writerPk,
   pubkey holderPk,
-  bytes32 writerScript,
-  bytes32 holderScript,
+  ScriptPubKey writerScript,
+  ScriptPubKey holderScript,
   int strike,
   int collateral,
   int expiry,
@@ -38,6 +40,7 @@ contract PredictVault(
   const int DUST = 330;
   const int PRICE_MAX = 1000000000;
   const int Q_MAX = 1000000000;
+  const int EXPIRY_LAG = 60;
   const int STATE = 32;
   const int SIZE = 329;
 
@@ -57,17 +60,21 @@ contract PredictVault(
     require(substr(state, 0, 1) == 0x01, "state version");
 
     int st = 0;
+    int sampleTime = 0;
     int found = 0;
     int[8] slots = [9, 49, 89, 129, 169, 209, 249, 289];
     for (i, offset) in slots {
       if (found == 0 && substr(state, offset, 8) == num2bin(expiry, 8)) {
         st = bin2num(substr(state, (offset + 8), 8));
+        sampleTime = bin2num(substr(state, (offset + 16), 8));
         found = 1;
       }
     }
     require(found == 1, "no fixing for expiry");
     require(st > 0, "price");
     require(st <= PRICE_MAX, "price cap");
+    require(sampleTime >= expiry, "sample before expiry");
+    require(sampleTime <= expiry + EXPIRY_LAG, "sample after close");
 
     int ph = 0;
     if (kind == 2) {
@@ -94,17 +101,17 @@ contract PredictVault(
 
     if (phPay > DUST && writerAmt > DUST) {
       require(tx.outputs[1].value >= phPay, "holder short");
-      require(tx.outputs[1].scriptPubKey == holderScript, "holder script");
+      require(tx.outputs[1].script == holderScript, "holder script");
       require(tx.outputs[2].value >= writerAmt, "writer short");
-      require(tx.outputs[2].scriptPubKey == writerScript, "writer script");
+      require(tx.outputs[2].script == writerScript, "writer script");
     }
     if (phPay <= DUST) {
       require(tx.outputs[1].value >= pot, "writer short");
-      require(tx.outputs[1].scriptPubKey == writerScript, "writer script");
+      require(tx.outputs[1].script == writerScript, "writer script");
     }
     if (writerAmt <= DUST && phPay > DUST) {
       require(tx.outputs[1].value >= pot, "holder short");
-      require(tx.outputs[1].scriptPubKey == holderScript, "holder script");
+      require(tx.outputs[1].script == holderScript, "holder script");
     }
   }
 

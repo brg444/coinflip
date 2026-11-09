@@ -212,6 +212,8 @@ async function deskUp(key, beacon) {
   start("desk", "desk/main.ts", {
     DESK_KEY: key.deskKey,
     BEACON_TXID: beacon.issueTxid,
+    // The desk reads the beacon's expiryLag here once and refuses quotes unless it is 60.
+    ORACLE_URL: oracleUrl,
     DATA_DIR: path.join(home, "desk"),
     PORT: String(PORTS.desk),
   });

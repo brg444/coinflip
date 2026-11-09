@@ -21,7 +21,7 @@ export const SLOT_COUNT = 8;
 export const SLOT_SIZE = 40;
 export const SLOTS_AT = 9;
 export const SLOT_OFFSETS = Array.from({ length: SLOT_COUNT }, (_, i) => SLOTS_AT + SLOT_SIZE * i);
-export type Slot = { key: bigint; value: Uint8Array };
+export type Slot = { expiry: bigint; value: Uint8Array };
 export type BeaconState = { version: number; round: bigint; slots: Slot[] };
 
 /** `num2bin(value, size)`: little-endian sign-magnitude, so the top bit must stay clear. */
@@ -65,7 +65,7 @@ export function encodeState(state: BeaconState): Uint8Array {
   const parts = [Uint8Array.of(state.version), num2bin(state.round, 8)];
   for (const slot of state.slots) {
     if (slot.value.length !== 32) throw new Error("slot value must be 32 bytes");
-    parts.push(num2bin(slot.key, 8), slot.value);
+    parts.push(num2bin(slot.expiry, 8), slot.value);
   }
   return concat(...parts);
 }
@@ -76,7 +76,7 @@ export function decodeState(bytes: Uint8Array): BeaconState {
     version: bytes[0]!,
     round: bin2num(bytes.subarray(1, 9)),
     slots: SLOT_OFFSETS.map((at) => ({
-      key: bin2num(bytes.subarray(at, at + 8)),
+      expiry: bin2num(bytes.subarray(at, at + 8)),
       value: bytes.slice(at + 8, at + SLOT_SIZE),
     })),
   };
@@ -86,25 +86,31 @@ export function genesisState(): Uint8Array {
   return encodeState({
     version: 1,
     round: 0n,
-    slots: Array.from({ length: SLOT_COUNT }, () => ({ key: 0n, value: new Uint8Array(32) })),
+    slots: Array.from({ length: SLOT_COUNT }, () => ({ expiry: 0n, value: new Uint8Array(32) })),
   });
 }
 
 /** The packet `attest` requires after `prev`: round + 1, the new slot first, the oldest slot dropped. */
-export function nextState(prev: Uint8Array, key: bigint, value: Uint8Array): Uint8Array {
+export function nextState(prev: Uint8Array, expiry: bigint, value: Uint8Array): Uint8Array {
   const state = decodeState(prev);
-  if (key <= 0n) throw new Error("key must be positive");
-  if (state.slots.some((slot) => slot.key === key)) throw new Error(`key ${key} is already in a slot`);
+  if (expiry <= 0n) throw new Error("expiry must be positive");
+  if (state.slots.some((slot) => slot.expiry === expiry)) throw new Error(`expiry ${expiry} is already in a slot`);
   return encodeState({
     version: 1,
     round: state.round + 1n,
-    slots: [{ key, value }, ...state.slots.slice(0, SLOT_COUNT - 1)],
+    slots: [{ expiry, value }, ...state.slots.slice(0, SLOT_COUNT - 1)],
   });
 }
 
-/** Slot value `num2bin(cents, 32)`. The vault reads the first 8 bytes. */
-export function priceValue(cents: bigint): Uint8Array {
-  return num2bin(cents, 32);
+/**
+ * Slot value the vault reads. The price is the first 8 bytes. The sample time
+ * is the next 8. The rest are zero, so a price-only reader still sees the price.
+ */
+export function priceValue(cents: bigint, time = 0n): Uint8Array {
+  const out = new Uint8Array(32);
+  out.set(num2bin(cents, 8), 0);
+  out.set(num2bin(time, 8), 8);
+  return out;
 }
 
 /** Operator digest: `sha256(ctrlTxid || nextState)`. `ctrlTxid` is the reversed display txid. */
@@ -116,10 +122,10 @@ export function publishDigest(ctrlTxid: Uint8Array, next: Uint8Array): Uint8Arra
 
 const TICKER = new Uint8Array([0x42, 0x54, 0x43, 0x55, 0x53, 0x44]);
 
-/** Sample the beacon checks: `sha256(ctrlTxid || BTCUSD || price_le64 || time_le64)`. */
-export function sampleDigest(ctrlTxid: Uint8Array, price: bigint, time: bigint): Uint8Array {
+/** Sample the beacon checks: `sha256(ctrlTxid || BTCUSD || expiry_le64 || price_le64 || time_le64)`. */
+export function sampleDigest(ctrlTxid: Uint8Array, expiry: bigint, price: bigint, time: bigint): Uint8Array {
   if (ctrlTxid.length !== 32) throw new Error("ctrlTxid must be 32 bytes");
-  return sha256(ctrlTxid, TICKER, num2bin(price, 8), num2bin(time, 8));
+  return sha256(ctrlTxid, TICKER, num2bin(expiry, 8), num2bin(price, 8), num2bin(time, 8));
 }
 
 export const SIGNER_SLOTS = 5;
@@ -131,7 +137,7 @@ export type BeaconArgs = {
   /** How many of `signers` must sign a sample. At least 1, at most the signer count. */
   threshold: bigint;
   domain: Uint8Array;
-  keyLag: bigint;
+  expiryLag: bigint;
   /** Sats a read adds to the beacon. The vault being settled pays this. */
   readFee: bigint;
   adminPk: Uint8Array;
@@ -163,7 +169,7 @@ export function bindBeacon(input: BeaconArgs): Bound {
     signersN: BigInt(signers.length),
     threshold: input.threshold,
     domain: input.domain,
-    keyLag: input.keyLag,
+    expiryLag: input.expiryLag,
     readFee: input.readFee,
     adminPk: xOnly(input.adminPk),
     exit: input.exit ?? EXIT,

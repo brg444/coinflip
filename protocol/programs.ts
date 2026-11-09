@@ -6,6 +6,8 @@ import intentArtifact from "../contracts/option_intent.artifact.json" with { typ
 import vaultArtifact from "../contracts/option_vault.artifact.json" with { type: "json" };
 import predictArtifact from "../contracts/predict_vault.artifact.json" with { type: "json" };
 import { isPredict } from "./constants.ts";
+import standingLegArtifact from "../contracts/standing_leg.artifact.json" with { type: "json" };
+import standingVaultArtifact from "../contracts/standing_vault.artifact.json" with { type: "json" };
 
 // CHECKTIME (0xdc) is in the SDK. The vault's slot loop still compiles to OP_PUT
 // (0xbb), which that table does not list, so the spent program cannot load
@@ -23,12 +25,45 @@ if (!Object.hasOwn(ops, "PUT")) {
  * `contracts/*.artifact.json` are the arkadec output. Callers load them with
  * `arkade.programFromArtifact`. Nothing compiles the `.ark` sources at runtime.
  *
+ * The pinned SDK knows `AssetId` and `Outpoint`, not the compiler's `ScriptPubKey`
+ * (`program`, then `version`). It also still reads a child contract as `<VTXO:...>`.
+ * Published arkadec spells that placeholder `<CONTRACT:...>`. Both are the 32-byte
+ * witness program; version 1 is a literal beside it.
+ *
  * `older(exit)` is emitted as a block CSV. Public arkd rejects that on an exit
  * leaf, so the spent program sets the BIP68 seconds bit on the same `$exit`
- * integer. Nothing else in the artifact is edited.
+ * integer. Nothing else in the loaded program is edited.
  */
+function loadArtifact(artifact: arkade.ContractArtifact): ReturnType<typeof arkade.programFromArtifact> {
+  const structs = artifact.structs ?? [];
+  const withStruct = structs.some((item) => item.name === "ScriptPubKey")
+    ? artifact
+    : {
+        ...artifact,
+        structs: [
+          ...structs,
+          {
+            name: "ScriptPubKey",
+            fields: [
+              { name: "program", type: "bytes" },
+              { name: "version", type: "int" },
+            ],
+          },
+        ],
+      };
+  const rewrite = (token: string) => (token.startsWith("<CONTRACT:") ? `<VTXO:${token.slice("<CONTRACT:".length)}` : token);
+  return arkade.programFromArtifact({
+    ...withStruct,
+    functions: withStruct.functions.map((group) => ({
+      ...group,
+      arkade: group.arkade ? { ...group.arkade, asm: group.arkade.asm.map(rewrite) } : group.arkade,
+      leaves: group.leaves.map((leaf) => ({ ...leaf, asm: leaf.asm.map(rewrite) })),
+    })),
+  });
+}
+
 function secondsExit(artifact: arkade.ContractArtifact): ReturnType<typeof arkade.programFromArtifact> {
-  const program = arkade.programFromArtifact(artifact);
+  const program = loadArtifact(artifact);
   const unilateral = program.functions.unilateral;
   const csv = unilateral?.tapscript?.csv;
   if (!unilateral?.tapscript || csv?.type !== "blocks" || csv.value !== "$exit") {
@@ -67,6 +102,14 @@ export function intentProgram() {
   return secondsExit(intentArtifact as arkade.ContractArtifact);
 }
 
+export function standingLegProgram() {
+  return secondsExit(standingLegArtifact as arkade.ContractArtifact);
+}
+
+export function standingVaultProgram() {
+  return secondsExit(standingVaultArtifact as arkade.ContractArtifact);
+}
+
 /**
  * The compiler's NonInteractiveSwap, the pattern OptionIntent copies. Its
  * `swap` path compares output 0 against `new SingleSig(makerPk, exit)`, which
@@ -83,23 +126,31 @@ export function beaconProgram() {
 }
 
 export function rawVaultProgram() {
-  return arkade.programFromArtifact(vaultArtifact as arkade.ContractArtifact);
+  return loadArtifact(vaultArtifact as arkade.ContractArtifact);
 }
 
 export function rawPredictVaultProgram() {
-  return arkade.programFromArtifact(predictArtifact as arkade.ContractArtifact);
+  return loadArtifact(predictArtifact as arkade.ContractArtifact);
 }
 
 export function rawBeaconProgram() {
-  return arkade.programFromArtifact(beaconArtifact as arkade.ContractArtifact);
+  return loadArtifact(beaconArtifact as arkade.ContractArtifact);
 }
 
 export function rawIntentProgram() {
-  return arkade.programFromArtifact(intentArtifact as arkade.ContractArtifact);
+  return loadArtifact(intentArtifact as arkade.ContractArtifact);
+}
+
+export function rawStandingLegProgram() {
+  return loadArtifact(standingLegArtifact as arkade.ContractArtifact);
+}
+
+export function rawStandingVaultProgram() {
+  return loadArtifact(standingVaultArtifact as arkade.ContractArtifact);
 }
 
 export function rawSwapProgram() {
-  return arkade.programFromArtifact(swapArtifact as arkade.ContractArtifact);
+  return loadArtifact(swapArtifact as arkade.ContractArtifact);
 }
 
 function count(asm: readonly unknown[] | undefined, name: string) {

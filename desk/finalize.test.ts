@@ -7,7 +7,7 @@ import { buildOffchainTx, SingleKey, Transaction, type ArkTxInput, type IndexerP
 import { EXIT } from "../protocol/constants.ts";
 import { payoutVtxo } from "../protocol/contracts.ts";
 import { bytesToHex } from "../protocol/hex.ts";
-import { cosignCheckpoint, finalizeDeskSpends, settleEmulatorTx } from "./finalize.ts";
+import { cosignCheckpoint, finalizeDeskSpends, pendingOutpoints, settleEmulatorTx } from "./finalize.ts";
 
 const SERVER = "03301078808e4f7bc0dadfe29e34b1df8eaf0108ef06b1722274075ebc107a127a";
 
@@ -231,7 +231,7 @@ test("a missing offchain row is submitted again and then finalized", async () =>
   assert.equal(signed.getInput(0).tapScriptSig?.length, 1);
 });
 
-test("an already-spent input is not submitted again", async () => {
+test("an already-spent input is not submitted again or left pending", async () => {
   const desk = key(8);
   const server = Uint8Array.from(Buffer.from(SERVER, "hex"));
   const script = payoutVtxo(await desk.xOnlyPublicKey(), server, EXIT);
@@ -252,9 +252,13 @@ test("an already-spent input is not submitted again", async () => {
   ]);
   let submits = 0;
   let pendingReads = 0;
+  const refreshed: string[] = [];
   const opts = {
     identity: desk,
     deskScript: script,
+    async reconcileSpent(outpoints: { txid: string; vout: number }[]) {
+      refreshed.push(...outpoints.map((coin) => `${coin.txid}:${coin.vout}`));
+    },
     indexer: {
       async getVtxos() {
         return { vtxos: [{ txid: "cd".repeat(32), vout: 0, value: 40_633, isSpent: true, arkTxId: arkTx.id }] };
@@ -278,9 +282,12 @@ test("an already-spent input is not submitted again", async () => {
     },
   };
   assert.deepEqual(await finalizeDeskSpends(opts), []);
+  assert.deepEqual(refreshed, [`${"cd".repeat(32)}:0`]);
+  assert.equal((await pendingOutpoints(opts.indexer, script)).size, 0);
   assert.deepEqual(await finalizeDeskSpends(opts), []);
   assert.equal(submits, 1);
   assert.equal(pendingReads, 1);
+  assert.deepEqual(refreshed, [`${"cd".repeat(32)}:0`]);
 });
 
 test("settleEmulatorTx finalizes the package send() returned, and submits it when arkd has no row", async () => {

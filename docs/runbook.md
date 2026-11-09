@@ -65,6 +65,7 @@ From [desk/main.ts](../desk/main.ts) and the root [Dockerfile](../Dockerfile).
 | `DESK_KEY` | New 32-byte hex. Nostr pubkey and the option holder key. |
 | `BEACON_TXID` | The new oracle `issueTxid`, 64 hex characters. The process exits if this is missing or not 64 hex. Set it after deploy, then restart. |
 | `BEACON_GIDX` | Leave unset (`0`) unless status shows the identity asset at another vout. |
+| `ORACLE_URL` | Origin of the Oracle service. At startup the desk reads `args.expiryLag` once and refuses a quote unless it is `60`, the window `OptionVault` hardcodes. |
 | `ARK_URL` | `https://mutinynet.arkade.sh`. |
 | `EMULATOR_URL` | `https://emulator.mutinynet.arkade.sh`. |
 | `RELAYS` | Leave unset. Default is `wss://nostr.arkade.sh`. |
@@ -98,7 +99,7 @@ From [settle/main.ts](../settle/main.ts) and [settle/Dockerfile](../settle/Docke
 
 The image starts `node --experimental-strip-types settle/main.ts`. On boot it connects to Mutinynet, subscribes to the relay, and ticks every 2 seconds. `GET /status` returns `commit`, `oracle`, `relay`, `watching`, and `settled`.
 
-When a fill is published, the settler rebuilds the vault from that event. Once `expiry + 60` has passed, about once a minute, it `POST`s `/api/publish` for that expiry and then spends the vault. `no sample` or any other publish failure is logged and the pass continues with the next vault. `409 already a fixing` means that expiry is already on the beacon, so the settler settles it. One beacon coin settles one vault per pass. The 1,000-sat read fee comes out of the vault. The settler holds no key and no fee wallet. The oracle still samples about once a minute; it does not attest a new key on every clock minute.
+When a fill is published, the settler rebuilds the vault from that event. Once `expiry + 60` has passed, about once a minute, it `POST`s `/api/publish` for that expiry and then spends the vault. `no sample` or any other publish failure is logged and the pass continues with the next vault. `409 already a fixing` means that expiry is already on the beacon. The settler reads the slot and settles only when its price and time are the sample the oracle would have chosen for that expiry. If the settler logs that a fixing is not the oracle sample more than 24 hours after expiry, the sample history has been pruned and the writer's unilateral exit is the backstop; do not re-publish from an old print. One beacon coin settles one vault per pass. The 1,000-sat read fee comes out of the vault. The settler holds no key and no fee wallet. The oracle still samples about once a minute; it does not attest a new expiry on every clock minute.
 
 ## Beacon fees
 
@@ -109,7 +110,7 @@ Fixed in [protocol/constants.ts](../protocol/constants.ts) and copied into the b
 | Dust on the beacon coin | `330` sats (`DUST_SATS`) | Deploy pays this onto the beacon ([protocol/beacon.ts](../protocol/beacon.ts)). A payoff leg at or below 330 sats is folded into the other output ([contracts/option_vault.ark](../contracts/option_vault.ark)). |
 | Read fee | `1000` sats (`BEACON_READ_FEE`) | `args.readFee`. Kept at 1000 so settlement is easy to account. The vault pays it out of collateral. The regtest smoke test asserts both numbers. |
 
-`GET /api/status` then shows `args.exit` `2048`, `args.readFee` `1000`, `args.keyLag` `60`, and `args.domain` hex of `BTCUSD-FIX`.
+`GET /api/status` then shows `args.exit` `2048`, `args.readFee` `1000`, `args.expiryLag` `60`, and `args.domain` hex of `BTCUSD-FIX`.
 
 ## Fund, issue, deploy
 
