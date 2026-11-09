@@ -11,6 +11,12 @@ import { finalizeDeskSpends, pendingOutpoints, settleEmulatorTx, type PendingArk
 type Client = Awaited<ReturnType<typeof arkade.Arkade.connect>>;
 type Coin = { txid: string; vout: number; value: number };
 
+function refreshSpent(client: Client) {
+  const manager = client.contractManager;
+  if (!manager) return undefined;
+  return (outpoints: { txid: string; vout: number }[]) => manager.refreshOutpoints(outpoints);
+}
+
 function asInput(coin: Coin, script: DefaultVtxo.Script): ArkTxInput {
   return {
     txid: coin.txid,
@@ -137,6 +143,8 @@ export async function fillQuote(opts: {
       txid: sent.txid,
       signedArkTx: sent.signedArkTx,
       signedCheckpointTxs: sent.signedCheckpointTxs,
+      inputs: picked,
+      reconcileSpent: refreshSpent(opts.client),
     })
     : false;
   let recovered: string[] = [];
@@ -170,6 +178,7 @@ async function finishSpend(opts: {
         indexer,
         identity,
         deskScript: opts.deskScript,
+        reconcileSpent: refreshSpent(opts.client),
       });
       finalized.push(...done);
       if (done.length) console.log("finalized", done.join(","));

@@ -250,7 +250,7 @@ test("a covered call locks, pays the writer, settles, and refunds a missed fill"
     signers: [oraclePks[0]!],
     threshold: 1n,
     domain: new TextEncoder().encode("BTCUSD-FIX"),
-    keyLag: 0n,
+    expiryLag: 0n,
     readFee: 0n,
     adminPk: oraclePks[0]!,
     serverKey: client.serverKey,

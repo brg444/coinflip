@@ -1,4 +1,5 @@
 {
+  "formatVersion": 1,
   "contractName": "NonInteractiveSwap",
   "constructorInputs": [
     {
@@ -53,56 +54,44 @@
           },
           {
             "name": "takerScriptPubKey",
-            "type": "bytes"
+            "type": "ScriptPubKey"
           }
         ],
         "asm": [
-          "<exit>",
-          "<wantAmount>",
-          "<wantAssetIdGidx>",
-          "<wantAssetIdTxid>",
-          "<offerAmount>",
-          "<offerAssetIdGidx>",
-          "<offerAssetIdTxid>",
-          "<makerPk>",
-          "OP_9",
-          "OP_ROLL",
-          "OP_9",
-          "OP_ROLL",
           "OP_CHECKSIGVERIFY",
           "0",
-          "OP_5",
-          "OP_ROLL",
-          "OP_6",
-          "OP_ROLL",
+          "<wantAssetIdTxid>",
+          "<wantAssetIdGidx>",
           "OP_INSPECTOUTASSETLOOKUP",
           "OP_VERIFY",
-          "OP_5",
-          "OP_ROLL",
+          "<wantAmount>",
           "OP_GREATERTHANOREQUAL",
           "OP_VERIFY",
           "0",
           "OP_INSPECTOUTPUTSCRIPTPUBKEY",
-          "OP_DROP",
-          "<VTXO:SingleSig(<makerPk>,<exit>)>",
-          "OP_EQUALVERIFY",
-          "1",
+          "OP_SWAP",
+          "<CONTRACT:SingleSig(<makerPk>,<exit>)>",
+          "OP_1",
+          "OP_SWAP",
           "OP_ROT",
-          "OP_3",
-          "OP_ROLL",
+          "OP_EQUALVERIFY",
+          "OP_NUMEQUALVERIFY",
+          "1",
+          "<offerAssetIdTxid>",
+          "<offerAssetIdGidx>",
           "OP_INSPECTOUTASSETLOOKUP",
           "OP_VERIFY",
-          "OP_ROT",
+          "<offerAmount>",
           "OP_GREATERTHANOREQUAL",
           "OP_VERIFY",
           "1",
           "OP_INSPECTOUTPUTSCRIPTPUBKEY",
-          "OP_DROP",
-          "OP_3",
-          "OP_ROLL",
-          "OP_EQUAL",
-          "OP_NIP",
-          "OP_NIP"
+          "OP_SWAP",
+          "OP_2SWAP",
+          "OP_ROT",
+          "OP_EQUALVERIFY",
+          "OP_NUMEQUALVERIFY",
+          "OP_1"
         ]
       },
       "leaves": [
@@ -141,12 +130,11 @@
           }
         ],
         "asm": [
-          "<expirationTime>",
-          "<makerPk>",
           "OP_INSPECTLOCKTIME",
-          "OP_ROT",
+          "<expirationTime>",
           "OP_GREATERTHANOREQUAL",
           "OP_VERIFY",
+          "<makerPk>",
           "OP_CHECKSIG"
         ]
       },
@@ -202,13 +190,17 @@
   "source": {
     "entry": "non_interactive_swap.ark",
     "files": {
-      "non_interactive_swap.ark": "pragma arkade ^0.1.0;\n\n// Non-Interactive Swap Contract\n// Allows users to exchange assets without requiring both parties to be online simultaneously.\n//\n// Paths:\n// - swap cooperative: takerSig + serverSig + OP_INSPECT* (trustless via introspection)\n// - cancel cooperative: makerSig + serverSig + after(expiration)\n// - unilateral: makerSig + CSV (maker recovers if no taker)\n\nimport \"single_sig.ark\";\n\ncontract NonInteractiveSwap(\n  // Maker's public key (creator of the swap offer)\n  pubkey makerPk,\n  // Asset ID the maker is offering (locked in this contract)\n  bytes32 offerAssetIdTxid,\n  int offerAssetIdGidx,\n  // Amount of offer asset locked\n  int offerAmount,\n  // Asset ID the maker wants to receive\n  bytes32 wantAssetIdTxid,\n  int wantAssetIdGidx,\n  // Amount of want asset required for the swap\n  int wantAmount,\n  // Expiration timestamp (block height) after which maker can cancel\n  int expirationTime,\n  // Exit timelock in blocks\n  int exit\n) {\n  // Swap: Any taker can fulfill - introspection makes cooperative path trustless\n  function swap(pubkey takerPk, signature takerSig, bytes takerScriptPubKey) {\n    // Taker must sign to authorize spending their wantAsset\n    require(checkSig(takerSig, takerPk), \"invalid taker signature\");\n\n    // Introspection verifies the atomic exchange:\n    // Output 0: maker receives wantAsset\n    require(\n      tx.outputs[0].assets.lookup(wantAssetIdTxid, wantAssetIdGidx) >= wantAmount,\n      \"insufficient want asset for maker\"\n    );\n    require(\n      tx.outputs[0].scriptPubKey == new SingleSig(makerPk, exit),\n      \"output 0 not spendable by maker\"\n    );\n\n    // Output 1: taker receives offerAsset\n    require(\n      tx.outputs[1].assets.lookup(offerAssetIdTxid, offerAssetIdGidx) >= offerAmount,\n      \"insufficient offer asset for taker\"\n    );\n    require(\n      tx.outputs[1].scriptPubKey == takerScriptPubKey,\n      \"output 1 not spendable by taker\"\n    );\n  }\n\n  // Cancel: Maker reclaims after expiration if no taker\n  function cancel(signature makerSig) {\n    require(tx.time >= expirationTime, \"swap not expired\");\n    require(checkSig(makerSig, makerPk), \"invalid maker signature\");\n  }\n\n  // Unilateral exit (CSV): maker recovers after exit delay.\n  function unilateral(signature makerSig) tapscript {\n    require(older(exit));\n    require(checkSig(makerSig, makerPk));\n  }\n}\n",
+      "non_interactive_swap.ark": "pragma arkade ^0.1.0;\n\n// Non-Interactive Swap Contract\n// Allows users to exchange assets without requiring both parties to be online simultaneously.\n//\n// Paths:\n// - swap cooperative: takerSig + serverSig + OP_INSPECT* (trustless via introspection)\n// - cancel cooperative: makerSig + serverSig + after(expiration)\n// - unilateral: makerSig + CSV (maker recovers if no taker)\n\nimport \"single_sig.ark\";\n\ncontract NonInteractiveSwap(\n  // Maker's public key (creator of the swap offer)\n  pubkey makerPk,\n  // Asset ID the maker is offering (locked in this contract)\n  bytes32 offerAssetIdTxid,\n  int offerAssetIdGidx,\n  // Amount of offer asset locked\n  int offerAmount,\n  // Asset ID the maker wants to receive\n  bytes32 wantAssetIdTxid,\n  int wantAssetIdGidx,\n  // Amount of want asset required for the swap\n  int wantAmount,\n  // Expiration timestamp (block height) after which maker can cancel\n  int expirationTime,\n  // Exit timelock in blocks\n  int exit\n) {\n  // Swap: Any taker can fulfill - introspection makes cooperative path trustless\n  function swap(pubkey takerPk, signature takerSig, ScriptPubKey takerScriptPubKey) {\n    // Taker must sign to authorize spending their wantAsset\n    require(checkSig(takerSig, takerPk), \"invalid taker signature\");\n\n    // Introspection verifies the atomic exchange:\n    // Output 0: maker receives wantAsset\n    require(\n      tx.outputs[0].assets.lookup(wantAssetIdTxid, wantAssetIdGidx) >= wantAmount,\n      \"insufficient want asset for maker\"\n    );\n    require(\n      tx.outputs[0].script == new SingleSig(makerPk, exit),\n      \"output 0 not spendable by maker\"\n    );\n\n    // Output 1: taker receives offerAsset\n    require(\n      tx.outputs[1].assets.lookup(offerAssetIdTxid, offerAssetIdGidx) >= offerAmount,\n      \"insufficient offer asset for taker\"\n    );\n    require(\n      tx.outputs[1].script == takerScriptPubKey,\n      \"output 1 not spendable by taker\"\n    );\n  }\n\n  // Cancel: Maker reclaims after expiration if no taker\n  function cancel(signature makerSig) {\n    require(tx.locktime >= expirationTime, \"swap not expired\");\n    require(checkSig(makerSig, makerPk), \"invalid maker signature\");\n  }\n\n  // Unilateral exit (CSV): maker recovers after exit delay.\n  function unilateral(signature makerSig) tapscript {\n    require(older(exit));\n    require(checkSig(makerSig, makerPk));\n  }\n}\n",
       "single_sig.ark": "pragma arkade ^0.1.0;\n\ncontract SingleSig(\n  pubkey user,\n  int exit\n) {\n  // Single signature spend path\n  function spend(signature userSig) {\n    require(checkSig(userSig, user));\n  }\n\n  // Unilateral exit (CSV).\n  function unilateral(signature userSig) tapscript {\n    require(older(exit));\n    require(checkSig(userSig, user));\n  }\n}\n"
     }
   },
   "compiler": {
-    "name": "arkade-compiler",
-    "version": "0.1.0"
+    "name": "arkadec",
+    "version": "0.1.0-rc.1",
+    "options": {
+      "optimize": true
+    }
   },
-  "updatedAt": "2026-09-25T14:57:25.766148174+00:00"
+  "updatedAt": "2026-11-07T19:25:28.721481078+00:00",
+  "fingerprint": "sha256:f255d63e5bf5eafec2d3237a41064ec06701fe1cb24565bd69029a3522e494f8"
 }

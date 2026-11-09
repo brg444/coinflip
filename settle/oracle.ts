@@ -14,7 +14,7 @@ export type BeaconSpec = {
   signers: Uint8Array[];
   threshold: bigint;
   domain: Uint8Array;
-  keyLag: bigint;
+  expiryLag: bigint;
   readFee: bigint;
   adminPk: Uint8Array;
   exit: bigint;
@@ -52,6 +52,25 @@ export function serviceOrigin(raw: string): string {
   }
   if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error("URL must be an http(s) origin");
   return url.origin;
+}
+
+export type OracleSample = { price: string; time: number };
+
+/** Samples from `GET /api/prices`. Rows that are not a price and a time are skipped. */
+export async function fetchOraclePrices(origin: string, from: number, to: number, signal?: AbortSignal): Promise<OracleSample[]> {
+  const res = await fetch(`${origin}/api/prices?from=${from}&to=${to}&limit=200`, { signal });
+  if (!res.ok) throw new Error(`oracle prices ${res.status}`);
+  const body = await res.json() as { samples?: unknown };
+  if (!body || typeof body !== "object" || !Array.isArray(body.samples)) throw new Error("oracle prices");
+  const samples: OracleSample[] = [];
+  for (const row of body.samples) {
+    if (!row || typeof row !== "object") continue;
+    const sample = row as { price?: unknown; time?: unknown };
+    if (typeof sample.price !== "string" || !/^[0-9]+$/.test(sample.price)) continue;
+    if (typeof sample.time !== "number" || !Number.isSafeInteger(sample.time)) continue;
+    samples.push({ price: sample.price, time: sample.time });
+  }
+  return samples;
 }
 
 export async function fetchOracleStatus(origin: string, signal?: AbortSignal): Promise<unknown> {
@@ -93,7 +112,7 @@ export function parseOracleBeacon(body: unknown, beaconTxid?: string, gidx = 0):
   if (!args) return { ok: false, error: "oracle args" };
   const ctrl = typeof args.ctrlTxid === "string" ? args.ctrlTxid.toLowerCase() : "";
   if (ctrl !== bytesToHex(beaconIdOf(parsed).txid)) return { ok: false, error: "ctrl txid" };
-  const keyLag = whole(args.keyLag);
+  const expiryLag = whole(args.expiryLag);
   const readFee = whole(args.readFee);
   const exit = whole(args.exit);
   const declared = whole(args.signersN);
@@ -103,7 +122,7 @@ export function parseOracleBeacon(body: unknown, beaconTxid?: string, gidx = 0):
     ? hexBytes(args.domain, args.domain.length / 2)
     : null;
   const adminPk = hexBytes(args.adminPk, 32);
-  if (keyLag == null || readFee == null || exit == null || !domain || !adminPk) return { ok: false, error: "oracle args" };
+  if (expiryLag == null || readFee == null || exit == null || !domain || !adminPk) return { ok: false, error: "oracle args" };
   if (threshold == null || threshold < 1n || threshold > BigInt(signers.length)) return { ok: false, error: "threshold" };
   return {
     ok: true,
@@ -113,7 +132,7 @@ export function parseOracleBeacon(body: unknown, beaconTxid?: string, gidx = 0):
       signers,
       threshold,
       domain,
-      keyLag,
+      expiryLag,
       readFee,
       adminPk,
       exit,

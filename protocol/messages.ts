@@ -12,6 +12,7 @@ import {
   Q_MIN,
   STAKE_MAX,
   STAKE_MIN,
+  vaultProgramId,
   type Kind,
   type OptionKind,
   type PredictKind,
@@ -120,6 +121,7 @@ export type RfqStatus = {
 export type OptionPosition = {
   v: 1;
   type: "option_position";
+  program_id: string;
   rfq_id: string;
   pair: typeof PAIR;
   kind: Kind;
@@ -279,10 +281,21 @@ function parseStatusRequest(body: Record<string, unknown>): RfqStatusRequest | n
   return { v: 1, type: "rfq_status_request", rfq_id: body.rfq_id };
 }
 
+const PROGRAM_ID = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
+
+/** An announcement without a program names the vault its kind settles through. */
+function readProgramId(value: unknown, kind: Kind): string | null {
+  if (value === undefined) return vaultProgramId(kind);
+  if (typeof value === "string" && PROGRAM_ID.test(value)) return value;
+  return null;
+}
+
 export function parsePosition(value: unknown): OptionPosition | null {
   const body = record(value);
   if (!body || body.v !== 1 || body.type !== "option_position" || body.pair !== PAIR) return null;
   if (!hex64(body.rfq_id) || (body.kind !== 0 && body.kind !== 1 && body.kind !== 2 && body.kind !== 3)) return null;
+  const program_id = readProgramId(body.program_id, body.kind);
+  if (!program_id) return null;
   // A predict payout goes to the bettor's own address, so the settler needs its script.
   if (isPredict(body.kind) && !script(body.holder_pk_script)) return null;
   if (!isPredict(body.kind) && body.holder_pk_script !== undefined) return null;
@@ -294,6 +307,7 @@ export function parsePosition(value: unknown): OptionPosition | null {
   return {
     v: 1,
     type: "option_position",
+    program_id,
     rfq_id: body.rfq_id.toLowerCase(),
     pair: PAIR,
     kind: body.kind,
@@ -323,6 +337,19 @@ function parseStatus(body: Record<string, unknown>): RfqStatus | null {
     status: body.status,
     ...(body.txid ? { txid: body.txid } : {}),
   };
+}
+
+/** `OptionVault` hardcodes this sample window. A quote needs a beacon with the same `expiryLag`. */
+export const VAULT_EXPIRY_LAG = 60n;
+
+/**
+ * Why the desk must not build a vault for this beacon window.
+ * Empty string means `expiryLag` is the vault's 60 seconds.
+ */
+export function beaconWindowRefusal(expiryLag: bigint | null): string {
+  if (expiryLag == null) return "oracle";
+  if (expiryLag !== VAULT_EXPIRY_LAG) return "expiry lag";
+  return "";
 }
 
 /** Why a parsed request is not quotable. Empty string means the desk may price it. */

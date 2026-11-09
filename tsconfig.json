@@ -11,5 +11,5 @@
     "allowImportingTsExtensions": true,
     "types": ["node"]
   },
-  "include": ["app/src/**/*.ts", "protocol/**/*.ts", "desk/**/*.ts", "settle/**/*.ts", "scripts/**/*.ts"]
+  "include": ["app/src/**/*.ts", "contracts/**/*.ts", "protocol/**/*.ts", "desk/**/*.ts", "settle/**/*.ts", "scripts/**/*.ts"]
 }

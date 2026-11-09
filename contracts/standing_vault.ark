@@ -1,0 +1,126 @@
+pragma arkade ^0.1.0;
+
+// Same payoff as OptionVault. The holder is not a constructor field.
+// The match that creates this coin writes packet 33: version 0x01,
+// the holder's 32-byte key, then the holder's 32-byte payout program.
+// The writer, the strike, and the beacon are fixed when the writer funds.
+// Settle reads that packet from this coin and pays the same amounts
+// OptionVault would pay.
+
+contract StandingVault(
+  int kind,
+  pubkey writerPk,
+  ScriptPubKey writerScript,
+  int strike,
+  int collateral,
+  int expiry,
+  bytes32 beaconTxid,
+  int beaconGidx,
+  int readFee,
+  int exit
+) {
+  const int DUST = 330;
+  const int PRICE_MAX = 1000000000;
+  const int Q_MAX = 1000000000;
+  const int EXPIRY_LAG = 60;
+  const int STATE = 32;
+  const int SIZE = 329;
+  const int PARTY = 33;
+  const int PARTY_SIZE = 65;
+
+  function settle() {
+    require(kind == 0 || kind == 1, "kind");
+    require(strike > 0, "strike");
+    require(strike <= PRICE_MAX, "strike cap");
+    require(collateral > DUST, "collateral");
+    require(collateral <= Q_MAX, "collateral cap");
+    require(checkTime(expiry), "before expiry");
+    require(this.activeInputIndex == 0, "vault is input 0");
+    require(tx.numInputs >= 2, "vault and beacon");
+    require(tx.inputs[1].assets.lookup(beaconTxid, beaconGidx) == 1, "beacon");
+
+    bytes party = tx.inputs[0].packet(PARTY);
+    require(size(party) == PARTY_SIZE, "party");
+    require(substr(party, 0, 1) == 0x01, "party version");
+    // The packet stores the 32-byte program. Payouts are witness version 1.
+    ScriptPubKey holderScript = { program: substr(party, 33, 32), version: 1 };
+
+    bytes state = tx.inputs[1].packet(STATE);
+    require(size(state) == SIZE, "state size");
+    require(substr(state, 0, 1) == 0x01, "state version");
+
+    int st = 0;
+    int sampleTime = 0;
+    int found = 0;
+    int[8] slots = [9, 49, 89, 129, 169, 209, 249, 289];
+    for (i, offset) in slots {
+      if (found == 0 && substr(state, offset, 8) == num2bin(expiry, 8)) {
+        st = bin2num(substr(state, (offset + 8), 8));
+        sampleTime = bin2num(substr(state, (offset + 16), 8));
+        found = 1;
+      }
+    }
+    require(found == 1, "no fixing for expiry");
+    require(st > 0, "price");
+    require(st <= PRICE_MAX, "price cap");
+    require(sampleTime >= expiry, "sample before expiry");
+    require(sampleTime <= expiry + EXPIRY_LAG, "sample after close");
+
+    int ph = 0;
+    if (kind == 0) {
+      if (st > strike) {
+        ph = collateral * (st - strike) / st;
+      }
+    }
+    if (kind == 1) {
+      if (st < strike) {
+        ph = collateral * (strike - st) / st;
+        if (ph > collateral) {
+          ph = collateral;
+        }
+      }
+    }
+    require(ph <= collateral, "holder overpaid");
+
+    int locked = tx.input.current.value;
+    require(locked >= collateral, "underfunded");
+    require(readFee >= 0, "fee");
+    require(locked >= readFee, "fee");
+    int pot = locked - readFee;
+    int phPay = ph;
+    if (phPay > pot) {
+      phPay = pot;
+    }
+    int writerAmt = pot - phPay;
+
+    if (phPay > DUST && writerAmt > DUST) {
+      require(tx.outputs[1].value >= phPay, "holder short");
+      require(tx.outputs[1].script == holderScript, "holder script");
+      require(tx.outputs[2].value >= writerAmt, "writer short");
+      require(tx.outputs[2].script == writerScript, "writer script");
+    }
+    if (phPay <= DUST) {
+      require(tx.outputs[1].value >= pot, "writer short");
+      require(tx.outputs[1].script == writerScript, "writer script");
+    }
+    if (writerAmt <= DUST && phPay > DUST) {
+      require(tx.outputs[1].value >= pot, "holder short");
+      require(tx.outputs[1].script == holderScript, "holder script");
+    }
+  }
+
+  function close(pubkey holderPk, signature writerSig, signature holderSig) {
+    require(this.activeInputIndex == 0, "vault is input 0");
+    bytes party = tx.inputs[0].packet(PARTY);
+    require(size(party) == PARTY_SIZE, "party");
+    require(substr(party, 0, 1) == 0x01, "party version");
+    require(substr(party, 1, 32) == holderPk, "holder");
+    require(checkSig(writerSig, writerPk), "writer");
+    require(checkSig(holderSig, holderPk), "holder");
+  }
+
+  function unilateral(signature writerSig) tapscript {
+    require(older(exit));
+    require(checkSig(writerSig, writerPk));
+  }
+}

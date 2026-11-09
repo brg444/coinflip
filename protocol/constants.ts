@@ -4,6 +4,8 @@ export const RFQ_KIND = 24859;
 /** NIP-78 app data. One replaceable event per filled vault, tagged `arkade-option`. */
 export const POSITION_KIND = 30078;
 export const POSITION_TAG = "arkade-option";
+export const OPTION_VAULT_PROGRAM_ID = "OptionVault";
+export const PREDICT_VAULT_PROGRAM_ID = "PredictVault";
 // Mutinynet's unilateralExitDelay. Arkd refuses to cosign a vtxo whose shortest
 // exit leaf is below this, and BIP68 seconds must be a multiple of 512.
 export const EXIT = 2048n;
@@ -30,6 +32,10 @@ export type OptionKind = 0 | 1;
 export type Kind = OptionKind | PredictKind;
 export function isPredict(kind: number): kind is PredictKind {
   return kind === 2 || kind === 3;
+}
+/** The program a filled vault of this kind announces, and the one a settler spends. */
+export function vaultProgramId(kind: number): string {
+  return isPredict(kind) ? PREDICT_VAULT_PROGRAM_ID : OPTION_VAULT_PROGRAM_ID;
 }
 /** Windows close on this grid. A 15-minute window is one that closes on the quarter hour. */
 export const PREDICT_GRID_S = 300;

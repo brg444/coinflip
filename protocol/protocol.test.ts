@@ -7,8 +7,8 @@ import { generateSecretKey } from "nostr-tools/pure";
 import { beaconIdOf } from "./beacon.ts";
 import { bindContracts, bindSwap, directPayoutKey } from "./contracts.ts";
 import { bytesToHex, hexToBytes, xOnly } from "./hex.ts";
-import { PAIR, POSITION_KIND } from "./constants.ts";
-import { parsePosition, parseWire, premiumRefusal, requestRefusal, type OptionPosition, type RfqRequest } from "./messages.ts";
+import { OPTION_VAULT_PROGRAM_ID, PAIR, POSITION_KIND } from "./constants.ts";
+import { beaconWindowRefusal, parsePosition, parseWire, premiumRefusal, requestRefusal, type OptionPosition, type RfqRequest } from "./messages.ts";
 import { nostrPubkey, openSealed, positionEvent, quoteRelay, readPosition, seal } from "./nostr.ts";
 import { payablePremium, premiumSats, quotedPremium } from "./pricing.ts";
 
@@ -52,11 +52,11 @@ test("derived intent and vault addresses stay pinned", async () => {
   const bound = bindContracts(terms);
   assert.equal(
     bound.intentAddress,
-    "tark1qqhsre0ptn9r28d07wzrldc08shs5x7aqhj6lzy2vauyaulppg4qrw8e8gxqpf8uffxsl6fp7pxrt999p46rylk89mvpttr4ed9ju76y0rfw9p",
+    "tark1qqhsre0ptn9r28d07wzrldc08shs5x7aqhj6lzy2vauyaulppg4qrrc6gjnkmshfzc8hq7dqyac0apll6rrqmq9h4tm3z6lrsk97928g899mxc",
   );
   assert.equal(
     bound.vaultAddress,
-    "tark1qqhsre0ptn9r28d07wzrldc08shs5x7aqhj6lzy2vauyaulppg4qrqgmxp4q0dp4p05myrmtg3y8h2vplvax0j4q8ahe8gr3x5yavzd7dlvs5x",
+    "tark1qqhsre0ptn9r28d07wzrldc08shs5x7aqhj6lzy2vauyaulppg4qr59m6ts5fmdgfu6sy5jnxg4wxqs0fgl360g3xekhkc3a20wpml6rl0ydz7",
   );
   assert.equal(bytesToHex(bound.writerPkScript), "51203d002da23716b1975b89b46563d89040a3c71d017593934bfb751b68a7cae991");
   assert.deepEqual(bindContracts(terms).intentPkScript, bound.intentPkScript);
@@ -95,7 +95,7 @@ test("the reference swap derives a pinned address", async () => {
   });
   assert.equal(
     swap.address,
-    "tark1qqhsre0ptn9r28d07wzrldc08shs5x7aqhj6lzy2vauyaulppg4qrt674da9cj4dhz9l2r8cu9cl7wn89krrkzym2mwakh5ksx9ak672jdq8n6",
+    "tark1qqhsre0ptn9r28d07wzrldc08shs5x7aqhj6lzy2vauyaulppg4qzsurf7k592plnhkzjvdsrssl33ws22nwxautl8gsw5cc35p8e2s4vwk2gc",
   );
 });
 
@@ -170,6 +170,7 @@ test("a filled vault is public on nostr and a sealed quote is not", () => {
   const position: OptionPosition = {
     v: 1,
     type: "option_position",
+    program_id: OPTION_VAULT_PROGRAM_ID,
     rfq_id: "11".repeat(32),
     pair: PAIR,
     kind: 0,
@@ -188,6 +189,10 @@ test("a filled vault is public on nostr and a sealed quote is not", () => {
   const event = positionEvent(desk, position, 1_790_000_000);
   assert.equal(event.kind, POSITION_KIND);
   assert.deepEqual(readPosition(event), position);
+  const { program_id: _programId, ...legacyBody } = position;
+  const legacy = readPosition(positionEvent(desk, legacyBody as OptionPosition, 1_790_000_000));
+  assert.equal(legacy?.program_id, OPTION_VAULT_PROGRAM_ID);
+  assert.equal(legacy?.holder_pubkey, position.holder_pubkey);
   assert.equal(openSealed(generateSecretKey(), event), null);
   const tampered = {
     id: event.id,
@@ -224,6 +229,10 @@ test("a wire message with the wrong pair is dropped", () => {
   assert.deepEqual(parseWire(request), request);
   assert.equal(parseWire({ ...request, pair: "arkade:BTC->arkade:BTC" }), null);
   assert.equal(parseWire({ ...request, amount: "0001" }), null);
+  assert.equal(beaconWindowRefusal(60n), "");
+  assert.equal(beaconWindowRefusal(120n), "expiry lag");
+  assert.equal(beaconWindowRefusal(0n), "expiry lag");
+  assert.equal(beaconWindowRefusal(null), "oracle");
   assert.equal(requestRefusal(request, 1_790_000_000), "expiry");
   assert.equal(requestRefusal({ ...request, profile: { ...request.profile, expiry: 1_790_000_600 } }, 1_790_000_000), "");
   assert.equal(requestRefusal({ ...request, profile: { ...request.profile, expiry: 1_790_000_060 } }, 1_790_000_000), "expiry");

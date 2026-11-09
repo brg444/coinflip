@@ -39,7 +39,7 @@ const FIXTURE = {
   price: 10_000_000n,
   beaconSats: 330n,
   readFee: 0n,
-  keyLag: 60n,
+  expiryLag: 60n,
   threshold: 3n,
   domain: new TextEncoder().encode("BTCUSD-FIX"),
   /** Display-order txid whose script form is 0x07 followed by zeros. */
@@ -78,7 +78,7 @@ async function buildFixture() {
     signers: [adminPk],
     threshold: 1n,
     domain: FIXTURE.domain,
-    keyLag: FIXTURE.keyLag,
+    expiryLag: FIXTURE.expiryLag,
     readFee: FIXTURE.readFee,
     adminPk,
     serverKey,
@@ -114,7 +114,7 @@ async function buildFixture() {
   const dummy = new Uint8Array(64).fill(1);
   const attest = buildAttest({
     beacon: { script: beacon.script, coin: coinOf(genesis, FIXTURE.beaconSats), state: genesisState(), id: assetId },
-    key: FIXTURE.expiry,
+    expiry: FIXTURE.expiry,
     price: FIXTURE.price,
     time: FIXTURE.expiry,
     sigs: [dummy, dummy, dummy, dummy, dummy],
@@ -150,9 +150,9 @@ test("state packet encodes and decodes the documented layout", () => {
   const one = nextState(genesis, 1_700_000_000n, value);
   const decoded = decodeState(one);
   assert.equal(decoded.round, 1n);
-  assert.equal(decoded.slots[0]!.key, 1_700_000_000n);
+  assert.equal(decoded.slots[0]!.expiry, 1_700_000_000n);
   assert.deepEqual(decoded.slots[0]!.value, value);
-  assert.equal(decoded.slots[1]!.key, 0n);
+  assert.equal(decoded.slots[1]!.expiry, 0n);
   assert.deepEqual(encodeState(decoded), one);
 
   const two = nextState(one, 1_700_086_400n, priceValue(9_000_000n));
@@ -160,6 +160,12 @@ test("state packet encodes and decodes the documented layout", () => {
   assert.equal(bin2num(two.subarray(1, 9)), 2n);
   assert.throws(() => nextState(two, 1_700_000_000n, value), /already in a slot/);
   assert.throws(() => nextState(two, 0n, value), /positive/);
+
+  const timed = priceValue(10_000_000n, 1_700_000_030n);
+  assert.equal(bin2num(timed.subarray(0, 8)), 10_000_000n);
+  assert.equal(bin2num(timed.subarray(8, 16)), 1_700_000_030n);
+  assert.ok(timed.subarray(16).every((byte) => byte === 0));
+  assert.deepEqual(priceValue(10_000_000n), num2bin(10_000_000n, 32));
 });
 
 test("script numbers are little-endian sign-magnitude", () => {
@@ -183,6 +189,11 @@ test("slot offsets match both contract sources", () => {
   assert.ok(beacon.includes("const int VALUE_AT = 17;"));
   assert.ok(beacon.includes("const int HISTORY_AT = 49;"));
   assert.ok(beacon.includes("const int HISTORY = 280;"));
+  assert.ok(beacon.includes("num2bin(expiry, 8) + num2bin(price, 8) + num2bin(time, 8)"));
+  assert.ok(beacon.includes('require(time >= expiry, "sample before expiry")'));
+  const vault = readFileSync(here("../contracts/option_vault.ark"), "utf8");
+  assert.ok(vault.includes('require(sampleTime >= expiry, "sample before expiry")'));
+  assert.ok(vault.includes('require(sampleTime <= expiry + EXPIRY_LAG, "sample after close")'));
 });
 
 test("the beacon leaves check what the design says", () => {
@@ -221,7 +232,7 @@ test("bindings are deterministic Mutinynet addresses and refuse a bad committee"
     signers: [await key(9).xOnlyPublicKey()],
     threshold: 1n,
     domain: FIXTURE.domain,
-    keyLag: 60n,
+    expiryLag: 60n,
     readFee: 0n,
     adminPk: await key(9).xOnlyPublicKey(),
     serverKey,

@@ -6,7 +6,10 @@ import { fileURLToPath } from "node:url";
 import esbuild from "esbuild";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const dist = path.join(root, "dist");
+// `pnpm demo` builds into its own folder against its own desk and oracle.
+const demoFile = process.env.COINFLIP_DEMO?.trim();
+const demo = demoFile ? JSON.parse(readFileSync(demoFile, "utf8")) : null;
+const dist = process.env.OUT_DIR?.trim() ? path.resolve(process.env.OUT_DIR.trim()) : path.join(root, "dist");
 
 await esbuild.build({
   entryPoints: [path.join(root, "app/desk.js")],
@@ -18,6 +21,7 @@ await esbuild.build({
   alias: { "node:crypto": path.join(root, "app/src/browser-crypto.ts") },
   sourcemap: true,
   logLevel: "info",
+  define: { __COINFLIP_DEMO__: JSON.stringify(demo) },
 });
 
 mkdirSync(path.join(dist, "viz"), { recursive: true });
@@ -31,4 +35,4 @@ cpSync(path.join(root, "app/desk.css"), path.join(dist, "desk.css"));
 cpSync(path.join(root, "viz/index.html"), path.join(dist, "viz/index.html"));
 cpSync(path.join(root, "app/settle-math.js"), path.join(dist, "viz/settle-math.js"));
 writeFileSync(path.join(dist, ".nojekyll"), "");
-writeFileSync(path.join(dist, "CNAME"), "arkade.trade\n");
+if (!demo) writeFileSync(path.join(dist, "CNAME"), "arkade.trade\n");

@@ -95,8 +95,10 @@ test("a prediction binds intent side 1: the bettor holds, the desk writes", asyn
   assert.equal(bytesToHex(bound.holderPkScript), `5120${bytesToHex(terms.holderPk)}`);
   assert.deepEqual(bound.userPkScript, bound.holderPkScript);
   assert.deepEqual(bound.solverPkScript, bound.writerPkScript);
-  assert.deepEqual(bound.intent.solverScript, bound.writerProgram);
-  assert.deepEqual(bound.intent.optionScript, bound.optionProgram);
+  // Published script dialect: a script argument is its witness program and version.
+  assert.deepEqual(bound.intent["solverScript.program"], bound.writerProgram);
+  assert.deepEqual(bound.intent["optionScript.program"], bound.optionProgram);
+  assert.equal(bound.intent["userScript.version"], 1n);
   // Same terms on the option vault would be a different contract.
   const asOption = bindContracts({ ...terms, kind: 0 });
   assert.notEqual(asOption.vaultAddress, bound.vaultAddress);
@@ -238,7 +240,7 @@ test("a filled prediction settles to the bettor above the line and to the desk a
     signers,
     threshold: 1n,
     domain,
-    keyLag: 60n,
+    expiryLag: 60n,
     readFee: BEACON_READ_FEE,
     adminPk,
     exit: EXIT,
@@ -254,7 +256,7 @@ test("a filled prediction settles to the bettor above the line and to the desk a
   ];
   const prev = new Map<string, string>([[vaultTx.id, base64.encode(vaultTx.toPSBT())]]);
   const useFixing = (cents: bigint) => {
-    const state = nextState(genesisState(), terms.expiry, priceValue(cents));
+    const state = nextState(genesisState(), terms.expiry, priceValue(cents, terms.expiry));
     const tx = coinTx([{ script: beacon.pkScript, amount: 330n }], [statePacket(state)]);
     coins[1] = { txid: tx.id, vout: 0, value: 330, script: bytesToHex(beacon.pkScript), assets: [{ assetId: assetId.toString(), amount: 1n }] };
     prev.set(tx.id, base64.encode(tx.toPSBT()));
@@ -284,7 +286,7 @@ test("a filled prediction settles to the bettor above the line and to the desk a
       ctrlTxid: bytesToHex(id.txid),
       threshold: 1,
       domain: bytesToHex(domain),
-      keyLag: 60,
+      expiryLag: 60,
       readFee: Number(BEACON_READ_FEE),
       adminPk: bytesToHex(adminPk),
       exit: Number(EXIT),

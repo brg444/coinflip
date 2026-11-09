@@ -164,7 +164,7 @@ export function buildSettle(input: {
 /** Publish a fixing: the beacon at input 0, continued at output 0 with the next state. */
 export function buildAttest(input: {
   beacon: BeaconCoin;
-  key: bigint;
+  expiry: bigint;
   price: bigint;
   time: bigint;
   /** Five slots. Only the first `signersN` are checked. The rest can be zeros. */
@@ -174,7 +174,7 @@ export function buildAttest(input: {
 }): Built {
   if (input.sigs.length !== 5) throw new Error("5 signatures");
   const callArgs: Record<string, bigint | Uint8Array> = {
-    key: input.key,
+    expiry: input.expiry,
     price: input.price,
     time: input.time,
   };

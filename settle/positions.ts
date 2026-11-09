@@ -1,7 +1,7 @@
 import { asset } from "@arkade-os/sdk";
 
 import { beaconIdOf } from "../protocol/beacon-id.ts";
-import type { Kind } from "../protocol/constants.ts";
+import { vaultProgramId, type Kind } from "../protocol/constants.ts";
 import { directPayoutKey, type Terms } from "../protocol/contracts.ts";
 import { hexToBytes } from "../protocol/hex.ts";
 import { parsePosition, type OptionPosition } from "../protocol/messages.ts";
@@ -20,6 +20,7 @@ export type WatchPosition = {
   exit: bigint;
   writerPk: Uint8Array;
   holderPk: Uint8Array;
+  programId: string;
   payoutKey?: Uint8Array;
   /** Predict: the bettor's address key, which the payout pays. */
   holderPayoutKey?: Uint8Array;
@@ -63,6 +64,7 @@ export function positionFromAnnouncement(body: unknown): WatchPosition | null {
     exit: BigInt(row.exit),
     writerPk: hexToBytes(row.writer_pubkey),
     holderPk: hexToBytes(row.holder_pubkey),
+    programId: row.program_id,
     payoutKey: directPayoutKey(row.writer_pubkey, row.writer_pk_script),
     holderPayoutKey: row.holder_pk_script ? directPayoutKey(row.holder_pubkey, row.holder_pk_script) : undefined,
     beaconTxid: row.beacon_txid,
@@ -70,6 +72,16 @@ export function positionFromAnnouncement(body: unknown): WatchPosition | null {
     vaultAddress: row.vault_address,
     fillTxid: row.fill_txid,
   };
+}
+
+export function settlementPositions(rows: readonly OptionPosition[]): WatchPosition[] {
+  const positions: WatchPosition[] = [];
+  for (const row of rows) {
+    const position = positionFromAnnouncement(row);
+    if (!position || position.programId !== vaultProgramId(position.kind)) continue;
+    positions.push(position);
+  }
+  return positions;
 }
 
 /** Filled vaults whose expiry is at least `lag` seconds ago. Oldest first. */
@@ -94,7 +106,9 @@ export function publishReady(lastAt: number, nowMs: number, every = PUBLISH_EVER
 
 /**
  * `published` is a new fixing. `fixed` is 409 "already a fixing": the expiry
- * is on the beacon, so settle it. Anything else, including "no sample", failed.
+ * is already on the beacon. The caller still has to read the slot and refuse
+ * it when it is not the sample the oracle would have chosen. Anything else,
+ * including "no sample", failed.
  */
 export function publishOutcome(status: number, error?: string): "published" | "fixed" | "failed" {
   if (status >= 200 && status < 300) return "published";

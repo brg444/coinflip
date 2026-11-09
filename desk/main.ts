@@ -3,12 +3,12 @@ import http from "node:http";
 import {
   arkade,
   asset,
-  ContractManager,
   DefaultVtxo,
   RestArkProvider,
   RestEmulatorProvider,
   RestIndexerProvider,
   SingleKey,
+  Wallet,
 } from "@arkade-os/sdk";
 
 import { beaconIdOf } from "../protocol/beacon-id.ts";
@@ -24,6 +24,7 @@ import {
   PREDICT_EDGE,
   PREDICT_LOCK_S,
   QUOTE_TTL_S,
+  vaultProgramId,
 } from "../protocol/constants.ts";
 import { assertServerExit, bindContracts, directPayoutKey, payoutVtxo, type Terms } from "../protocol/contracts.ts";
 import { bytesToHex, hexToBytes } from "../protocol/hex.ts";
@@ -31,6 +32,7 @@ import { networkByName } from "../protocol/network.ts";
 import { intentProgram } from "../protocol/programs.ts";
 import {
   isPredictRequest,
+  beaconWindowRefusal,
   parsePosition,
   payoutRefusal,
   premiumRefusal,
@@ -45,9 +47,11 @@ import { connectTransport, nostrPubkey, type Incoming } from "../protocol/nostr.
 import { deribitMultiplier, deribitPremium, fetchSurface, surfaceStatus } from "../protocol/deribit.ts";
 import { predictMultiplier, predictPayout, premiumSats, quotedPremium } from "../protocol/pricing.ts";
 import { openSqliteStorage, revision } from "../protocol/sqlite-storage.ts";
+import { fetchOracleStatus, parseOracleBeacon, serviceOrigin } from "../settle/oracle.ts";
 import { Book, hasBeacon, openPremium, outlay, pageQuotes, quoteCounts, type QuoteFilter, type QuoteRow } from "./book.ts";
 import { countFill, countQuote, emptyHour, hourLine, msUntilNextHour } from "./digest.ts";
-import { finalizeDeskSpends } from "./finalize.ts";
+import { finalizeDeskSpends, pendingOutpoints } from "./finalize.ts";
+import { maintainDeskCoins } from "./maintain.ts";
 import { fillQuote } from "./fill.ts";
 import { spotCents } from "./spot.ts";
 
@@ -57,6 +61,7 @@ import { spotCents } from "./spot.ts";
  *   DESK_KEY        32-byte hex. Nostr pubkey and the option holder key.
  *   BEACON_TXID     required 64-hex display txid of the oracle's identity asset
  *   BEACON_GIDX     optional vout index of that asset. Default 0
+ *   ORACLE_URL      oracle origin. expiryLag is read once at startup. A quote is refused unless it is 60.
  *   RELAYS          comma-separated websocket URLs
  *   ARK_URL         default Mutinynet arkd
  *   EMULATOR_URL    default Mutinynet emulator
@@ -83,6 +88,7 @@ function bigintEnv(name: string, fallback: bigint): bigint {
 }
 
 const deskKeyHex = required("DESK_KEY");
+const oracleUrl = serviceOrigin(required("ORACLE_URL"));
 const secret = hexToBytes(deskKeyHex);
 if (secret.length !== 32) throw new Error("DESK_KEY must be 32 bytes");
 
@@ -120,17 +126,16 @@ if (typeof EventSource === "undefined") {
 }
 // Every intent.register persists a script, and the watcher subscribes to all of them.
 // Mutinynet allows 1000 topics. Old quotes are polled, not streamed.
+// default / boarding / delegate belong to the SDK wallet. Deleting them drops the float it renews.
+const walletContracts = new Set(["default", "boarding", "delegate"]);
 const remembered = await storage.contractRepository.getContracts();
+let unwatched = 0;
 for (const contract of remembered) {
+  if (walletContracts.has(contract.type)) continue;
   await storage.contractRepository.deleteContract(contract.script);
+  unwatched += 1;
 }
-if (remembered.length) console.log("unwatched", remembered.length, "old intent scripts");
-const contractManager = await ContractManager.create({
-  indexerProvider: indexer,
-  contractRepository: storage.contractRepository,
-  walletRepository: storage.walletRepository,
-  vtxoSyncMaxAgeMs: 60_000,
-});
+if (unwatched) console.log("unwatched", unwatched, "old intent scripts");
 // The first lookup often dies on a transient EAI_AGAIN. Dokploy only keeps
 // the inner "fetch failed" line, so log the whole cause chain, URL included.
 const ARK_INFO_ATTEMPTS = 4;
@@ -177,6 +182,20 @@ async function readArkInfo() {
 }
 
 const network = networkByName((await readArkInfo()).network);
+// Leave settlement at the SDK default. VtxoManager renews coins before batch
+// expiry and its poll keeps doing that. Passing false disables both.
+const wallet = await Wallet.create({
+  identity,
+  arkProvider: ark,
+  indexerProvider: indexer,
+  storage: {
+    walletRepository: storage.walletRepository,
+    contractRepository: storage.contractRepository,
+    intentRepository: storage.intentRepository,
+  },
+});
+const contractManager = await wallet.getContractManager();
+contractManager.setVtxoSyncMaxAge(60_000);
 const client = await arkade.Arkade.connect({
   arkade: ark,
   indexer,
@@ -191,6 +210,12 @@ await assertServerExit(arkUrl);
 const holderPk = await identity.xOnlyPublicKey();
 const deskScript: DefaultVtxo.Script = payoutVtxo(holderPk, client.serverKey, EXIT);
 const address = deskScript.address(network.hrp, client.serverKey).encode();
+if (bytesToHex(wallet.offchainTapscript.pkScript) !== bytesToHex(deskScript.pkScript)) {
+  throw new Error("desk payout script is not the SDK wallet address");
+}
+if (address !== await wallet.getAddress()) {
+  throw new Error("desk address is not the SDK wallet address");
+}
 const pubkey = nostrPubkey(secret);
 
 let balance = 0n;
@@ -490,6 +515,11 @@ async function onRequest(message: RfqRequest, from: string) {
     createdAt: now,
     clientPubkey: from,
   };
+  const lagRefusal = beaconWindowRefusal(beaconExpiryLag);
+  if (lagRefusal) {
+    await refuse(from, message.rfq_id, lagRefusal);
+    return;
+  }
   const bound = bindContracts(termsFor(row));
   if (bytesToHex(bound.writerPkScript) !== profile.writer_pk_script) {
     await refuse(from, message.rfq_id, "writer script");
@@ -523,6 +553,21 @@ async function onMessage({ from, message }: Incoming) {
   }
 }
 
+let beaconExpiryLag: bigint | null = null;
+try {
+  const parsed = parseOracleBeacon(
+    await fetchOracleStatus(oracleUrl, AbortSignal.timeout(10_000)),
+    beaconDisplay.txid,
+    beaconDisplay.gidx,
+  );
+  if (parsed.ok) beaconExpiryLag = parsed.beacon.expiryLag;
+} catch {
+  beaconExpiryLag = null;
+}
+if (beaconWindowRefusal(beaconExpiryLag)) {
+  console.error(beaconExpiryLag == null ? "oracle unreachable, quotes refused" : `beacon expiryLag ${beaconExpiryLag}, quotes refused`);
+}
+
 const transport = connectTransport({ relays, secretKey: secret, onMessage });
 
 function filledPosition(row: QuoteRow): OptionPosition | null {
@@ -530,6 +575,7 @@ function filledPosition(row: QuoteRow): OptionPosition | null {
   return parsePosition({
     v: 1,
     type: "option_position",
+    program_id: vaultProgramId(row.kind),
     rfq_id: row.rfqId,
     pair: PAIR,
     kind: row.kind,
@@ -591,15 +637,52 @@ function recount() {
   if (balance > 0n) shortLogged.clear();
 }
 
+/** Finish a submit the wallet never finalized, then recover swept coins and renew the rest. */
+async function maintainWallet() {
+  try {
+    const maintained = await maintainDeskCoins({
+      async markPending() {
+        const state = (await storage.walletRepository.getWalletState()) ?? {};
+        await storage.walletRepository.saveWalletState({
+          ...state,
+          settings: { ...state.settings, hasPendingTx: true },
+        });
+      },
+      finalizePendingTxs: () => wallet.finalizePendingTxs(),
+      refreshCoins: () => contractManager.refreshVtxos({ after: 0 }),
+      async recoverVtxos() {
+        return (await wallet.getVtxoManager()).recoverVtxos();
+      },
+      async renewVtxos() {
+        return (await wallet.getVtxoManager()).renewVtxos();
+      },
+    });
+    console.log(
+      "wallet",
+      `finalized=${maintained.finalized.join(",") || "-"}`,
+      `pending=${maintained.pending.join(",") || "-"}`,
+      `recovered=${maintained.recovered ?? "-"}`,
+      `renewed=${maintained.renewed ?? "-"}`,
+    );
+  } catch (err) {
+    console.error("wallet", err instanceof Error ? err.message : err);
+  }
+}
+
 /** Finish spends the emulator submitted, then trust the indexer for the float. */
 async function refreshFloat() {
   if (!client.indexer) return;
   try {
-    const done = await finalizeDeskSpends({ ark, indexer, identity, deskScript });
-    const pending = await indexer.getVtxos({ scripts: [deskScriptHex], pendingOnly: true });
-    const pendingCount = pending.vtxos?.length ?? 0;
-    if (done.length || pendingCount) {
-      console.log("finalized", done.join(",") || "-", "pending", pendingCount);
+    const done = await finalizeDeskSpends({
+      ark,
+      indexer,
+      identity,
+      deskScript,
+      reconcileSpent: (outpoints) => contractManager.refreshOutpoints(outpoints),
+    });
+    const pending = await pendingOutpoints(indexer, deskScript);
+    if (done.length || pending.size) {
+      console.log("finalized", done.join(",") || "-", "pending", pending.size);
     }
   } catch (err) {
     console.error("finalize", err instanceof Error ? err.message : err);
@@ -778,6 +861,7 @@ contractManager.onContractEvent((event) => {
   const rfqId = quoteByScript.get(event.contractScript);
   if (rfqId) queueFill(rfqId);
 });
+await maintainWallet();
 await refreshFloat();
 await contractManager.watchScript(deskScriptHex, { label: "desk" });
 

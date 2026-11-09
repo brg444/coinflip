@@ -81,6 +81,33 @@ function alreadyFinalized(err: unknown): boolean {
 
 // Arkd spent these inputs and then lost the offchain row. Submit and finalize both refuse.
 const stuckArkTxs = new Set<string>();
+// Those outpoints are not pending work anymore. The indexer can keep listing them.
+const clearedOutpoints = new Set<string>();
+
+type Outpoint = { txid: string; vout: number };
+type ReconcileSpent = (outpoints: Outpoint[]) => Promise<void>;
+
+function outpointId(coin: Outpoint): string {
+  return `${coin.txid}:${coin.vout}`;
+}
+
+/** Arkd has no offchain tx left. Refresh the wallet row and stop treating the coin as pending. */
+async function dropAlreadySpent(
+  coins: Outpoint[],
+  arkTxid: string | undefined,
+  reconcile?: ReconcileSpent,
+): Promise<void> {
+  if (arkTxid) stuckArkTxs.add(arkTxid);
+  if (!coins.length) return;
+  const outpoints = coins.map((coin) => ({ txid: coin.txid, vout: coin.vout }));
+  for (const coin of outpoints) clearedOutpoints.add(outpointId(coin));
+  if (!reconcile) return;
+  try {
+    await reconcile(outpoints);
+  } catch (err) {
+    console.error("finalize refresh", messageOf(err));
+  }
+}
 
 /** The indexer returns virtual txs sorted by txid, not in the order we asked. */
 function virtualTxsById(raws: string[]): Map<string, string> {
@@ -122,6 +149,7 @@ async function finalizeFromIndexer(opts: {
   indexer: Indexer;
   identity: Identity;
   deskScript: Script;
+  reconcileSpent?: ReconcileSpent;
 }, coins: Coin[]): Promise<string[]> {
   const ids = [...new Set(coins.map((coin) => coin.arkTxId).filter((id): id is string => !!id))];
   if (!ids.length) {
@@ -150,7 +178,8 @@ async function finalizeFromIndexer(opts: {
       finalized.push(arkTxid);
     } catch (err) {
       if (alreadySpent(err)) {
-        stuckArkTxs.add(arkTxid);
+        const involved = coins.filter((coin) => coin.arkTxId === arkTxid);
+        await dropAlreadySpent(involved.length ? involved : coins, arkTxid, opts.reconcileSpent);
         console.error(
           "finalize stuck",
           arkTxid,
@@ -177,6 +206,9 @@ export async function settleEmulatorTx(opts: {
   txid: string;
   signedArkTx: string;
   signedCheckpointTxs: string[];
+  /** Inputs of this package. Dropped from the pending set when arkd says they are already spent. */
+  inputs?: Outpoint[];
+  reconcileSpent?: ReconcileSpent;
 }): Promise<boolean> {
   if (!opts.signedArkTx || !opts.signedCheckpointTxs.length) return false;
   try {
@@ -184,7 +216,7 @@ export async function settleEmulatorTx(opts: {
     return true;
   } catch (err) {
     if (alreadySpent(err)) {
-      stuckArkTxs.add(opts.txid);
+      await dropAlreadySpent(opts.inputs ?? [], opts.txid, opts.reconcileSpent);
       console.error("finalize stuck", opts.txid, messageOf(err));
       return false;
     }
@@ -200,14 +232,21 @@ export async function finalizeDeskSpends(opts: {
   indexer: Indexer;
   identity: Identity;
   deskScript: Script;
+  /** Indexer refresh for a VTXO_ALREADY_SPENT outpoint. The SDK wallet does this so the cache can catch up. */
+  reconcileSpent?: ReconcileSpent;
 }): Promise<string[]> {
   const page = await opts.indexer.getVtxos({
     scripts: [bytesToHex(opts.deskScript.pkScript)],
     pendingOnly: true,
   });
-  const coins = (page.vtxos ?? []).filter((coin) => coin.txid && coin.isSpent !== false);
+  const coins = (page.vtxos ?? []).filter((coin) => (
+    coin.txid && coin.isSpent !== false && !clearedOutpoints.has(`${coin.txid}:${coin.vout}`)
+  ));
   if (!coins.length) return [];
-  if (coins.every((coin) => coin.arkTxId && stuckArkTxs.has(coin.arkTxId))) return [];
+  if (coins.every((coin) => coin.arkTxId && stuckArkTxs.has(coin.arkTxId))) {
+    await dropAlreadySpent(coins, undefined, opts.reconcileSpent);
+    return [];
+  }
   const intent = await ownershipProof(opts.identity, opts.deskScript, coins);
   const pending = await opts.ark.getPendingTxs(intent);
   const finalized: string[] = [];
@@ -223,6 +262,12 @@ export async function finalizeDeskSpends(opts: {
       await opts.ark.finalizeTx(tx.arkTxid, checkpoints);
       finalized.push(tx.arkTxid);
     } catch (err) {
+      if (alreadySpent(err)) {
+        const involved = coins.filter((coin) => !coin.arkTxId || coin.arkTxId === tx.arkTxid);
+        await dropAlreadySpent(involved, tx.arkTxid, opts.reconcileSpent);
+        console.error("finalize stuck", tx.arkTxid, messageOf(err));
+        continue;
+      }
       console.error("finalize", tx.arkTxid, err instanceof Error ? err.message : err);
     }
   }
@@ -239,8 +284,9 @@ export async function pendingOutpoints(indexer: Indexer, deskScript: Script): Pr
   });
   const ids = new Set<string>();
   for (const coin of page.vtxos ?? []) {
-    if (coin.isSpent === false) continue;
-    ids.add(`${coin.txid}:${coin.vout}`);
+    const id = `${coin.txid}:${coin.vout}`;
+    if (coin.isSpent === false || clearedOutpoints.has(id)) continue;
+    ids.add(id);
   }
   return ids;
 }

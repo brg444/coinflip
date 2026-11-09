@@ -8,7 +8,7 @@ type Status = {
   wallet: string | null;
   balance: string | null;
   address: string | null;
-  args: { ctrlTxid: string | null; domain: string; keyLag: number; readFee: number; adminPk: string | null; exit: number };
+  args: { ctrlTxid: string | null; domain: string; expiryLag: number; readFee: number; adminPk: string | null; exit: number };
   fixings: unknown[];
   samples: number;
   latest: Sample | null;
@@ -39,7 +39,7 @@ async function refresh(): Promise<void> {
   const { args } = body;
   const latest = body.latest ? `${body.latest.price} cents at ${body.latest.time}` : "none";
   lines(byId("status"), "p", [
-    `Key lag ${args.keyLag}. Read fee ${args.readFee}. Exit ${args.exit}.`,
+    `Expiry lag ${args.expiryLag}. Read fee ${args.readFee}. Exit ${args.exit}.`,
     `Domain ${args.domain}`,
     `Admin ${args.adminPk ?? "unset"}`,
     `Fund ${body.wallet ?? "unset"}`,
