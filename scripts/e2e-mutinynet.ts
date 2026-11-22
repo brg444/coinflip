@@ -142,8 +142,8 @@ if (live) {
   const storage = await openSqliteStorage(process.env.DATA_DIR?.trim() || "data", "e2e.sqlite");
   const writerWallet = await Wallet.create({
     identity: writer,
-    arkServerUrl: arkUrl,
-    indexerUrl: arkUrl,
+    arkProvider: new RestArkProvider(arkUrl),
+    indexerProvider: new RestIndexerProvider(arkUrl),
     settlementConfig: false,
     storage: {
       walletRepository: storage.walletRepository,

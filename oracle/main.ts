@@ -4,6 +4,7 @@ import {
   defaultEmulatorPubkey,
   RestArkProvider,
   RestEmulatorProvider,
+  RestIndexerProvider,
   SingleKey,
   Wallet,
 } from "@arkade-os/sdk";
@@ -57,8 +58,8 @@ const storage = await openSqliteStorage(dataDir);
 const wallet = oracleKey
   ? await Wallet.create({
       identity: SingleKey.fromHex(bytesToHex(oracleKey)),
-      arkServerUrl: arkUrl,
-      indexerUrl: arkUrl,
+      arkProvider: new RestArkProvider(arkUrl),
+      indexerProvider: new RestIndexerProvider(arkUrl),
       settlementConfig: false,
       storage: {
         walletRepository: storage.walletRepository,

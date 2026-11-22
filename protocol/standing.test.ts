@@ -60,7 +60,7 @@ async function funded(script: Uint8Array, amount: bigint): Promise<Coin> {
   const owner = payoutVtxo(await key(3).xOnlyPublicKey(), await key(8).xOnlyPublicKey(), EXIT);
   const { arkTx } = buildOffchainTx(
     [{
-      txid: crypto.getRandomValues(new Uint8Array(32)),
+      txid: bytesToHex(crypto.getRandomValues(new Uint8Array(32))),
       vout: 0,
       value: Number(amount),
       tapLeafScript: owner.forfeit(),
