@@ -15,7 +15,7 @@ import {
 } from "@arkade-os/sdk";
 
 import { beaconIdOf } from "../../protocol/beacon-id.ts";
-import { ARK_URL, BEACON_READ_FEE, EMULATOR_URL, EXIT, isPredict, type Kind } from "../../protocol/constants.ts";
+import { ARK_URL, BEACON_READ_FEE, DUST_SATS, EMULATOR_URL, EXIT, isPredict, type Kind } from "../../protocol/constants.ts";
 import { assertServerExit, bindContracts, payoutVtxo, type Terms } from "../../protocol/contracts.ts";
 import { bytesToHex, hexToBytes, xOnly } from "../../protocol/hex.ts";
 import { networkByName } from "../../protocol/network.ts";
@@ -243,6 +243,12 @@ export async function writerBinding(address: string): Promise<WriterBinding> {
   };
 }
 
+/** Desk's default VTXO pkScript for a position, used to recognize 0-user-payout settlements. */
+export async function deskPkScript(deskPkHex: string, exit?: bigint | number): Promise<string> {
+  const { client } = await operatorSession();
+  return bytesToHex(payoutVtxo(hexToBytes(deskPkHex), client.serverKey, exit ? BigInt(exit) : EXIT).pkScript);
+}
+
 /** Address finalize pays the premium to, for an older stored key. */
 export async function writerPayoutAddress(writerHex: string): Promise<string> {
   const writer = SingleKey.fromHex(writerHex);
@@ -403,15 +409,18 @@ export async function onContractEvent(cb: (event: ContractEvent) => void): Promi
   return manager.onContractEvent(cb);
 }
 
-/** After the deadline, cancel pays the whole coin back to the user's address. */
+/** After the deadline, cancel pays every live coin above dust back to the user's address. */
 export async function cancelIntent(req: FundRequest): Promise<string> {
   const { intent, bound } = await build(req);
   const manager = await contracts();
   await intent.register().catch(() => undefined);
   await manager.refreshVtxos({ scripts: [bytesToHex(intent.pkScript)], after: 0 });
-  const coins = await intent.getUtxos();
-  const coin = coins[0];
-  if (!coin) throw new Error("No coin on this address.");
-  const sent = await intent.functions.cancel().from(coin).to(bound.userPkScript, BigInt(coin.value)).send();
-  return sent.txid;
+  const coins = (await intent.getUtxos()).filter((item) => BigInt(item.value) > DUST_SATS);
+  if (!coins.length) throw new Error("No coin on this address.");
+  let lastTxid = "";
+  for (const coin of coins) {
+    const sent = await intent.functions.cancel().from(coin).to(bound.userPkScript, BigInt(coin.value)).send();
+    lastTxid = sent.txid;
+  }
+  return lastTxid;
 }

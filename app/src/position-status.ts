@@ -12,14 +12,16 @@ export function settlementKnown(position: { settleTxid?: string; closeTxid?: str
 
 /**
  * Payouts after the beacon continuation. Output 0 is the beacon plus the read
- * fee, so it is not a party. Unmatched value outputs count as the desk only
- * once the writer script matches, so a wrong address is not called the winner.
+ * fee, so it is not a party. At least one party script (user or desk) must
+ * match so an unrelated transaction is not misread as a settlement.
  */
 export function splitPayouts(
   outputs: { amount: bigint; script: string }[],
   writerScript: string,
+  deskScript?: string,
 ): { writer: bigint; desk: bigint } | null {
   const want = writerScript.toLowerCase();
+  const wantDesk = (deskScript ?? "").toLowerCase();
   let writer = 0n;
   let desk = 0n;
   let matched = false;
@@ -29,6 +31,9 @@ export function splitPayouts(
     if (script === "51024e73" || script.startsWith("6a")) return;
     if (script === want) {
       writer += output.amount;
+      matched = true;
+    } else if (wantDesk && script === wantDesk) {
+      desk += output.amount;
       matched = true;
     } else {
       desk += output.amount;

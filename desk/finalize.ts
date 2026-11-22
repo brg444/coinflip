@@ -2,6 +2,7 @@ import { Intent, Transaction, type DefaultVtxo, type Identity, type IndexerProvi
 import { base64 } from "@scure/base";
 
 import { bytesToHex } from "../protocol/hex.ts";
+import { virtualTxsById } from "../protocol/virtual-txs.ts";
 
 type Script = DefaultVtxo.Script;
 
@@ -109,16 +110,6 @@ async function dropAlreadySpent(
   }
 }
 
-/** The indexer returns virtual txs sorted by txid, not in the order we asked. */
-function virtualTxsById(raws: string[]): Map<string, string> {
-  const found = new Map<string, string>();
-  for (const raw of raws) {
-    if (!raw) continue;
-    found.set(Transaction.fromPSBT(base64.decode(raw)).id, raw);
-  }
-  return found;
-}
-
 async function cosignedCheckpoints(identity: Identity, deskScript: Uint8Array, raws: string[]): Promise<string[]> {
   return Promise.all(raws.map((raw) => cosignCheckpoint(identity, deskScript, raw)));
 }
@@ -159,7 +150,7 @@ async function finalizeFromIndexer(opts: {
   const arkTxs = virtualTxsById((await opts.indexer.getVirtualTxs(ids)).txs);
   const finalized: string[] = [];
   for (const arkTxid of ids) {
-    const raw = arkTxs.get(arkTxid);
+    const raw = arkTxs.get(arkTxid.toLowerCase());
     if (!raw) {
       console.error("finalize virtual tx missing", arkTxid);
       continue;
@@ -170,7 +161,7 @@ async function finalizeFromIndexer(opts: {
       for (let input = 0; input < arkTx.inputsLength; input += 1) checkpointIds.push(prevTxid(arkTx, input));
       const fetched = virtualTxsById((await opts.indexer.getVirtualTxs(checkpointIds)).txs);
       const ordered = checkpointIds.map((id) => {
-        const checkpoint = fetched.get(id);
+        const checkpoint = fetched.get(id.toLowerCase());
         if (!checkpoint) throw new Error(`checkpoint ${id} missing`);
         return checkpoint;
       });

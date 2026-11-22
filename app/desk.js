@@ -3,6 +3,7 @@ import {
   cancelIntent,
   clearAddress,
   depositAddress,
+  deskPkScript,
   legacyWriterHex,
   paymentUri,
   readAddress,
@@ -1097,9 +1098,14 @@ function renderPosition(p) {
     head.textContent = "Checking the price.";
     body.push(el("p", "sub", `We check the BTC price at ${atTime(p.expiry)} and send back what’s yours. Nothing for you to do.`));
     const settle = settleButton(p);
-    if (settle) {
+    if (settle || p.refundable) {
       const acts = el("div", "acts");
-      acts.append(settle);
+      if (settle) acts.append(settle);
+      if (p.refundable) {
+        acts.append(action("btn sm", "Take it back", (event) => {
+          void refund(p, event.currentTarget);
+        }));
+      }
       body.push(acts);
     }
   } else if (p.status === "expired") {
@@ -1507,7 +1513,7 @@ async function refund(position, button) {
   try {
     await cancelIntent(await fundRequest(position));
     applyChain(position, await readIntent(watchRow(position)));
-    if (position.status !== "refunded" && button.isConnected) {
+    if (position.refundable && button.isConnected) {
       button.disabled = false;
       button.textContent = "Take it back";
     }
@@ -2748,9 +2754,14 @@ function renderPrediction(p) {
     head.textContent = "Checking the price.";
     body.push(el("p", "sub", `The fixing at ${at} decides it, and the payout goes to your Arkade wallet. Nothing for you to do.`));
     const settle = settleButton(p);
-    if (settle) {
+    if (settle || p.refundable) {
       const acts = el("div", "acts");
-      acts.append(settle);
+      if (settle) acts.append(settle);
+      if (p.refundable) {
+        acts.append(action("btn sm", "Take it back", (event) => {
+          void refund(p, event.currentTarget);
+        }));
+      }
       body.push(acts);
     }
   } else if (p.status === "expired") {
@@ -3499,7 +3510,14 @@ async function fillKept() {
     if (position.keptChecked || position.writerKeep || !settlementKnown(position)) return;
     const script = writerScriptOf(position);
     if (!script) return;
-    const split = await readKept(position.settleTxid, script, isPredict(position.kind) ? BigInt(position.expiry) : undefined);
+    const deskPk = isPredict(position.kind) ? (position.deskPkHex || "") : (position.holderPkHex || "");
+    const deskScript = deskPk ? await deskPkScript(deskPk, position.exit).catch(() => "") : "";
+    const split = await readKept(
+      position.settleTxid,
+      script,
+      isPredict(position.kind) ? BigInt(position.expiry) : undefined,
+      deskScript,
+    );
     if (!split) return;
     position.keptChecked = true;
     position.writerKeep = split.writer.toString();
