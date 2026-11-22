@@ -54,40 +54,54 @@ export function classifyIntent(input: {
   const side = input.side ?? 0;
   const vault = (input.vaultScript ?? "").toLowerCase();
   const locks = side === 1 ? input.premium : input.collateral;
-  const live = input.coins.find((coin) => !coin.spent && coin.value >= locks);
-  if (live) {
-    const open = input.now < input.deadline;
-    return {
-      phase: open ? "funded" : "expired",
-      refundable: !open,
-      fundingTxid: txid(live.txid),
-      closeTxid: "",
-    };
-  }
+  const liveAboveDust = input.coins.find((coin) => !coin.spent && coin.value > DUST_SATS);
+  const pastDeadline = input.now >= input.deadline;
   const spent = input.coins
     .filter((coin) => coin.spent && coin.value >= locks && coin.spentBy)
     .sort((a, b) => Number(b.value - a.value));
   const sumTo = (outputs: TxOutput[], script: string) => outputs.reduce((sum, output) => (
     script && output.script.toLowerCase() === script ? sum + output.amount : sum
   ), 0n);
+  // Check fills before live coins so a double-payment still shows as filled.
   for (const coin of spent) {
     const outputs = input.spends[coin.spentBy] ?? [];
     const paid = sumTo(outputs, writer);
-    const view = {
-      refundable: false,
-      fundingTxid: txid(coin.txid),
-      closeTxid: txid(coin.spentBy),
-    };
-    if (paid >= coin.value) return { phase: "refunded", ...view };
-    if (side === 0 && paid >= input.premium) return { phase: "filled", ...view };
-    if (side === 1 && sumTo(outputs, vault) >= input.collateral) return { phase: "filled", ...view };
+    if (paid >= coin.value) continue;
+    const isFilled = (side === 0 && paid >= input.premium) || (side === 1 && sumTo(outputs, vault) >= input.collateral);
+    if (isFilled) {
+      return {
+        phase: "filled",
+        refundable: Boolean(liveAboveDust && pastDeadline),
+        fundingTxid: txid(coin.txid),
+        closeTxid: txid(coin.spentBy),
+      };
+    }
   }
-  const underfunded = input.coins.find((coin) => !coin.spent && coin.value > DUST_SATS);
-  if (underfunded && input.now >= input.deadline) {
+  const live = input.coins.find((coin) => !coin.spent && coin.value >= locks);
+  if (live) {
+    return {
+      phase: !pastDeadline ? "funded" : "expired",
+      refundable: pastDeadline,
+      fundingTxid: txid(live.txid),
+      closeTxid: "",
+    };
+  }
+  for (const coin of spent) {
+    const outputs = input.spends[coin.spentBy] ?? [];
+    if (sumTo(outputs, writer) >= coin.value) {
+      return {
+        phase: "refunded",
+        refundable: Boolean(liveAboveDust && pastDeadline),
+        fundingTxid: txid(coin.txid),
+        closeTxid: txid(coin.spentBy),
+      };
+    }
+  }
+  if (liveAboveDust && pastDeadline) {
     return {
       phase: "expired",
       refundable: true,
-      fundingTxid: txid(underfunded.txid),
+      fundingTxid: txid(liveAboveDust.txid),
       closeTxid: "",
     };
   }
