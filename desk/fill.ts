@@ -8,9 +8,10 @@ import { intentProgram } from "../protocol/programs.ts";
 import { virtualTxsById } from "../protocol/virtual-txs.ts";
 import type { QuoteRow } from "./book.ts";
 import { finalizeDeskSpends, pendingOutpoints, settleEmulatorTx, type PendingArk } from "./finalize.ts";
+import { coinOutlives, minCoinExpiry } from "./guards.ts";
 
 type Client = Awaited<ReturnType<typeof arkade.Arkade.connect>>;
-type Coin = { txid: string; vout: number; value: number };
+export type Coin = { txid: string; vout: number; value: number; expiresAt?: Date };
 
 function refreshSpent(client: Client) {
   const manager = client.contractManager;
@@ -28,8 +29,9 @@ function asInput(coin: Coin, script: DefaultVtxo.Script): ArkTxInput {
   };
 }
 
-function selectFloat(coins: Coin[], premium: bigint): Coin[] | null {
-  const sorted = [...coins].sort((a, b) => a.value - b.value);
+export function selectFloat(coins: Coin[], premium: bigint, minExpiryS?: number): Coin[] | null {
+  const eligible = minExpiryS == null ? coins : coins.filter((coin) => coinOutlives(coin, minExpiryS));
+  const sorted = [...eligible].sort((a, b) => a.value - b.value);
   const picked: Coin[] = [];
   let sum = 0n;
   for (const coin of sorted) {
@@ -42,7 +44,8 @@ function selectFloat(coins: Coin[], premium: bigint): Coin[] | null {
   return null;
 }
 
-export type FillResult = "waiting" | "filled" | "expired" | "short";
+export type FillResult = "waiting" | "filled" | "expired" | "short" | "declined";
+export type PredictFillVerdict = "allow" | "decline" | "retry";
 
 /**
  * Happy path. Options: collateral on the intent is finalized, premium to the
@@ -64,6 +67,7 @@ export async function fillQuote(opts: {
    * submits; without finalizeTx the premium and the desk change never become vtxos.
    */
   ark?: PendingArk;
+  checkPredict?: (row: QuoteRow, now: number) => Promise<PredictFillVerdict>;
 }): Promise<{ result: FillResult; txid?: string; spent?: Coin[] }> {
   const bound = bindContracts(opts.termsFor(opts.row));
   const intent = opts.client.contract(intentProgram(), bound.intent);
@@ -73,7 +77,9 @@ export async function fillQuote(opts: {
   const predict = isPredict(opts.row.kind);
   // The user's coin: the collateral they lock, or the stake they bet.
   const locks = predict ? premium : collateral;
-  const coin = coins.find((item) => BigInt(item.value) >= locks);
+  const minExpiry = minCoinExpiry(opts.row.expiry);
+  const funding = coins.filter((item) => BigInt(item.value) >= locks);
+  const coin = funding.find((item) => coinOutlives(item, minExpiry));
   if (!coin) {
     const intentScript = bytesToHex(intent.pkScript);
     const recovered = await recoverFilled(opts.client, bound.userPkScript, intentScript, {
@@ -84,16 +90,22 @@ export async function fillQuote(opts: {
       ...(predict ? { side: 1 as const, vaultScript: bytesToHex(bound.vaultPkScript) } : {}),
     });
     if (recovered) return { result: "filled", txid: recovered };
+    if (funding.length > 0) return { result: opts.now >= opts.row.deadline ? "expired" : "declined" };
     // Spent, but the payout vtxo is not in the indexer yet. Expiring here drops the retry.
     if (await collateralSpent(opts.client, intentScript, locks)) return { result: "waiting" };
     return { result: opts.now >= opts.row.deadline ? "expired" : "waiting" };
   }
   if (opts.now >= opts.row.deadline) return { result: "expired" };
+  if (predict && opts.checkPredict) {
+    const verdict = await opts.checkPredict(opts.row, opts.now);
+    if (verdict === "decline") return { result: "declined" };
+    if (verdict === "retry") return { result: "waiting" };
+  }
 
   // The desk pays the premium for an option, and the whole payout for a prediction.
   const outlay = predict ? collateral : premium;
   const float = opts.float ?? await deskFloat(opts.client, opts.deskScript);
-  const picked = selectFloat(float, outlay);
+  const picked = selectFloat(float, outlay, minExpiry);
   if (!picked) return { result: "short" };
 
   const locked = BigInt(coin.value);

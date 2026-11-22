@@ -42,6 +42,7 @@ export type HeldCoin = {
   vout: number;
   value: number | bigint;
   isSpent?: boolean;
+  expiresAt?: Date;
   assets?: readonly { assetId: string; amount: bigint | number }[];
 };
 
@@ -242,11 +243,24 @@ export async function createOracle(deps: OracleDeps) {
     return coins.filter((coin) => !coin.isSpent).reduce((sum, coin) => sum + BigInt(coin.value), 0n);
   }
 
+  async function beaconCoinExpiry(script: Awaited<ReturnType<typeof bound>>): Promise<number | null> {
+    if (!store.deployTxid || !store.assetId || !script || !deps.indexer) return null;
+    try {
+      const found = await deps.indexer.getVtxos({ scripts: [bytesToHex(script.pkScript)], spendableOnly: true });
+      const coin = found.vtxos.find((vtxo) => !vtxo.isSpent && vtxo.assets?.some((item) => item.assetId === store.assetId && BigInt(item.amount) === 1n));
+      const ms = coin?.expiresAt instanceof Date ? coin.expiresAt.getTime() : NaN;
+      return Number.isFinite(ms) && ms > 0 ? Math.floor(ms / 1000) : null;
+    } catch {
+      return null;
+    }
+  }
+
   async function status() {
     const id = store.assetId ? asset.AssetId.fromString(store.assetId) : null;
     const beacon = id ? beaconIdOf(id) : null;
     const script = await bound();
     const balance = await walletBalance();
+    const beaconExpiry = await beaconCoinExpiry(script);
     const latest = store.samples.reduce<StoredSample | null>((best, sample) => (!best || sample.time >= best.time ? sample : best), null);
     return {
       assetId: store.assetId,
@@ -255,6 +269,7 @@ export async function createOracle(deps: OracleDeps) {
       wallet: deps.wallet ? await deps.wallet.getAddress() : null,
       balance: balance == null ? null : balance.toString(),
       address: script?.address ?? null,
+      beaconExpiry,
       pubkeys: adminPk ? [bytesToHex(adminPk)] : [],
       args: {
         ctrlTxid: beacon ? bytesToHex(beacon.txid) : null,

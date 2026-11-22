@@ -44,15 +44,16 @@ import {
   type RfqStatus,
 } from "../protocol/messages.ts";
 import { connectTransport, nostrPubkey, type Incoming } from "../protocol/nostr.ts";
-import { deribitMultiplier, deribitPremium, fetchSurface, surfaceStatus } from "../protocol/deribit.ts";
+import { deribitMultiplier, deribitPremium, fetchSurface, predictVol, surfaceStatus } from "../protocol/deribit.ts";
 import { predictMultiplier, predictPayout, premiumSats, quotedPremium } from "../protocol/pricing.ts";
 import { openSqliteStorage, revision } from "../protocol/sqlite-storage.ts";
-import { fetchOracleStatus, parseOracleBeacon, serviceOrigin } from "../settle/oracle.ts";
+import { fetchOracleStatus, parseOracleBeacon, parseOracleLatest, serviceOrigin, type OracleLatest } from "../settle/oracle.ts";
 import { Book, hasBeacon, openPremium, outlay, pageQuotes, quoteCounts, type QuoteFilter, type QuoteRow } from "./book.ts";
 import { countFill, countQuote, emptyHour, hourLine, msUntilNextHour } from "./digest.ts";
 import { finalizeDeskSpends, pendingOutpoints } from "./finalize.ts";
 import { maintainDeskCoins } from "./maintain.ts";
-import { fillQuote } from "./fill.ts";
+import { fillQuote, type PredictFillVerdict } from "./fill.ts";
+import { beaconExpiryRefusal, coinOutlives, minCoinExpiry, predictFillAllowed, predictSpot } from "./guards.ts";
 import { spotCents } from "./spot.ts";
 
 /**
@@ -336,6 +337,7 @@ async function offer(row: QuoteRow, from: string) {
  * watch most of the window before paying.
  */
 async function onPredict(message: RfqRequest & { profile: PredictRequestProfile }, from: string, now: number) {
+  await refreshOracleStatus();
   let tick;
   try {
     tick = await spotCents();
@@ -344,12 +346,17 @@ async function onPredict(message: RfqRequest & { profile: PredictRequestProfile 
     await refuse(from, message.rfq_id, "spot unavailable");
     return;
   }
+  const priced = predictSpot({ oracle: oracleSpot, exchangeCents: tick.cents, now });
+  if (!priced.ok) {
+    await refuse(from, message.rfq_id, priced.reason);
+    return;
+  }
   const kind = message.profile.kind;
   let multiplier: number | null;
   if (volOverride != null) {
     multiplier = predictMultiplier({
       kind,
-      spotCents: Number(tick.cents),
+      spotCents: Number(priced.cents),
       lineCents: message.profile.strike,
       years: Math.max(message.profile.expiry - now, 1) / (365 * 24 * 60 * 60),
       vol: volOverride,
@@ -368,7 +375,7 @@ async function onPredict(message: RfqRequest & { profile: PredictRequestProfile 
       lineCents: message.profile.strike,
       expiry: message.profile.expiry,
       now,
-      spotCents: Number(tick.cents),
+      spotCents: Number(priced.cents),
       points,
       edge,
     });
@@ -384,8 +391,9 @@ async function onPredict(message: RfqRequest & { profile: PredictRequestProfile 
     await refuse(from, message.rfq_id, bad);
     return;
   }
-  if (balance < openPremium(book.list(), now) + payout) await refreshFloat();
-  if (balance < openPremium(book.list(), now) + payout) {
+  const minExpiry = minCoinExpiry(message.profile.expiry);
+  if (eligibleFloatBalance(minExpiry) < openPremium(book.list(), now) + payout) await refreshFloat();
+  if (eligibleFloatBalance(minExpiry) < openPremium(book.list(), now) + payout) {
     await refuse(from, message.rfq_id, "float short");
     return;
   }
@@ -444,6 +452,11 @@ async function onRequest(message: RfqRequest, from: string) {
     await refuse(from, message.rfq_id, lagRefusal);
     return;
   }
+  const expiryRefusal = beaconExpiryRefusal(message.profile.expiry, beaconExpiry);
+  if (expiryRefusal) {
+    await refuse(from, message.rfq_id, expiryRefusal);
+    return;
+  }
   if (isPredictRequest(message.profile)) {
     await onPredict(message as RfqRequest & { profile: PredictRequestProfile }, from, now);
     return;
@@ -497,8 +510,9 @@ async function onRequest(message: RfqRequest, from: string) {
     await refuse(from, message.rfq_id, dust);
     return;
   }
-  if (balance < openPremium(book.list(), now) + sats) await refreshFloat();
-  if (balance < openPremium(book.list(), now) + sats) {
+  const minExpiry = minCoinExpiry(profile.expiry);
+  if (eligibleFloatBalance(minExpiry) < openPremium(book.list(), now) + sats) await refreshFloat();
+  if (eligibleFloatBalance(minExpiry) < openPremium(book.list(), now) + sats) {
     await refuse(from, message.rfq_id, "float short");
     return;
   }
@@ -558,19 +572,27 @@ async function onMessage({ from, message }: Incoming) {
 }
 
 let beaconExpiryLag: bigint | null = null;
-async function refreshBeaconLag() {
+let beaconExpiry: number | null = null;
+let oracleSpot: OracleLatest | null = null;
+let oracleStatusAt = 0;
+
+async function refreshOracleStatus(force = false) {
+  if (!force && beaconExpiryLag != null && Date.now() - oracleStatusAt < 10_000) return;
   try {
-    const parsed = parseOracleBeacon(
-      await fetchOracleStatus(oracleUrl, AbortSignal.timeout(10_000)),
-      beaconDisplay.txid,
-      beaconDisplay.gidx,
-    );
-    if (parsed.ok) beaconExpiryLag = parsed.beacon.expiryLag;
+    const body = await fetchOracleStatus(oracleUrl, AbortSignal.timeout(10_000));
+    const parsed = parseOracleBeacon(body, beaconDisplay.txid, beaconDisplay.gidx);
+    if (parsed.ok) {
+      beaconExpiryLag = parsed.beacon.expiryLag;
+      beaconExpiry = parsed.beacon.beaconExpiry ?? null;
+    }
+    const latest = parseOracleLatest(body);
+    if (latest) oracleSpot = latest;
+    oracleStatusAt = Date.now();
   } catch {
-    // Keep previous reading; housekeeping retries while null.
+    // Keep previous reading; housekeeping retries.
   }
 }
-await refreshBeaconLag();
+await refreshOracleStatus(true);
 if (beaconWindowRefusal(beaconExpiryLag)) {
   console.error(beaconExpiryLag == null ? "oracle unreachable, quotes refused" : `beacon expiryLag ${beaconExpiryLag}, quotes refused`);
 }
@@ -628,7 +650,7 @@ async function announceFilled() {
   }
 }
 
-type FloatCoin = { txid: string; vout: number; value: number };
+type FloatCoin = { txid: string; vout: number; value: number; expiresAt?: Date };
 
 const deskScriptHex = bytesToHex(deskScript.pkScript);
 // ponytail: script→quote only. Scan for the reverse; add quote→script if the open book gets large.
@@ -642,6 +664,14 @@ let filling = false;
 function recount() {
   balance = [...deskCoins.values()].reduce((sum, coin) => sum + BigInt(coin.value), 0n);
   if (balance > 0n) shortLogged.clear();
+}
+
+function eligibleFloatBalance(minExpiryS: number): bigint {
+  let sum = 0n;
+  for (const coin of deskCoins.values()) {
+    if (coinOutlives(coin, minExpiryS)) sum += BigInt(coin.value);
+  }
+  return sum;
 }
 
 /** Finish a submit the wallet never finalized, then recover swept coins and renew the rest. */
@@ -698,7 +728,12 @@ async function refreshFloat() {
     const page = await indexer.getVtxos({ scripts: [deskScriptHex], spendableOnly: true });
     deskCoins.clear();
     for (const coin of page.vtxos ?? []) {
-      deskCoins.set(`${coin.txid}:${coin.vout}`, { txid: coin.txid, vout: coin.vout, value: coin.value });
+      deskCoins.set(`${coin.txid}:${coin.vout}`, {
+        txid: coin.txid,
+        vout: coin.vout,
+        value: coin.value,
+        expiresAt: coin.expiresAt,
+      });
     }
     recount();
   } catch (err) {
@@ -746,6 +781,39 @@ function queueFill(rfqId: string) {
   void pump();
 }
 
+async function checkPredictFill(row: QuoteRow, now: number): Promise<PredictFillVerdict> {
+  if (!isPredict(row.kind)) return "allow";
+  await refreshOracleStatus();
+  let tick;
+  try {
+    tick = await spotCents();
+    spot = tick;
+  } catch {
+    return "retry";
+  }
+  const priced = predictSpot({ oracle: oracleSpot, exchangeCents: tick.cents, now });
+  if (!priced.ok) return priced.reason === "price basis" ? "decline" : "retry";
+  let vol = volOverride;
+  if (vol == null) {
+    try {
+      vol = predictVol(await fetchSurface(), Number(priced.cents) / 100, now);
+    } catch {
+      return "retry";
+    }
+    if (vol == null) return "retry";
+  }
+  return predictFillAllowed({
+    kind: row.kind,
+    spotCents: Number(priced.cents),
+    lineCents: Number(row.strike),
+    expiry: row.expiry,
+    now,
+    vol,
+    stake: BigInt(row.premium),
+    payout: BigInt(row.collateral),
+  }) ? "allow" : "decline";
+}
+
 async function pump() {
   if (filling) return;
   filling = true;
@@ -768,6 +836,7 @@ async function pump() {
           now,
           float: [...deskCoins.values()],
           ark,
+          checkPredict: checkPredictFill,
         });
         if (outcome.result === "filled") {
           const fresh = row.status !== "filled";
@@ -788,10 +857,11 @@ async function pump() {
           console.log("filled", row.rfqId, outcome.txid ?? "");
           void announceFilled();
           await refreshFloat();
-        } else if (outcome.result === "expired") {
+        } else if (outcome.result === "expired" || outcome.result === "declined") {
           book.mark(row.rfqId, "expired");
           await forgetScript(row.rfqId);
           await book.save();
+          if (outcome.result === "declined") console.log("declined", row.rfqId);
         } else if (outcome.result === "short") {
           if (!shortLogged.has(row.rfqId)) {
             shortLogged.add(row.rfqId);
@@ -812,9 +882,10 @@ async function housekeeping() {
   if (polling) return;
   polling = true;
   try {
-    if (beaconExpiryLag == null) {
-      await refreshBeaconLag();
-      if (beaconExpiryLag != null && !beaconWindowRefusal(beaconExpiryLag)) {
+    const hadLag = beaconExpiryLag != null;
+    if (!hadLag || Date.now() - oracleStatusAt >= 20_000) {
+      await refreshOracleStatus(!hadLag);
+      if (!hadLag && beaconExpiryLag != null && !beaconWindowRefusal(beaconExpiryLag)) {
         console.log(`beacon expiryLag ${beaconExpiryLag}, quotes enabled`);
       }
     }
@@ -906,8 +977,11 @@ function statusBody() {
     balance: balance.toString(),
     beaconTxid: beaconDisplay.txid,
     beaconGidx: beaconDisplay.gidx,
+    beaconExpiry,
     spotCents: spot ? spot.cents.toString() : null,
     spotSources: spot?.sources ?? [],
+    oracleSpotCents: oracleSpot ? oracleSpot.cents.toString() : null,
+    oracleSpotAt: oracleSpot?.time ?? null,
     pricing: volOverride != null
       ? { source: "override", vol: volOverride }
       : { source: "deribit", ...surfaceStatus() },

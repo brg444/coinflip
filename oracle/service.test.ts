@@ -783,3 +783,37 @@ test("ingestIntent stores distinct DIA intents immediately and skips before issu
     await ctx.close();
   }
 });
+
+test("status reports beaconExpiry in Unix seconds when the beacon coin has a wall-clock expiresAt", async () => {
+  const expectedExpiry = 1_700_050_000;
+  let assetId = "";
+  const ctx = await boot({
+    indexer: {
+      async getVtxos() {
+        return {
+          vtxos: [{
+            txid: "aa".repeat(32),
+            vout: 0,
+            value: 330,
+            expiresAt: new Date(expectedExpiry * 1000),
+            assets: [{ assetId, amount: 1n }],
+          }],
+        };
+      },
+      async getVirtualTxs() {
+        return { txs: [] };
+      },
+    },
+  });
+  try {
+    assert.equal((await call(ctx.oracle.url, "/api/status")).json.beaconExpiry, null);
+    const issued = await call(ctx.oracle.url, "/api/issue", {}, "test-token");
+    assert.equal(issued.status, 200);
+    assetId = String(issued.json.assetId);
+    assert.equal((await call(ctx.oracle.url, "/api/deploy", {}, "test-token")).status, 200);
+    const status = await call(ctx.oracle.url, "/api/status");
+    assert.equal(status.json.beaconExpiry, expectedExpiry);
+  } finally {
+    await ctx.close();
+  }
+});

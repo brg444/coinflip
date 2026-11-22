@@ -25,7 +25,7 @@ import { bindContracts, payoutVtxo, type Terms } from "../protocol/contracts.ts"
 import { statePacket } from "../protocol/cospend.ts";
 import { bytesToHex, hexToBytes } from "../protocol/hex.ts";
 import { parsePosition } from "../protocol/messages.ts";
-import { serviceOrigin, parseOracleBeacon } from "./oracle.ts";
+import { serviceOrigin, parseOracleBeacon, parseOracleLatest } from "./oracle.ts";
 import { duePositions, manualPositions, positionFromAnnouncement, publishOutcome, publishReady, settlementPositions, termsFor } from "./positions.ts";
 import { settleQuote, slotPrice, settlePayouts, type ChainCoin } from "./vault.ts";
 
@@ -465,4 +465,29 @@ test("a filled vault settles from the beacon state the oracle published", async 
   coins[0] = { ...coins[0]!, isSpent: false, spentBy: "", arkTxId: undefined, isUnrolled: true, settledBy: "ab".repeat(32) };
   const rolled = await settleQuote({ ...env, now: EXPIRY });
   assert.deepEqual(rolled, { result: "settled", txid: "ab".repeat(32) });
+});
+
+test("parseOracleBeacon preserves beaconExpiry and parseOracleLatest validates latest price", () => {
+  const assetId = asset.AssetId.create(DISPLAY, 0);
+  const status = {
+    issueTxid: DISPLAY,
+    assetId: assetId.toString(),
+    address: "tark1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqq",
+    beaconExpiry: 1_700_050_000,
+    latest: { price: "9123456", time: 1_700_000_123 },
+    args: {
+      ctrlTxid: bytesToHex(beaconIdOf(assetId).txid),
+      domain: "4254435553442d464958",
+      expiryLag: 60,
+      readFee: 1000,
+      adminPk: "11".repeat(32),
+      exit: 2048,
+    },
+  };
+  const parsed = parseOracleBeacon(status, DISPLAY, 0);
+  assert.equal(parsed.ok, true);
+  if (parsed.ok) assert.equal(parsed.beacon.beaconExpiry, 1_700_050_000);
+  assert.deepEqual(parseOracleLatest(status), { cents: 9_123_456n, time: 1_700_000_123 });
+  assert.equal(parseOracleLatest({ latest: { price: "0", time: 1_700_000_123 } }), null);
+  assert.equal(parseOracleLatest({ latest: null }), null);
 });
