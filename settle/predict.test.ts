@@ -231,15 +231,12 @@ test("a prediction's fill funds the vault, and the stake back is a refund", () =
 test("a filled prediction settles to the bettor above the line and to the desk at it", async () => {
   const terms = await predictTerms(2);
   const bound = bindContracts(terms);
-  const signers = await Promise.all([11, 12, 13, 14, 15].map((n) => key(n).xOnlyPublicKey()));
   const adminPk = await key(9).xOnlyPublicKey();
   const domain = new TextEncoder().encode("BTCUSD-FIX");
   const assetId = asset.AssetId.create(DISPLAY, 0);
   const id = beaconIdOf(assetId);
   const beacon = bindBeacon({
     id,
-    signers,
-    threshold: 1n,
     domain,
     expiryLag: 60n,
     readFee: BEACON_READ_FEE,
@@ -282,10 +279,8 @@ test("a filled prediction settles to the bettor above the line and to the desk a
     issueTxid: DISPLAY,
     assetId: assetId.toString(),
     address: beacon.address,
-    pubkeys: signers.map((item) => bytesToHex(item)),
     args: {
       ctrlTxid: bytesToHex(id.txid),
-      threshold: 1,
       domain: bytesToHex(domain),
       expiryLag: 60,
       readFee: Number(BEACON_READ_FEE),

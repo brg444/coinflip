@@ -4,8 +4,15 @@ import path from "node:path";
 import { writeJsonFile } from "../protocol/sqlite-storage.ts";
 
 export type StoredSample = {
+  /** USD cents derived from the DIA price. What the beacon stores and the settler reads. */
   price: string;
   time: number;
+  /** 18-decimal DIA price. */
+  raw?: string;
+  nonce?: string;
+  intentExpiry?: number;
+  /** 64-byte r||s, hex. */
+  sig?: string;
 };
 
 /** Samples older than this are dropped. A day of one-minute prints. */
@@ -21,6 +28,10 @@ export type StoredFixing = {
   price: string;
   /** Sample time signed for this expiry. The same pair is what a later rewrite may use. */
   time?: number;
+  raw?: string;
+  nonce?: string;
+  intentExpiry?: number;
+  sig?: string;
   txid: string;
 };
 
@@ -51,9 +62,16 @@ const empty = (): OracleFile => ({ assetId: null, issueTxid: null, deployTxid: n
 
 function normalizeSample(value: unknown): StoredSample | null {
   if (!value || typeof value !== "object") return null;
-  const sample = value as { price?: unknown; time?: unknown };
+  const sample = value as StoredSample;
   if (typeof sample.price !== "string" || typeof sample.time !== "number") return null;
-  return { price: sample.price, time: sample.time };
+  return {
+    price: sample.price,
+    time: sample.time,
+    ...(typeof sample.raw === "string" ? { raw: sample.raw } : {}),
+    ...(typeof sample.nonce === "string" ? { nonce: sample.nonce } : {}),
+    ...(typeof sample.intentExpiry === "number" ? { intentExpiry: sample.intentExpiry } : {}),
+    ...(typeof sample.sig === "string" ? { sig: sample.sig } : {}),
+  };
 }
 
 /** Only this service writes the file, so it is read back as is. */

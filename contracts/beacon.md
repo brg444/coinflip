@@ -1,6 +1,6 @@
 # Attestation beacon
 
-A committee-signed registry that a covenant reads by spending it in the same transaction. The option vault is the first consumer. The shape is the LayerZero endpoint from the compiler examples: a verifier coin identified by an asset, consumers that read its packet.
+A price registry that a covenant reads by spending it in the same transaction. The option vault is the first consumer. The shape is the LayerZero endpoint from the compiler examples: a verifier coin identified by an asset, consumers that read its packet.
 
 Contracts: `attestation_beacon.ark`, `option_vault.ark`. Open checks are at the end.
 
@@ -23,7 +23,7 @@ Identity is an asset unit, state is a packet, and the covenant holding the unit 
 
 ### Identity
 
-`AttestationBeacon(ctrlTxid, ctrlGidx, signers, signersN, threshold, domain, expiryLag, readFee, adminPk, exit)`. The beacon coin carries one unit of the asset `(ctrlTxid, ctrlGidx)`. The vault commits to `(beaconTxid, beaconGidx)` and to `readFee`. The service deploys 330 sats and sets `readFee` to 1000, above the dust line. One to five oracle keys sign each sample, and `threshold` of them must agree. `adminPk` does not sign prices. It migrates the coin and takes the unilateral exit.
+`AttestationBeacon(ctrlTxid, ctrlGidx, domain, expiryLag, readFee, adminPk, exit)`. The beacon coin carries one unit of the asset `(ctrlTxid, ctrlGidx)`. The vault commits to `(beaconTxid, beaconGidx)` and to `readFee`. The service deploys 330 sats and sets `readFee` to 1000, above the dust line. `attest` checks one pinned DIA secp256k1 key over the BTC/USD EIP-712 digest. `adminPk` does not sign prices. It migrates the coin and takes the unilateral exit.
 
 The script cannot see the issuance. The desk trusts the asset id it is given (see §4, a second identity unit).
 
@@ -43,15 +43,13 @@ The packet is one stack element. `OP_INSPECTINPUTPACKET` rejects more than 520 b
 
 ### Leaves
 
-`attest(expiry, price, time, sigs)`. Beacon at input 0. `expiry` is the time the price belongs to. The oracle message is `sha256(ctrlTxid || 0x425443555344 || num2bin(expiry, 8) || num2bin(price, 8) || num2bin(time, 8))`. The first `signersN` keys are checked and `threshold` of them must verify. A signature names one expiry, so a print cannot be written into a later slot, and a one-cent change of the price does not verify. `expiry > 1800` and that expiry is not already in a slot. The sample time must satisfy `expiry <= time <= expiry + expiryLag`. When `expiryLag ≥ 0`, the emulator clock must have reached `expiry + expiryLag`. A price beacon sets 60, so a fixing cannot be published before its minute closes, and a print from before that minute cannot fill the slot. The stored value is `num2bin(price, 8) || num2bin(time, 8) || num2bin(0, 16)`. The new packet has round + 1, slot 0 = (expiry, price || time), slots 1..7 = old slots 0..6. Output 0 keeps the script, at least the value, and the asset unit.
+`attest(expiry, price, time, nonce, intentExpiry, sig)`. Beacon at input 0. `expiry` is the option expiry, the slot key. `price` is the DIA 18-decimal integer. The script divides by 10^16, rounds half up, and stores those cents. `time` is the DIA timestamp and must satisfy `expiry <= time <= expiry + expiryLag`. `sig` is the 64-byte `r || s` checked with `checkSigFromStack` against the pinned DIA key over `digest(0x1901 || domainSeparator || structHash, 4)`. `expiry > 1800` and that expiry is not already in a slot. When `expiryLag ≥ 0`, the emulator clock must have reached `expiry + expiryLag`. A price beacon sets 60. The stored value is `num2bin(cents, 8) || num2bin(time, 8) || num2bin(0, 16)`. The new packet has round + 1, slot 0 = (expiry, cents || time), slots 1..7 = old slots 0..6. Output 0 keeps the script, at least the value, and the asset unit.
 
-An expiry that falls off the eight slots may be written again only with the same price and time. The message names the expiry, so a different price or time does not verify. The oracle service signs one fixing per expiry and reuses that pair. `adminPk` does not sign the sample. It is the key for `migrate` and the unilateral exit.
+An expiry that falls off the eight slots can be written again with any DIA intent whose timestamp still sits in that window. The service keeps the first intent it published for that expiry and reuses it. A sample stored before this upgrade has no DIA price, nonce, intent expiry, or signature, so it cannot be published. `adminPk` does not sign the sample. It is the key for `migrate` and the unilateral exit.
 
 `read(selfIndex)`. `selfIndex` is the beacon's own input index. The current transaction carries a packet equal to the beacon's own. Output 0 keeps the script and the asset unit, and is worth at least the input plus `readFee`. The live service sets `readFee` to 1000. The vault pays that out of its collateral. No signature: anyone may read. A read pins nothing else about its transaction: not the number of inputs, not who else is in it.
 
 `migrate(next, opSig)`. Beacon at input 0. Callers pass `next` as `ScriptPubKey { program, version: 1 }`, not a bare 32-byte program. `adminPk` signs `sha256(domain + "migrate" + ctrlTxid + num2bin(ctrlGidx, 4) + num2bin(round, 8) + next.program)`, with `round` read from the current packet, so a migrate signature is good for one state only. Output 0 pays that script with the asset unit and at least the value; the packet is carried unchanged. The consumer does not change.
-
-`committee` checks `1 ≤ threshold ≤ signersN ≤ 5` and that the live signer keys differ. It runs from `attest` only. `migrate` is `adminPk` alone.
 
 `unilateral(adminSig)` tapscript. `older(exit)` and the admin key.
 
@@ -86,7 +84,7 @@ in 1  beacon (read, selfIndex 1) out 1  holder or writer leg
 | LayerZero / USDT0 example | here |
 | --- | --- |
 | Endpoint state coin with control asset | beacon coin with identity asset |
-| DVN 2-of-2 over the attested hash | `threshold` of the oracle keys over `sha256(ctrlTxid \|\| BTCUSD \|\| expiry \|\| price \|\| time)` |
+| DVN 2-of-2 over the attested hash | one pinned DIA key over the BTC/USD EIP-712 digest |
 | OApp reads the marker's previous packet | vault reads the beacon's previous packet |
 | Marker minted per message and burned by the consumer | the beacon itself is co-spent and continued |
 | DVN config change by the owner | `migrate` by `adminPk` |
@@ -100,7 +98,7 @@ The marker design was not taken here because a marker unit can be re-homed by wh
 
 Script, `attestation_beacon.ark`:
 
-- `threshold` oracle signatures over `sha256(ctrlTxid || BTCUSD || expiry || price || time)`. Sample time in `[expiry, expiry + expiryLag]`. Round + 1. Expiry above 1800 and absent from the current slots. Clock past `expiry + expiryLag` when `expiryLag ≥ 0`. Slot value is the price in the first 8 bytes, the sample time in the next 8, then zeros. History shift of 280 bytes. Continuation of script, value, and asset unit on output 0. Attest and migrate at input 0. A read carries the packet unchanged and adds `readFee` (1000). `migrate` needs `adminPk`. An evicted expiry verifies again only for that same price and time.
+- One DIA signature over the BTC/USD EIP-712 digest. The script rebuilds that digest from the witness price, timestamp, nonce, and intent expiry, with chain id 1050 and symbol `BTC/USD` fixed. It scales the 18-decimal price to cents. Sample time in `[expiry, expiry + expiryLag]`. Round + 1. Expiry above 1800 and absent from the current slots. Clock past `expiry + expiryLag` when `expiryLag ≥ 0`. Slot value is the cents in the first 8 bytes, the sample time in the next 8, then zeros. History shift of 280 bytes. Continuation of script, value, and asset unit on output 0. Attest and migrate at input 0. A read carries the packet unchanged and adds `readFee` (1000). `migrate` needs `adminPk`. An evicted expiry can take any later intent still inside its window.
 
 Script, `option_vault.ark`:
 
@@ -121,27 +119,27 @@ Emulator:
 | Consumer supplies a packet with a different price | blocked: `read` requires `tx.packet(32) == tx.inputs[selfIndex].packet(32)`; the vault reads the input packet anyway. |
 | Consumer claims a different asset is the beacon | blocked: vault `tx.inputs[1].assets.lookup(beaconTxid, beaconGidx) == 1`; arkd checks the claim against the prevout. |
 | A second identity unit | blocked by arkd only if the issuance was uncontrolled with supply 1. The oracle service issues with `assetManager.issue({ amount: 1n })` and no control asset. The script cannot see the issuance, and the desk trusts `BEACON_TXID` as given. |
-| Committee attests the same expiry twice while it is in a slot | blocked: `absent`. |
-| A fixing is evicted before a vault settles | recoverable with the same price and time. A different price or time does not verify. |
+| The same expiry attested twice while it is in a slot | blocked: `absent`. |
+| A fixing is evicted before a vault settles | the service republishes the intent it stored. The script also accepts another intent whose timestamp is still in the window. |
 | Fixing published before the settlement minute closes | blocked when `expiryLag ≥ 0`: `checkTime(expiry + expiryLag)`. |
-| A print from before its expiry written into that slot | blocked: `time >= expiry`, and the signature names the expiry. |
-| A published signature reused for a later expiry | blocked: the message names the expiry. |
+| A print from before its expiry written into that slot | blocked: `time >= expiry`. |
+| One DIA print written into an expiry more than 60 seconds away | blocked: `time` must sit in `[expiry, expiry + expiryLag]`. |
 | Consumer attaches a forged previous transaction for input 1 | not blocked by any script. The VM's `OP_INSPECTINPUTPACKET` takes the previous transaction from its fetcher without comparing a hash; the compiler's test harness maps it by outpoint with no check, and a probe against that harness accepted a forged previous transaction. Whether the emulator service binds the attached transaction to the input, through the checkpoint hop, is unverified here. Everything that reads a previous packet, this design and the LayerZero example alike, rests on it. |
 | Two settlements race for the beacon | one is rejected and rebuilt on the new outpoint. Bounded, not impossible. |
 | Someone reads the beacon to move it | costs `readFee` per read. The service sets that to 1000, above dust and paid by the vault, and the sats stay on the beacon. Each read still lengthens the beacon's off-chain ancestry. |
-| Oracle prints replayed on another beacon | blocked: the digest names `ctrlTxid`. |
+| The same DIA print attested on another beacon | the digest does not name `ctrlTxid`. The price is the public DIA print. A consumer trusts the asset id it was given. |
 | Old migrate signatures replayed | blocked: the digest names the round. |
 | Migrate to a script that lies | needs `adminPk`. That is the trust a consumer accepts by committing to the asset id. |
 | Layout version bumped while vaults are open | not blocked. An old vault's `settle` fails, `close` needs both parties, and the writer's `unilateral` then takes the whole coin after the CSV. Do not bump the version while vaults bound to the old layout are open. |
 | Admin exits the coin to Bitcoin | the unit leaves Arkade. Whether an on-chain unit can re-enter as an asset claim is unverified here. |
 
-Not claimed: committee honesty, committee liveness, hidden prices, settlement without arkd, any bound on how late a fixing is published.
+Not claimed: that every authorized DIA signer can publish (only the pinned key verifies), hidden prices, settlement without arkd, any bound on how late a fixing is published.
 
 The signature is checked inside `attest`. What stays off-chain is whether the signed price matches the market.
 
 ## 5. Checked
 
-Both contracts compile with `arkadec` 0.1.0-rc.1. It warns that `OptionVault.settle` inspects `tx.outputs[1].script` more than once, and that `AttestationBeacon.attest` uses `checkSigFromStack` where an invalid signature fails the spend. The artifacts are committed. `AttestationBeacon.attest` has 5 `CHECKSIGFROMSTACK`. `OptionVault.settle` has no `CHECKSIGFROMSTACK`, one `INSPECTINASSETLOOKUP`, one `INSPECTINPUTPACKET`, and checks the stored sample time.
+Both contracts compile with `arkadec` 0.1.0-rc.1. It warns that `OptionVault.settle` inspects `tx.outputs[1].script` more than once, and that `AttestationBeacon.attest` uses `checkSigFromStack` where an invalid signature fails the spend. The artifacts are committed. `AttestationBeacon.attest` has one `CHECKSIGFROMSTACK`, two `DIGEST`, one `DIV`, and one `MOD`. `OptionVault.settle` has no `CHECKSIGFROMSTACK`, one `INSPECTINASSETLOOKUP`, one `INSPECTINPUTPACKET`, and checks the stored sample time.
 
 `pnpm test` covers the state codec, the artifacts, the bindings, the deploy outputs, the oracle service, and the layout of the transactions `cospend.ts` builds.
 

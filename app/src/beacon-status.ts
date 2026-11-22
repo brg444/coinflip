@@ -1,7 +1,8 @@
 /**
  * Public constructor the page settles against. The oracle certificate is not
  * trusted by the browser, so this is a copy of GET /api/status on the
- * Mutinynet oracle. Replace it when that beacon changes.
+ * Mutinynet oracle. Replace it when that beacon changes. `fixings` is what
+ * the attestations page lists, so copy it again after each new fixing.
  */
 declare const __COINFLIP_DEMO__: { beacon?: typeof PINNED_BEACON_STATUS } | null | undefined;
 
@@ -10,11 +11,11 @@ const demoBeacon = typeof __COINFLIP_DEMO__ !== "undefined" && __COINFLIP_DEMO__
 
 const PINNED_BEACON_STATUS = {
   pubkeys: ["e96d459a88359d713db09e7b226644b84765ac33b0b84f4cb60bc9d39ffb5bbe"],
-  assetId: "c919606acba781572d5f72e53ffc6d125c98fbbd36df69eaf6f9613bae25499d0000",
-  issueTxid: "c919606acba781572d5f72e53ffc6d125c98fbbd36df69eaf6f9613bae25499d",
-  address: "tark1qqcpq7yq3e8hhsx6ml3fud93m7827qggaurtzu3zwsr4a0qs0gf8449krp83vcrs7yq9vlyn3k7kr3739l3y5dsqqg5xl3tqwtwse5u4kf3yhw",
+  assetId: "58db69a7a8a64cd1b16fa7ec4dba2c49a62815d88d0f7a660e216c0206e975c20000",
+  issueTxid: "58db69a7a8a64cd1b16fa7ec4dba2c49a62815d88d0f7a660e216c0206e975c2",
+  address: "tark1qqcpq7yq3e8hhsx6ml3fud93m7827qggaurtzu3zwsr4a0qs0gf849c8k9fmuplslxvex94jqct8d58l229c0jh2seve4ky0n3xy0rjwr978pd",
   args: {
-    ctrlTxid: "9d4925ae3b61f9f6ea69df36bdfb985c126dfc3fe5725f2d5781a7cb6a6019c9",
+    ctrlTxid: "c275e906026c210e667a0f8dd81528a6492cba4deca76fb1d14ca6a8a769db58",
     signersN: 1,
     threshold: 1,
     domain: "4254435553442d464958",
@@ -23,6 +24,18 @@ const PINNED_BEACON_STATUS = {
     adminPk: "e96d459a88359d713db09e7b226644b84765ac33b0b84f4cb60bc9d39ffb5bbe",
     exit: 2048,
   },
+  fixings: [
+    {
+      expiry: 1794740208,
+      price: "6547566",
+      time: 1794740227,
+      raw: "65475660863768696455168",
+      nonce: "1793790301274552364",
+      intentExpiry: 1794743827,
+      sig: "0e033152d22ecb653f3de06a641fe2f98d28c0eb31483863fe0723ca4e1f6b0f70dd89f34702e7486da6ce3058f05c723aa21ba4cc99768f82d72afee4096974",
+      txid: "dea11283245be3ac269e1c9acb36036da2d40d5b66becd3533a922e1312c7f92",
+    },
+  ],
 };
 
 export const LIVE_BEACON_STATUS = demoBeacon ?? PINNED_BEACON_STATUS;

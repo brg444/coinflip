@@ -7,17 +7,18 @@ import { fileURLToPath } from "node:url";
 import { asset, ArkAddress, SingleKey, Transaction, type CSVMultisigTapscript, type EmulatorProvider } from "@arkade-os/sdk";
 import { base64 } from "@scure/base";
 
-import { beaconIdOf, bindBeacon, decodeState, genesisOutputs, nextState, priceValue, sampleDigest, SIGNER_SLOTS, statePacketOf } from "../protocol/beacon.ts";
+import { beaconIdOf, bindBeacon, decodeState, genesisOutputs, nextState, priceValue, statePacketOf } from "../protocol/beacon.ts";
 import { BEACON_READ_FEE, EXIT, isPredict, PRICE_MAX } from "../protocol/constants.ts";
 import { buildAttest, submit } from "../protocol/cospend.ts";
-import { bytesToHex } from "../protocol/hex.ts";
+import { centsOf, intentSigned, type DiaIntent } from "../protocol/dia.ts";
+import { bytesToHex, hexToBytes } from "../protocol/hex.ts";
 import type { OptionPosition } from "../protocol/messages.ts";
 import { chooseSample as pickSample, loadStore, pruneSamples, saveStore, type StoredSample } from "./store.ts";
 
 /**
- * Testnet aggregator. It holds one to five oracle keys and keeps a day of
- * BTCUSD samples. Publish signs one fixing per expiry and spends the
- * beacon once. The signature names that expiry, so it cannot fill another slot.
+ * Testnet publisher. It keeps a day of DIA OracleUpdate intents and spends
+ * the beacon once per expiry. The coin checks the DIA signature. This
+ * process does not sign the price.
  */
 
 const DOMAIN = new TextEncoder().encode("BTCUSD-FIX");
@@ -72,16 +73,12 @@ export type OracleDeps = {
   host?: string;
   adminToken?: string;
   oracleKey?: Uint8Array;
-  /** Price-signing keys, one to five. Defaults to `oracleKey` alone. */
-  signerKeys?: readonly Uint8Array[];
-  /** How many of those keys must sign. Defaults to 1. */
-  threshold?: number;
   emulatorKey: Uint8Array;
   wallet?: OracleWallet;
   indexer?: OracleIndexer;
   emulator?: Pick<EmulatorProvider, "submitTx">;
-  /** BTCUSD in cents. The sampler stores one sample per call. */
-  quote?: () => Promise<bigint | null>;
+  /** Latest DIA OracleUpdate. Null when the feed has not answered. */
+  pull?: () => Promise<DiaIntent | null>;
   /** How often to sample. Unset means the process only records prices it is given. */
   sampleEveryMs?: number;
   /** Expiries announced on nostr. The minute pass publishes these, not every clock minute. */
@@ -195,19 +192,18 @@ function exact(body: Record<string, unknown>, keys: readonly string[]) {
   if (got.length !== keys.length || got.some((key) => !keys.includes(key))) throw new HttpError(400, "unknown field");
 }
 
-/**
- * Admin samples take `price` and an optional `time`. Publish signs one only
- * when `expiry <= time <= expiry + expiryLag`. A missing `time` stays the service clock.
- * A stamp from before the expiry is stored and is not a fixing for that expiry.
- */
-function sampleRequest(body: Record<string, unknown>, clock: number): { price: bigint; time: number } {
+/** A stored DIA intent. `price` is the 18-decimal integer. `sig` is 64-byte r||s. */
+function intentRequest(body: Record<string, unknown>): DiaIntent {
   const got = Object.keys(body);
-  if (!got.includes("price") || got.some((key) => key !== "price" && key !== "time")) throw new HttpError(400, "unknown field");
+  const keys = ["price", "time", "nonce", "intentExpiry", "sig"];
+  if (got.length !== keys.length || got.some((key) => !keys.includes(key))) throw new HttpError(400, "unknown field");
   const price = whole(body.price, "price");
-  if (body.time === undefined) return { price, time: clock };
   const time = Number(whole(body.time, "time"));
-  if (!Number.isSafeInteger(time)) throw new HttpError(400, "time");
-  return { price, time };
+  const nonce = whole(body.nonce, "nonce");
+  const intentExpiry = Number(whole(body.intentExpiry, "intentExpiry"));
+  if (!Number.isSafeInteger(time) || !Number.isSafeInteger(intentExpiry)) throw new HttpError(400, "time");
+  if (typeof body.sig !== "string" || !/^[0-9a-fA-F]{128}$/.test(body.sig)) throw new HttpError(400, "sig");
+  return { price, time, nonce, intentExpiry, sig: hexToBytes(body.sig) };
 }
 
 function whole(value: unknown, label: string): bigint {
@@ -219,17 +215,6 @@ function whole(value: unknown, label: string): bigint {
 export async function createOracle(deps: OracleDeps) {
   if (deps.oracleKey && deps.oracleKey.length !== 32) throw new Error("ORACLE_KEY must be 32 bytes");
   if (deps.emulatorKey.length !== 33) throw new Error("emulator key must be 33 bytes");
-  const signerSecrets = deps.signerKeys?.length ? [...deps.signerKeys] : deps.oracleKey ? [deps.oracleKey] : [];
-  if (signerSecrets.length > SIGNER_SLOTS) throw new Error("1 to 5 signers");
-  for (const key of signerSecrets) {
-    if (key.length !== 32) throw new Error("signer key must be 32 bytes");
-  }
-  const threshold = deps.threshold ?? 1;
-  if (!Number.isInteger(threshold) || threshold < 1 || threshold > Math.max(signerSecrets.length, 1)) {
-    throw new Error("threshold");
-  }
-  const signerPubkeys = await Promise.all(signerSecrets.map(async (key) => await SingleKey.fromHex(bytesToHex(key)).xOnlyPublicKey()));
-  if (new Set(signerPubkeys.map((key) => bytesToHex(key))).size !== signerPubkeys.length) throw new Error("duplicate signer");
   const adminPk = deps.oracleKey ? await SingleKey.fromHex(bytesToHex(deps.oracleKey)).xOnlyPublicKey() : null;
   const store = await loadStore(deps.dataDir);
   let publishing = false;
@@ -243,11 +228,8 @@ export async function createOracle(deps: OracleDeps) {
   async function bound() {
     if (!store.assetId || !deps.wallet || !adminPk) return null;
     const id = asset.AssetId.fromString(store.assetId);
-    if (!signerPubkeys.length) return null;
     return bindBeacon({
       id: beaconIdOf(id),
-      signers: signerPubkeys,
-      threshold: BigInt(threshold),
       domain: DOMAIN,
       expiryLag: EXPIRY_LAG,
       readFee: READ_FEE,
@@ -277,11 +259,9 @@ export async function createOracle(deps: OracleDeps) {
       wallet: deps.wallet ? await deps.wallet.getAddress() : null,
       balance: balance == null ? null : balance.toString(),
       address: script?.address ?? null,
-      pubkeys: signerPubkeys.map((key) => bytesToHex(key)),
+      pubkeys: adminPk ? [bytesToHex(adminPk)] : [],
       args: {
         ctrlTxid: beacon ? bytesToHex(beacon.txid) : null,
-        signersN: signerPubkeys.length,
-        threshold,
         domain: bytesToHex(DOMAIN),
         expiryLag: Number(EXPIRY_LAG),
         readFee: Number(READ_FEE),
@@ -403,18 +383,34 @@ export async function createOracle(deps: OracleDeps) {
     store.samples = pruneSamples(store.samples, now());
   }
 
-  async function recordSample(price: bigint, stamp: number) {
-    if (!signerSecrets.length || !adminPk) throw new HttpError(400, "ORACLE_KEY is required");
+  async function recordIntent(intent: DiaIntent) {
+    if (!adminPk) throw new HttpError(400, "ORACLE_KEY is required");
     if (!store.assetId) throw new HttpError(409, "not issued");
-    if (price <= 0n || price > PRICE_MAX) throw new HttpError(400, "price");
-    if (!Number.isSafeInteger(stamp) || stamp <= 0) throw new HttpError(400, "time");
-    if (stamp > now()) throw new HttpError(400, "future timestamp");
+    let cents: bigint;
+    try {
+      cents = centsOf(intent.price);
+    } catch {
+      throw new HttpError(400, "price");
+    }
+    if (cents > PRICE_MAX) throw new HttpError(400, "price");
+    if (!Number.isSafeInteger(intent.time) || intent.time <= 0) throw new HttpError(400, "time");
+    if (intent.time > now()) throw new HttpError(400, "future timestamp");
+    if (!intentSigned(intent)) throw new HttpError(400, "dia signature");
     keepRecent();
-    if (store.samples.some((sample) => sample.time === stamp)) return { ok: true, time: stamp, price: price.toString(), duplicate: true };
-    // The signature needs the expiry, so a sample is not signed until publish.
-    store.samples.push({ price: price.toString(), time: stamp });
+    const raw = intent.price.toString();
+    if (store.samples.some((sample) => sample.time === intent.time && sample.raw === raw)) {
+      return { ok: true, time: intent.time, price: cents.toString(), duplicate: true };
+    }
+    store.samples.push({
+      price: cents.toString(),
+      time: intent.time,
+      raw,
+      nonce: intent.nonce.toString(),
+      intentExpiry: intent.intentExpiry,
+      sig: bytesToHex(intent.sig),
+    });
     await save();
-    return { ok: true, time: stamp, price: price.toString() };
+    return { ok: true, time: intent.time, price: cents.toString() };
   }
 
   function chooseSample(expiry: number): StoredSample | null {
@@ -422,26 +418,11 @@ export async function createOracle(deps: OracleDeps) {
     return pickSample(store.samples, expiry, Number(EXPIRY_LAG));
   }
 
-  /** The first fixing signed for this expiry. A later write has to reuse it. */
-  function signedFixing(expiry: number): { price: bigint; time: bigint } | null {
-    const row = store.fixings.find((fixing) => fixing.expiry === expiry && typeof fixing.time === "number");
-    if (!row || typeof row.time !== "number") return null;
-    return { price: BigInt(row.price), time: BigInt(row.time) };
-  }
-
-  async function signFixing(expiry: bigint, price: bigint, time: bigint): Promise<Uint8Array[]> {
-    if (!store.assetId) throw new HttpError(409, "not issued");
-    const digest = sampleDigest(beaconIdOf(asset.AssetId.fromString(store.assetId)).txid, expiry, price, time);
-    const signed: Uint8Array[] = [];
-    for (const secret of signerSecrets) {
-      signed.push(await SingleKey.fromHex(bytesToHex(secret)).signSchnorrDeterministic(digest));
-    }
-    if (signed.length < threshold) throw new HttpError(400, "quorum");
-    const sigs = Array.from({ length: SIGNER_SLOTS }, () => new Uint8Array(64));
-    signed.forEach((sig, index) => {
-      sigs[index] = sig;
-    });
-    return sigs;
+  /** The first fixing for this expiry. A later write has to reuse that DIA intent. */
+  function signedFixing(expiry: number): StoredSample | null {
+    const row = store.fixings.find((fixing) => fixing.expiry === expiry && typeof fixing.time === "number" && fixing.raw && fixing.sig && fixing.nonce && typeof fixing.intentExpiry === "number");
+    if (!row || typeof row.time !== "number" || !row.raw || !row.sig || !row.nonce || typeof row.intentExpiry !== "number") return null;
+    return { price: row.price, time: row.time, raw: row.raw, nonce: row.nonce, intentExpiry: row.intentExpiry, sig: row.sig };
   }
 
   function pricePage(query: URLSearchParams) {
@@ -452,7 +433,8 @@ export async function createOracle(deps: OracleDeps) {
     const rows = store.samples
       .filter((sample) => sample.time >= from && sample.time <= to)
       .sort((a, b) => b.time - a.time)
-      .slice(0, limit);
+      .slice(0, limit)
+      .map((sample) => ({ price: sample.price, time: sample.time }));
     return { samples: rows };
   }
 
@@ -470,21 +452,14 @@ export async function createOracle(deps: OracleDeps) {
       if (BigInt(now()) < expiry + EXPIRY_LAG) throw new HttpError(400, "before expiry time");
       const sample = chooseSample(expiryN);
       const prior = signedFixing(expiryN);
-      let price: bigint;
-      let time: bigint;
-      if (prior) {
-        price = prior.price;
-        time = prior.time;
-      } else if (!sample) {
-        throw new HttpError(400, "no sample");
-      } else if (sample.time < expiryN) {
-        throw new HttpError(400, "sample before expiry");
-      } else if (sample.time > expiryN + Number(EXPIRY_LAG)) {
-        throw new HttpError(400, "sample after close");
-      } else {
-        price = BigInt(sample.price);
-        time = BigInt(sample.time);
-      }
+      const chosen = prior ?? sample;
+      if (!chosen) throw new HttpError(400, "no sample");
+      if (chosen.time < expiryN) throw new HttpError(400, "sample before expiry");
+      if (chosen.time > expiryN + Number(EXPIRY_LAG)) throw new HttpError(400, "sample after close");
+      if (!chosen.raw || !chosen.sig || !chosen.nonce || typeof chosen.intentExpiry !== "number") throw new HttpError(400, "no sample");
+      const raw = BigInt(chosen.raw);
+      const cents = centsOf(raw);
+      const time = BigInt(chosen.time);
       if (!deps.wallet || !deps.indexer || !deps.emulator) throw new HttpError(400, "indexer required");
       const script = await bound();
       if (!script) throw new HttpError(400, "ORACLE_KEY is required");
@@ -496,8 +471,7 @@ export async function createOracle(deps: OracleDeps) {
       if (!prev) throw new HttpError(400, "creating tx missing");
       const state = statePacketOf(prev);
       if (decodeState(state).slots.some((slot) => slot.expiry === expiry)) throw new HttpError(409, "already a fixing");
-      const sigs = await signFixing(expiry, price, time);
-      const next = nextState(state, expiry, priceValue(price, time));
+      const next = nextState(state, expiry, priceValue(cents, time));
       const built = buildAttest({
         beacon: {
           script: script.script,
@@ -506,17 +480,28 @@ export async function createOracle(deps: OracleDeps) {
           id: asset.AssetId.fromString(store.assetId),
         },
         expiry,
-        price,
+        price: raw,
         time,
-        sigs,
+        nonce: BigInt(chosen.nonce),
+        intentExpiry: BigInt(chosen.intentExpiry),
+        sig: hexToBytes(chosen.sig),
         next,
         checkpoint: deps.wallet.serverUnrollScript,
       });
       const submitted = await submit(built, deps.emulator as EmulatorProvider);
       const stamp = Number(time);
-      store.fixings.push({ expiry: expiryN, price: price.toString(), time: stamp, txid: submitted.txid });
+      store.fixings.push({
+        expiry: expiryN,
+        price: cents.toString(),
+        time: stamp,
+        raw: raw.toString(),
+        nonce: chosen.nonce,
+        intentExpiry: chosen.intentExpiry,
+        sig: chosen.sig,
+        txid: submitted.txid,
+      });
       await save();
-      return { txid: submitted.txid, expiry: expiryN, price: price.toString(), time: stamp };
+      return { txid: submitted.txid, expiry: expiryN, price: cents.toString(), time: stamp };
     } finally {
       publishing = false;
     }
@@ -531,13 +516,10 @@ export async function createOracle(deps: OracleDeps) {
       if (req.method === "GET" && url === "/page.css") return sendFile(res, "page.css", "text/css; charset=utf-8");
       if (req.method === "GET" && url === "/api/status") return sendJson(res, 200, await status());
       if (req.method === "GET" && url === "/api/prices") return sendJson(res, 200, pricePage(parsed.searchParams));
-      if (req.method === "POST" && (url === "/api/issue" || url === "/api/deploy" || url === "/api/recover" || url === "/api/samples")) {
+      if (req.method === "POST" && (url === "/api/issue" || url === "/api/deploy" || url === "/api/recover" || url === "/api/intent")) {
         requireAdmin(req);
         const body = asRecord(await readBody(req, 4096));
-        if (url === "/api/samples") {
-          const sample = sampleRequest(body, now());
-          return sendJson(res, 200, await recordSample(sample.price, sample.time));
-        }
+        if (url === "/api/intent") return sendJson(res, 200, await recordIntent(intentRequest(body)));
         exact(body, []);
         if (url === "/api/issue") return sendJson(res, 200, await issue());
         if (url === "/api/recover") return sendJson(res, 200, await recover());
@@ -615,10 +597,10 @@ export async function createOracle(deps: OracleDeps) {
   }
 
   async function takeSample() {
-    if (!deps.quote || !store.assetId) return;
-    const price = await deps.quote();
-    if (price == null) return;
-    await recordSample(price, now());
+    if (!deps.pull || !store.assetId) return;
+    const intent = await deps.pull();
+    if (!intent) return;
+    await recordIntent(intent);
   }
 
   const pending = new Set<Promise<unknown>>();

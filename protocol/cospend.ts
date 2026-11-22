@@ -164,23 +164,28 @@ export function buildSettle(input: {
 /** Publish a fixing: the beacon at input 0, continued at output 0 with the next state. */
 export function buildAttest(input: {
   beacon: BeaconCoin;
+  /** Option expiry. The slot key. */
   expiry: bigint;
+  /** DIA price, 18 decimals. */
   price: bigint;
+  /** DIA timestamp. */
   time: bigint;
-  /** Five slots. Only the first `signersN` are checked. The rest can be zeros. */
-  sigs: readonly Uint8Array[];
+  nonce: bigint;
+  intentExpiry: bigint;
+  /** 64-byte r||s of the DIA signature. */
+  sig: Uint8Array;
   next: Uint8Array;
   checkpoint: CSVMultisigTapscript.Type;
 }): Built {
-  if (input.sigs.length !== 5) throw new Error("5 signatures");
+  if (input.sig.length !== 64) throw new Error("dia signature");
   const callArgs: Record<string, bigint | Uint8Array> = {
     expiry: input.expiry,
     price: input.price,
     time: input.time,
+    nonce: input.nonce,
+    intentExpiry: input.intentExpiry,
+    sig: input.sig,
   };
-  input.sigs.forEach((sig, index) => {
-    callArgs[`sigs.${index}`] = sig;
-  });
   return build(
     [{
       script: input.beacon.script,

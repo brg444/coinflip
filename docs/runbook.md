@@ -18,7 +18,7 @@ openssl rand -hex 16   # ORACLE_ADMIN
 - Do not write a second settler. The process is [settle/main.ts](../settle/main.ts), image [settle/Dockerfile](../settle/Dockerfile).
 - Do not change `EXIT`, `DUST_SATS`, or `BEACON_READ_FEE` in [protocol/constants.ts](../protocol/constants.ts). There is no env var for them. Dust stays `330` sats. The read fee stays `1000` sats so the number is easy to account. Do not zero either one. The zeros in [.env.regtest](../.env.regtest) are arkade-regtest intent fees for the smoke stack only. They are not service settings, and this deploy does not copy them onto Mutinynet.
 - Mutinynet only. Do not point `ARK_URL` at the regtest ports from the smoke test, or at any other network.
-- Leave `SAMPLE_MS` unset. The oracle stores a Deribit BTC index sample about once a minute ([oracle/price.ts](../oracle/price.ts)), which is what publish needs inside an expiry window. `0` uses that same minute.
+- Leave `SAMPLE_MS` unset. The oracle reads a DIA `OracleUpdate` for `BTC/USD` about once a minute, and also on each `IntentRegistered` event. `0` uses that same minute.
 - Do not change the wallet target. The page already uses `https://mutinynet.arkade.money` ([app/src/fund.ts](../app/src/fund.ts), [app/index.html](../app/index.html)).
 
 ## Exit delay
@@ -43,14 +43,15 @@ From [oracle/main.ts](../oracle/main.ts) and [oracle/Dockerfile](../oracle/Docke
 
 | Env | Fresh deploy |
 | --- | --- |
-| `ORACLE_KEY` | New 32-byte hex. Wallet, issuer, and the only price signer. |
-| `ORACLE_ADMIN` | New bearer for `/api/issue`, `/api/deploy`, `/api/recover`, `/api/samples`, and `/api/publish`. Unset disables those routes. |
+| `ORACLE_KEY` | New 32-byte hex. Wallet, issuer, migrate, and exit. It does not sign prices. |
+| `ORACLE_ADMIN` | New bearer for `/api/issue`, `/api/deploy`, `/api/recover`, `/api/intent`, and `/api/publish`. Unset disables those routes. |
 | `ARK_URL` | `https://mutinynet.arkade.sh` (the code default). |
 | `EMULATOR_URL` | `https://emulator.mutinynet.arkade.sh` (the code default). |
-| `SAMPLE_MS` | Leave unset. Stores a Deribit index sample about once a minute. `0` uses that same minute. |
+| `SAMPLE_MS` | Leave unset. Reads DIA about once a minute. `0` uses that same minute. |
+| `DIA_WS` | Leave unset. Defaults to `wss://rpc.diadata.org`. |
 | `DATA_DIR` | Leave the image value `/data`. |
 | `PORT` | Leave `8789`. |
-| `ORACLE_SIGNERS`, `ORACLE_THRESHOLD` | Leave unset. One `ORACLE_KEY` is the signer, threshold 1. |
+| `ORACLE_SIGNERS`, `ORACLE_THRESHOLD` | Unused. The beacon checks the pinned DIA key. |
 
 Build type Dockerfile. **Docker File** `oracle/Dockerfile`. **Docker Context Path** `/oracle` or `/`. The image clones the repo, so either context works. Do not use the repository-root `Dockerfile` for this service: that image is the desk (port `8788`). Port `8789` behind the domain on this service. The dashboard is `GET /`.
 
@@ -155,28 +156,16 @@ Start the Settler after the Oracle origin and `ORACLE_ADMIN` are set. It can boo
 
 ## Price screen
 
-The Oracle dashboard (`GET /`) previews a settlement and, separately, publishes the price. The process also stores a Deribit index sample about once a minute, on its own clock, without the admin route.
+The Oracle dashboard (`GET /`) previews a settlement and publishes a DIA fixing. The process stores each `OracleUpdate` for `BTC/USD` from Lasernet. It does not take a typed price.
 
-Type the kind (covered call or limited put), the price in USD cents, the strike in USD cents, and the collateral in sats. The line under the fields is the holder and writer amounts. The math is the vault's: `holderPayoff`, then the 1000-sat read fee, then the dust fold ([oracle/preview.ts](../oracle/preview.ts), [app/settle-math.js](../app/settle-math.js), [contracts/option_vault.ark](../contracts/option_vault.ark)). A filled vault locks the collateral, so the preview treats the locked coin as that collateral. Typing does not call `/api/samples` or `/api/publish`.
-
-**Publish price** is a separate button. It needs the admin token and the position's expiry (unix seconds). It `POST`s `/api/samples` with the typed price, then `POST`s `/api/publish` with that expiry. Omit `time` and the server stamps the sample with its own clock. The sample-time field is a testing control and starts empty. When it is set, that unix second is the signed sample time. The beacon accepts it when it is positive and at or before `expiry + 60`, after the clock has reached that close. The script does not require the signed time to equal the wall clock, and it does not require `time >= expiry`. Publish still chooses a stored sample inside `[expiry, expiry + 60]`. Publish is allowed only after `expiry + 60`. If you click early, the sample is stored and the page reports the publish error. The settler calls publish again after the window and then settles. The beacon keeps eight fixings. Settle before eight newer expiries replace this one, or publish it again.
-
-**Record price**, lower on the same page, only stores a sample. It sends the same optional sample time. It does not publish.
-
-The same two calls, if you are not on the dashboard:
+Type the kind, a price in USD cents, the strike, and the collateral to preview the vault math. That preview does not publish. **Publish price** needs the admin token and the option expiry. It `POST`s `/api/publish`. The beacon accepts the DIA print whose timestamp sits in `[expiry, expiry + 60]`, after the clock has reached that close.
 
 ```bash
-curl -k -X POST -H "Authorization: Bearer $ORACLE_ADMIN" -H "content-type: application/json" \
-  -d '{"price":"<integer cents>"}' https://<oracle>/api/samples
-
-curl -k -X POST -H "Authorization: Bearer $ORACLE_ADMIN" -H "content-type: application/json" \
-  -d '{"price":"8277570","time":1791822006}' https://<oracle>/api/samples
-
 curl -k -X POST -H "Authorization: Bearer $ORACLE_ADMIN" -H "content-type: application/json" \
   -d '{"expiry":<unix expiry>}' https://<oracle>/api/publish
 ```
 
-`"<integer cents>"` is the operator's price. `"10000000"` is $100,000.00, the shape this API already accepts. `GET /api/status` lists `fixings`. History is `GET /api/prices?from=<unix>&to=<unix>`.
+`GET /api/status` lists `fixings` in cents. History is `GET /api/prices?from=<unix>&to=<unix>`.
 
 ## Testers
 

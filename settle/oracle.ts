@@ -11,8 +11,6 @@ import { bytesToHex } from "../protocol/hex.ts";
 export type BeaconSpec = {
   assetId: string;
   address: string;
-  signers: Uint8Array[];
-  threshold: bigint;
   domain: Uint8Array;
   expiryLag: bigint;
   readFee: bigint;
@@ -100,14 +98,6 @@ export function parseOracleBeacon(body: unknown, beaconTxid?: string, gidx = 0):
   if (bytesToHex(parsed.txid) !== issue) return { ok: false, error: "oracle asset" };
   if (expected && Number(parsed.groupIndex) !== gidx) return { ok: false, error: "oracle beacon" };
   if (typeof root.address !== "string" || !root.address.startsWith("tark1")) return { ok: false, error: "oracle address" };
-  if (!Array.isArray(root.pubkeys) || root.pubkeys.length < 1 || root.pubkeys.length > 5) return { ok: false, error: "signers" };
-  const signers: Uint8Array[] = [];
-  for (const item of root.pubkeys) {
-    const key = hexBytes(item, 32);
-    if (!key) return { ok: false, error: "pubkey" };
-    signers.push(key);
-  }
-  if (new Set(signers.map((key) => bytesToHex(key))).size !== signers.length) return { ok: false, error: "duplicate pubkey" };
   const args = record(root.args);
   if (!args) return { ok: false, error: "oracle args" };
   const ctrl = typeof args.ctrlTxid === "string" ? args.ctrlTxid.toLowerCase() : "";
@@ -115,22 +105,16 @@ export function parseOracleBeacon(body: unknown, beaconTxid?: string, gidx = 0):
   const expiryLag = whole(args.expiryLag);
   const readFee = whole(args.readFee);
   const exit = whole(args.exit);
-  const declared = whole(args.signersN);
-  if (declared != null && declared !== BigInt(signers.length)) return { ok: false, error: "signers" };
-  const threshold = whole(args.threshold);
   const domain = typeof args.domain === "string" && args.domain.length > 0 && args.domain.length % 2 === 0 && HEX.test(args.domain)
     ? hexBytes(args.domain, args.domain.length / 2)
     : null;
   const adminPk = hexBytes(args.adminPk, 32);
   if (expiryLag == null || readFee == null || exit == null || !domain || !adminPk) return { ok: false, error: "oracle args" };
-  if (threshold == null || threshold < 1n || threshold > BigInt(signers.length)) return { ok: false, error: "threshold" };
   return {
     ok: true,
     beacon: {
       assetId: parsed.toString(),
       address: root.address,
-      signers,
-      threshold,
       domain,
       expiryLag,
       readFee,

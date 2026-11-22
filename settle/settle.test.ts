@@ -207,8 +207,6 @@ test("a filled vault settles from the beacon state the oracle published", async 
   const id = beaconIdOf(assetId);
   const beacon = bindBeacon({
     id,
-    signers,
-    threshold: 3n,
     domain,
     expiryLag: 60n,
     readFee: 0n,
@@ -418,8 +416,6 @@ test("a filled vault settles from the beacon state the oracle published", async 
 
   const feeBeacon = bindBeacon({
     id,
-    signers,
-    threshold: 3n,
     domain,
     expiryLag: 60n,
     readFee: 1_000n,

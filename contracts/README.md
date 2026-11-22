@@ -20,12 +20,12 @@ Constructor: `kind`, `writerPk`, `holderPk`, `writerScript`, `holderScript`, `st
 
 | Function | |
 | --- | --- |
-| `attest(expiry, price, time, sigs)` | Writes one fixing. `threshold` of the oracle signatures must match that expiry, price, and sample time. The clock must have reached `expiry + expiryLag`. |
+| `attest(expiry, price, time, nonce, intentExpiry, sig)` | Writes one fixing. `price` is the DIA 18-decimal integer. The script checks the EIP-712 signature, stores USD cents, and requires the timestamp in `[expiry, expiry + expiryLag]`. |
 | `read(selfIndex)` | Carries the state forward and adds `readFee`. No signature. |
 | `migrate(next, opSig)` | `adminPk` moves the coin to another script. |
 | `unilateral(adminSig)` | `adminPk`, after `exit`. |
 
-Constructor: `ctrlTxid`, `ctrlGidx`, `signers`, `signersN`, `threshold`, `domain`, `expiryLag`, `readFee`, `adminPk`, `exit`.
+Constructor: `ctrlTxid`, `ctrlGidx`, `domain`, `expiryLag`, `readFee`, `adminPk`, `exit`. The DIA signer key is pinned in the script.
 
 ## Import
 

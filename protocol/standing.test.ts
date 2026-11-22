@@ -251,8 +251,6 @@ async function settleStanding(price: bigint, strike: bigint) {
 
   const beacon = bindBeacon({
     id: shared.beacon,
-    signers: [shared.writerPk],
-    threshold: 1n,
     domain: new TextEncoder().encode("BTCUSD-FIX"),
     expiryLag: 60n,
     readFee: BEACON_READ_FEE,
