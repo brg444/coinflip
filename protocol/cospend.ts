@@ -33,10 +33,12 @@ import { bytesToHex } from "./hex.ts";
  * the emulator packet, ahead of the anchor.
  */
 
+type ProgramScript = InstanceType<typeof arkade.ArkadeProgramScript>;
+
 export type Coin = { txid: string; vout: number; value: number | bigint; prevTx: Uint8Array };
 
 export type CovenantSpend = {
-  script: arkade.ArkadeProgramScript;
+  script: ProgramScript;
   fn: string;
   /** Call arguments by their flattened names, e.g. `key`, `value`, `sigs.0`. */
   callArgs?: Record<string, bigint | Uint8Array>;
@@ -131,7 +133,7 @@ export function statePacket(state: Uint8Array): ExtensionPacket {
 }
 
 export type BeaconCoin = {
-  script: arkade.ArkadeProgramScript;
+  script: ProgramScript;
   coin: Coin;
   /** The state packet of the transaction that created the coin. */
   state: Uint8Array;
@@ -144,7 +146,7 @@ export type BeaconCoin = {
  * vault's locked value minus that fee. No extra coin.
  */
 export function buildSettle(input: {
-  vault: { script: arkade.ArkadeProgramScript; coin: Coin };
+  vault: { script: ProgramScript; coin: Coin };
   beacon: BeaconCoin;
   readFee: bigint;
   payouts: { script: Uint8Array; amount: bigint }[];
@@ -200,7 +202,7 @@ export function buildAttest(input: {
 }
 
 /** Sign the identity's inputs and submit to the emulator. */
-export async function submit(built: Built, emulator: EmulatorProvider, identity?: Identity): Promise<{ txid: string; signedArkTx: string }> {
+export async function submit(built: Built, emulator: Pick<EmulatorProvider, "submitTx">, identity?: Identity): Promise<{ txid: string; signedArkTx: string }> {
   let arkTx = built.arkTx;
   let checkpoints = built.checkpoints;
   if (built.signIndexes.length > 0) {

@@ -3,7 +3,7 @@ import { arkade, DefaultVtxo, networks, RestArkProvider } from "@arkade-os/sdk";
 import type { BeaconId } from "./beacon-id.ts";
 import { ARK_URL, EXIT } from "./constants.ts";
 import { bytesToHex, hexToBytes, xOnly } from "./hex.ts";
-import { intentProgram, swapProgram, vaultProgram } from "./programs.ts";
+import { exitSequence, intentProgram, swapProgram, vaultProgram } from "./programs.ts";
 
 export type Terms = {
   kind: 0 | 1;
@@ -115,7 +115,7 @@ export function bindContracts(terms: Terms): Bound {
     beaconTxid: terms.beacon.txid,
     beaconGidx: terms.beacon.gidx,
     readFee: terms.readFee ?? 0n,
-    exit: terms.exit,
+    exit: exitSequence(terms.exit),
     server: serverKey,
   };
   const vaultScript = new arkade.ArkadeProgramScript(vaultProgram(), vaultArgs, keys);
@@ -129,7 +129,7 @@ export function bindContracts(terms: Terms): Bound {
     collateral: terms.collateral,
     premium: terms.premium,
     deadline: terms.deadline,
-    exit: terms.exit,
+    exit: exitSequence(terms.exit),
     server: serverKey,
   };
   const intentScript = new arkade.ArkadeProgramScript(intentProgram(), intentArgs, keys);
@@ -179,8 +179,8 @@ export function bindSwap(input: {
     wantAssetIdGidx: input.wantAssetIdGidx,
     wantAmount: input.wantAmount,
     expirationTime: input.expirationTime,
-    exit,
-    vtxo_SingleSig_makerPk_exit: input.makerProgram,
+    exit: exitSequence(exit),
+    contract_SingleSig_makerPk_exit: input.makerProgram,
     server: serverKey,
   };
   const script = new arkade.ArkadeProgramScript(swapProgram(), args, {

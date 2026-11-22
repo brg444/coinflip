@@ -6,6 +6,7 @@ import { scriptArg } from "../../protocol/contracts.ts";
 import {
   artifactLine,
   beaconProgram,
+  exitSequence,
   intentProgram,
   rawBeaconProgram,
   rawIntentProgram,
@@ -19,37 +20,13 @@ import {
   vaultProgram,
 } from "../../protocol/programs.ts";
 
-function onlySecondsDiffers(raw: ReturnType<typeof rawVaultProgram>, spent: ReturnType<typeof vaultProgram>) {
-  const csv = raw.functions.unilateral?.tapscript?.csv;
-  if (csv?.type !== "blocks" || csv.value !== "$exit") {
-    throw new Error("compiler artifact unilateral CSV is not a block older(exit)");
-  }
-  const spentCsv = spent.functions.unilateral?.tapscript?.csv;
-  if (spentCsv?.type !== "seconds" || spentCsv.value !== "$exit") {
-    throw new Error("spent program did not switch that CSV to seconds");
-  }
-  const back = {
-    ...spent,
-    functions: {
-      ...spent.functions,
-      unilateral: {
-        ...spent.functions.unilateral,
-        tapscript: {
-          ...spent.functions.unilateral.tapscript,
-          csv: { type: "blocks" as const, value: "$exit" },
-        },
-      },
-    },
-  };
-  assert.deepEqual(back, raw);
-}
-
-onlySecondsDiffers(rawVaultProgram(), vaultProgram());
-onlySecondsDiffers(rawIntentProgram(), intentProgram());
-onlySecondsDiffers(rawSwapProgram(), swapProgram());
-onlySecondsDiffers(rawBeaconProgram(), beaconProgram());
-onlySecondsDiffers(rawStandingLegProgram(), standingLegProgram());
-onlySecondsDiffers(rawStandingVaultProgram(), standingVaultProgram());
+assert.deepEqual(rawVaultProgram(), vaultProgram());
+assert.deepEqual(rawIntentProgram(), intentProgram());
+assert.deepEqual(rawSwapProgram(), swapProgram());
+assert.deepEqual(rawBeaconProgram(), beaconProgram());
+assert.deepEqual(rawStandingLegProgram(), standingLegProgram());
+assert.deepEqual(rawStandingVaultProgram(), standingVaultProgram());
+assert.equal(exitSequence(2048n), 0x400004n);
 
 const key = (fill: number) => new Uint8Array(32).fill(fill);
 const emulatorKey = new Uint8Array(33);
@@ -71,7 +48,7 @@ const compiledVault = new arkade.ArkadeProgramScript(
     beaconTxid: key(2),
     beaconGidx: 0n,
     readFee: 1_000n,
-    exit: 512n,
+    exit: exitSequence(512n),
     server: key(7),
   },
   { serverKey: key(7), emulatorKey },
@@ -106,7 +83,7 @@ const compiledIntent = new arkade.ArkadeProgramScript(
     collateral: 10_000_000n,
     premium: 50_000n,
     deadline: 1_700_000_000n,
-    exit: 512n,
+    exit: exitSequence(512n),
     server: key(7),
   },
   { serverKey: key(7), emulatorKey },
@@ -132,9 +109,9 @@ const compiledSwap = new arkade.ArkadeProgramScript(
     wantAssetIdGidx: 0n,
     wantAmount: 2_000n,
     expirationTime: 1_800_000_000n,
-    exit: 512n,
+    exit: exitSequence(512n),
     server: key(7),
-    vtxo_SingleSig_makerPk_exit: key(6),
+    contract_SingleSig_makerPk_exit: key(6),
   },
   { serverKey: key(7), emulatorKey },
 );
@@ -146,7 +123,7 @@ const swapAsm = swap.functions.swap?.arkadeScript?.asm ?? [];
 if (swapAsm.filter((token) => token === "INSPECTOUTASSETLOOKUP").length !== 2) {
   throw new Error("swap does not read both asset outputs");
 }
-if (!swapAsm.includes("$vtxo_SingleSig_makerPk_exit")) {
+if (!swapAsm.includes("$contract_SingleSig_makerPk_exit")) {
   throw new Error("swap does not compare output 0 against the maker SingleSig");
 }
 if (!(swap.functions.cancel?.arkadeScript?.asm ?? []).includes("INSPECTLOCKTIME")) {

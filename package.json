@@ -22,7 +22,7 @@
     "smoke:regtest": "node --experimental-strip-types --test --test-timeout 1800000 scripts/smoke-regtest.test.ts"
   },
   "dependencies": {
-    "@arkade-os/sdk": "file:vendor/arkade-os-sdk-0.4.74-411b43f.tgz",
+    "@arkade-os/sdk": "0.5.11",
     "@noble/curves": "2.0.1",
     "@noble/hashes": "2.0.1",
     "@scure/base": "2.0.0",

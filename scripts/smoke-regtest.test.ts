@@ -96,8 +96,8 @@ test("option intent fills, cancels, and settles at the strike on local arkade re
   const storage = await openSqliteStorage(dataDir, "oracle.sqlite");
   const wallet = await Wallet.create({
     identity: oracleKey,
-    arkServerUrl: ARK,
-    indexerUrl: ARK,
+    arkProvider: new RestArkProvider(ARK),
+    indexerProvider: indexer,
     settlementConfig: false,
     storage: {
       walletRepository: storage.walletRepository,

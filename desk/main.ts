@@ -118,13 +118,17 @@ if (typeof EventSource === "undefined") {
 // Mutinynet allows 1000 topics. Old quotes are polled, not streamed.
 // default / boarding / delegate belong to the SDK wallet. Deleting them drops the float it renews.
 const walletContracts = new Set(["default", "boarding", "delegate"]);
-const remembered = await storage.contractRepository.getContracts();
 let unwatched = 0;
-for (const contract of remembered) {
-  if (walletContracts.has(contract.type)) continue;
-  await storage.contractRepository.deleteContract(contract.script);
-  unwatched += 1;
-}
+let after: string | undefined;
+do {
+  const page = await storage.contractRepository.getContractsPage(undefined, { limit: 500, after });
+  for (const contract of page.items) {
+    if (walletContracts.has(contract.type)) continue;
+    await storage.contractRepository.deleteContract(contract.script);
+    unwatched += 1;
+  }
+  after = page.nextCursor;
+} while (after);
 if (unwatched) console.log("unwatched", unwatched, "old intent scripts");
 // The first lookup often dies on a transient EAI_AGAIN. Dokploy only keeps
 // the inner "fetch failed" line, so log the whole cause chain, URL included.
