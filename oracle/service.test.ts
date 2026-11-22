@@ -90,9 +90,9 @@ async function boot(extra: Partial<OracleDeps> & { adminToken?: string; samples?
     },
   };
   const emulator = {
-    async submitTx(arkTx: string) {
+    async submitTx(arkTx: string, checkpointTxs: string[] = []) {
       submitted.push(arkTx);
-      return { signedArkTx: arkTx };
+      return { signedArkTx: arkTx, signedCheckpointTxs: checkpointTxs };
     },
   };
   const oracle = await createOracle({
@@ -463,7 +463,7 @@ test("recover finalizes pending and can adopt an issued unit", async () => {
     const first = await call(ctx.oracle.url, "/api/recover", {}, "test-token");
     assert.equal(first.status, 200, JSON.stringify(first.json));
     assert.deepEqual(finalized, ["aa".repeat(32)]);
-    assert.equal(state?.settings?.hasPendingTx, true);
+    assert.equal((state as { settings?: { hasPendingTx?: boolean } } | null)?.settings?.hasPendingTx, true);
     assert.equal((first.json.adopted as { txid: string }).txid, "ee".repeat(32));
     const status = await call(ctx.oracle.url, "/api/status");
     assert.equal(status.json.issueTxid, "ee".repeat(32));

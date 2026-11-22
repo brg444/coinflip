@@ -76,7 +76,7 @@ test("finalizeDeskSpends proves the pending coin and finalizes the server checkp
     identity: desk,
     deskScript: script,
     indexer: {
-      async getVtxos(filter) {
+      async getVtxos(filter?: { pendingOnly?: boolean; scripts?: string[] }) {
         assert.ok(filter);
         assert.equal(filter.pendingOnly, true);
         assert.deepEqual(filter.scripts, [bytesToHex(script.pkScript)]);
@@ -85,7 +85,7 @@ test("finalizeDeskSpends proves the pending coin and finalizes the server checkp
       async getVirtualTxs() {
         throw new Error("indexer fallback is for an empty pending list");
       },
-    } as Pick<IndexerProvider, "getVtxos" | "getVirtualTxs">,
+    } as unknown as Pick<IndexerProvider, "getVtxos" | "getVirtualTxs">,
     ark: {
       async getPendingTxs(intent) {
         assert.equal(intent.message.type, "get-pending-tx");
@@ -152,11 +152,11 @@ test("an empty pending list is finalized from the indexer virtual txs", async ()
           }],
         };
       },
-      async getVirtualTxs(ids) {
+      async getVirtualTxs(ids: string[]) {
         // Mutinynet returns these sorted by txid, not in request order.
         return { txs: ids.map((id) => byId.get(id) ?? "").reverse() };
       },
-    } as Pick<IndexerProvider, "getVtxos" | "getVirtualTxs">,
+    } as unknown as Pick<IndexerProvider, "getVtxos" | "getVirtualTxs">,
     ark: {
       async getPendingTxs() {
         return [];
@@ -205,10 +205,10 @@ test("a missing offchain row is submitted again and then finalized", async () =>
       async getVtxos() {
         return { vtxos: [{ txid: "ab".repeat(32), vout: 0, value: 40_633, isSpent: true, arkTxId: arkTx.id }] };
       },
-      async getVirtualTxs(ids) {
+      async getVirtualTxs(ids: string[]) {
         return { txs: ids.map((id) => byId.get(id) ?? "") };
       },
-    } as Pick<IndexerProvider, "getVtxos" | "getVirtualTxs">,
+    } as unknown as Pick<IndexerProvider, "getVtxos" | "getVirtualTxs">,
     ark: {
       async getPendingTxs() {
         return [];
@@ -266,7 +266,7 @@ test("an already-spent input is not submitted again or left pending", async () =
       async getVirtualTxs(ids: string[]) {
         return { txs: ids.map((id) => byId.get(id) ?? "") };
       },
-    } as Pick<IndexerProvider, "getVtxos" | "getVirtualTxs">,
+    } as unknown as Pick<IndexerProvider, "getVtxos" | "getVirtualTxs">,
     ark: {
       async getPendingTxs() {
         pendingReads += 1;
