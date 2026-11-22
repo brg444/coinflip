@@ -10,6 +10,7 @@ import {
 
 import { ARK_URL, DEFAULT_RELAYS, EMULATOR_URL } from "../protocol/constants.ts";
 import { bytesToHex, hexToBytes } from "../protocol/hex.ts";
+import type { OptionPosition } from "../protocol/messages.ts";
 import { networkByName } from "../protocol/network.ts";
 import { watchPositions } from "../protocol/nostr.ts";
 import { openSqliteStorage } from "../protocol/sqlite-storage.ts";
@@ -96,11 +97,11 @@ if (wallet) {
   }
 }
 
-const announced = new Set<number>();
+const announced = new Map<string, OptionPosition>();
 watchPositions({
   relays: DEFAULT_RELAYS,
   onPosition(position) {
-    announced.add(position.expiry);
+    announced.set(position.rfq_id, position);
   },
 });
 
@@ -118,7 +119,12 @@ const oracle = await createOracle({
   emulator: new RestEmulatorProvider(emulatorUrl),
   quote: () => btcUsdCents(AbortSignal.timeout(10_000)),
   sampleEveryMs: sampleInterval,
-  announcedExpiries: () => announced,
+  announcedPositions: () => announced.values(),
+  onPublishedExpiry: (expiry) => {
+    for (const [id, pos] of announced) {
+      if (pos.expiry === expiry) announced.delete(id);
+    }
+  },
 });
 
 console.log(`oracle http://127.0.0.1:${oracle.port}/`);

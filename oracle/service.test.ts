@@ -10,10 +10,11 @@ import { ArkAddress, asset, CSVMultisigTapscript, Extension, networks, SingleKey
 import { base64, hex } from "@scure/base";
 
 import { beaconIdOf, bindBeacon, decodeState, genesisState, nextState, priceValue, sampleDigest, statePacketOf } from "../protocol/beacon.ts";
-import { EXIT } from "../protocol/constants.ts";
+import { EXIT, OPTION_VAULT_PROGRAM_ID, PAIR, PREDICT_VAULT_PROGRAM_ID } from "../protocol/constants.ts";
 import { statePacket } from "../protocol/cospend.ts";
 import { bytesToHex } from "../protocol/hex.ts";
-import { createOracle, dueExpiries, skippedPublish, type HeldCoin, type OracleDeps, type OracleWallet } from "./service.ts";
+import type { OptionPosition } from "../protocol/messages.ts";
+import { createOracle, dueExpiries, duePositionExpiries, skippedPublish, type HeldCoin, type OracleDeps, type OracleWallet } from "./service.ts";
 import { chooseSample, loadStore, pruneSamples, SAMPLE_HISTORY_S, saveStore } from "./store.ts";
 
 const CHECKPOINT_HEX = "03080040b27520dfcaec558c7e78cf3e38b898ba8a43cfb5727266bae32c5c5b3aeb32c558aa0bac";
@@ -560,6 +561,158 @@ test("the minute pass publishes an announced expiry once a sample exists", async
     await ctx.oracle.publishAnnounced();
     assert.equal(ctx.submitted.length, 1);
     assert.equal(((await call(ctx.oracle.url, "/api/status")).json.fixings as unknown[]).length, 1);
+  } finally {
+    await ctx.close();
+  }
+});
+
+test("duePositionExpiries filters by beacon, freshness, predict grid, newest-first, and cap", () => {
+  const ourTxid = "ee".repeat(32);
+  const assetId = asset.AssetId.create(ourTxid, 0).toString();
+  const base = 1_700_000_100; // divisible by 300
+  const make = (over: Partial<OptionPosition>): OptionPosition => ({
+    v: 1,
+    type: "option_position",
+    program_id: PREDICT_VAULT_PROGRAM_ID,
+    rfq_id: "11".repeat(32),
+    pair: PAIR,
+    kind: 2,
+    collateral: "95000",
+    strike: "8000000",
+    expiry: base,
+    exit: 2048,
+    writer_pubkey: "21".repeat(32),
+    writer_pk_script: `5120${"21".repeat(32)}`,
+    holder_pubkey: "22".repeat(32),
+    holder_pk_script: `5120${"22".repeat(32)}`,
+    beacon_txid: ourTxid,
+    beacon_gidx: 0,
+    vault_address: "tark1vault",
+    fill_txid: "aa".repeat(32),
+    ...over,
+  });
+  const now = base + 1_800;
+  const positions: OptionPosition[] = [
+    make({ rfq_id: "01".repeat(32), beacon_txid: "ff".repeat(32), expiry: base }), // foreign beacon
+    make({ rfq_id: "02".repeat(32), beacon_gidx: 1, expiry: base }), // wrong gidx
+    make({ rfq_id: "03".repeat(32), expiry: base - 3_600 }), // stale (> 1h old)
+    make({ rfq_id: "04".repeat(32), expiry: base + 60 }), // off 300s grid for predict
+    make({ rfq_id: "05".repeat(32), kind: 0, program_id: OPTION_VAULT_PROGRAM_ID, expiry: base + 60 }), // options don't need 300s grid
+    make({ rfq_id: "06".repeat(32), expiry: base + 300 }),
+    make({ rfq_id: "07".repeat(32), expiry: base + 600 }),
+    make({ rfq_id: "08".repeat(32), expiry: base + 900 }),
+    make({ rfq_id: "09".repeat(32), expiry: base + 1_200 }),
+    make({ rfq_id: "0a".repeat(32), expiry: base + 1_800 }), // not due yet (lag 60)
+  ];
+  const due = duePositionExpiries(positions, { assetId, now, done: new Set() });
+  // Capped at 4 newest-first: base+1200, base+900, base+600, base+300 (base+60 option is 5th so deferred).
+  assert.deepEqual(due.map((item) => item.expiry), [base + 1_200, base + 900, base + 600, base + 300]);
+  const done = new Set([base + 1_200]);
+  const next = duePositionExpiries(positions, { assetId, now, done });
+  assert.deepEqual(next.map((item) => item.expiry), [base + 900, base + 600, base + 300, base + 60]);
+});
+
+test("publishAnnounced skips announced positions without a live vault on the indexer", async () => {
+  const expiry = 1_700_000_100; // divisible by 300
+  const ourTxid = "ee".repeat(32);
+  const serverKey = await SingleKey.fromHex(hex.encode(secret(1))).xOnlyPublicKey();
+  const liveAddr = new ArkAddress(serverKey, new Uint8Array(32).fill(5), networks.mutinynet.hrp);
+  const emptyAddr = new ArkAddress(serverKey, new Uint8Array(32).fill(6), networks.mutinynet.hrp);
+  const liveScriptHex = bytesToHex(liveAddr.pkScript);
+  const pruned: number[] = [];
+  let creating: Transaction | undefined;
+  const submitted: string[] = [];
+  let assetId = "";
+  const announced: OptionPosition[] = [
+    {
+      v: 1,
+      type: "option_position",
+      program_id: PREDICT_VAULT_PROGRAM_ID,
+      rfq_id: "aa".repeat(32),
+      pair: PAIR,
+      kind: 2,
+      collateral: "95000",
+      strike: "8000000",
+      expiry: expiry - 300,
+      exit: 2048,
+      writer_pubkey: "21".repeat(32),
+      writer_pk_script: `5120${"21".repeat(32)}`,
+      holder_pubkey: "22".repeat(32),
+      holder_pk_script: `5120${"22".repeat(32)}`,
+      beacon_txid: ourTxid,
+      beacon_gidx: 0,
+      vault_address: emptyAddr.encode(),
+      fill_txid: "11".repeat(32),
+    },
+    {
+      v: 1,
+      type: "option_position",
+      program_id: PREDICT_VAULT_PROGRAM_ID,
+      rfq_id: "bb".repeat(32),
+      pair: PAIR,
+      kind: 2,
+      collateral: "95000",
+      strike: "8000000",
+      expiry,
+      exit: 2048,
+      writer_pubkey: "21".repeat(32),
+      writer_pk_script: `5120${"21".repeat(32)}`,
+      holder_pubkey: "22".repeat(32),
+      holder_pk_script: `5120${"22".repeat(32)}`,
+      beacon_txid: ourTxid,
+      beacon_gidx: 0,
+      vault_address: liveAddr.encode(),
+      fill_txid: "22".repeat(32),
+    },
+  ];
+  const ctx = await boot({
+    now: () => expiry + 120,
+    announcedPositions: () => announced,
+    onPublishedExpiry: (exp) => pruned.push(exp),
+    indexer: {
+      async getVtxos(opts) {
+        if (opts.scripts.includes(liveScriptHex)) {
+          return { vtxos: [{ txid: "22".repeat(32), vout: 1, value: 95_000 }] };
+        }
+        if (opts.scripts.includes(bytesToHex(emptyAddr.pkScript))) {
+          return { vtxos: [] };
+        }
+        const script = hex.decode(opts.scripts[0]!);
+        const last = submitted.at(-1);
+        if (last) {
+          creating = Transaction.fromPSBT(base64.decode(last));
+        } else {
+          creating = new Transaction({ version: 3, allowUnknownOutputs: true });
+          creating.addInput({ txid: new Uint8Array(32).fill(8), index: 1 });
+          creating.addOutput({ script, amount: 330n });
+          creating.addOutput(Extension.create([statePacket(genesisState())]).txOut());
+        }
+        return { vtxos: [{ txid: creating.id, vout: 0, value: 330, assets: [{ assetId, amount: 1n }] }] };
+      },
+      async getVirtualTxs(txids) {
+        if (!creating || txids[0] !== creating.id) return { txs: [] };
+        return { txs: [base64.encode(creating.toPSBT())] };
+      },
+    },
+    emulator: {
+      async submitTx(arkTx) {
+        submitted.push(arkTx);
+        return { signedArkTx: arkTx };
+      },
+    },
+  });
+  try {
+    const issued = await call(ctx.oracle.url, "/api/issue", {}, "test-token");
+    assert.equal(issued.status, 200);
+    assetId = String(issued.json.assetId);
+    assert.equal((await call(ctx.oracle.url, "/api/deploy", {}, "test-token")).status, 200);
+    assert.equal((await call(ctx.oracle.url, "/api/samples", { price: "9900000", time: expiry - 300 + 10 }, "test-token")).status, 200);
+    assert.equal((await call(ctx.oracle.url, "/api/samples", { price: "10000000", time: expiry + 10 }, "test-token")).status, 200);
+    await ctx.oracle.publishAnnounced();
+    // Only the live vault's expiry was published; the empty vault's expiry was ignored.
+    const fixings = (await call(ctx.oracle.url, "/api/status")).json.fixings as { expiry: number; price: string }[];
+    assert.deepEqual(fixings.map((f) => f.expiry), [expiry]);
+    assert.deepEqual(pruned, [expiry]);
   } finally {
     await ctx.close();
   }

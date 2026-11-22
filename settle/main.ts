@@ -3,12 +3,14 @@ import http from "node:http";
 
 import {
   arkade,
+  asset,
   RestArkProvider,
   RestEmulatorProvider,
   RestIndexerProvider,
 } from "@arkade-os/sdk";
 
 import { ARK_URL, DEFAULT_RELAYS, EMULATOR_URL } from "../protocol/constants.ts";
+import { bytesToHex } from "../protocol/hex.ts";
 import { networkByName } from "../protocol/network.ts";
 import { bindContracts } from "../protocol/contracts.ts";
 import type { OptionPosition } from "../protocol/messages.ts";
@@ -66,7 +68,18 @@ if (!client.emulatorKey || !client.emulator) throw new Error("emulator missing")
 
 let polling = false;
 let watching = 0;
+let beaconFilter: { txid: string; gidx: number } | null = null;
 const noted = new Set<string>();
+
+function updateBeaconFilter(assetId: string) {
+  const parsed = asset.AssetId.fromString(assetId);
+  beaconFilter = { txid: bytesToHex(parsed.txid).toLowerCase(), gidx: Number(parsed.groupIndex) };
+}
+
+function matchesOurBeacon(txid: string, gidx: number): boolean {
+  if (!beaconFilter) return true;
+  return txid.toLowerCase() === beaconFilter.txid && gidx === beaconFilter.gidx;
+}
 
 function once(key: string, line: string, error = false) {
   if (noted.has(key)) return;
@@ -135,6 +148,7 @@ async function loadManual() {
 }
 
 function onPosition(position: OptionPosition) {
+  if (!matchesOurBeacon(position.beacon_txid, position.beacon_gidx)) return;
   if (!progress.remember(position)) return;
   void progress.save().catch((err) => {
     console.error("progress save", err instanceof Error ? err.message : err);
@@ -164,37 +178,50 @@ async function progressDue() {
     once(`oracle-parse:${parsed.error}`, `oracle ${parsed.error}`, true);
     return;
   }
+  updateBeaconFilter(parsed.beacon.assetId);
   noted.delete("oracle-fetch");
 
   const lag = Number(parsed.beacon.expiryLag);
   const nowMs = Date.now();
   for (const position of due) {
     if (position.expiry + lag > now) continue;
+    if (!matchesOurBeacon(position.beaconTxid, position.beaconGidx)) {
+      once(`beacon:${position.id}`, `skip ${position.rfqId} beacon mismatch`, true);
+      continue;
+    }
     const terms = termsFor(position, client.serverKey, client.emulatorKey!, parsed.beacon.readFee);
-    if (bindContracts(terms).vaultAddress !== position.vaultAddress) {
+    const bound = bindContracts(terms);
+    if (bound.vaultAddress !== position.vaultAddress) {
       once(`addr:${position.id}`, `skip ${position.rfqId} vault address`, true);
       continue;
     }
-    const published = await askPublish(position.expiry, nowMs);
-    if (published === "failed") continue;
+    // Only ask the oracle to attest when an unspent vault coin is live on the indexer.
+    const liveVaults = await client.indexer!.getVtxos({ scripts: [bytesToHex(bound.vaultPkScript)], spendableOnly: true });
+    const hasLiveVault = (liveVaults.vtxos ?? []).some(
+      (coin) => !coin.isSpent && !coin.spentBy && !coin.isUnrolled && BigInt(coin.value) >= terms.collateral,
+    );
     let expected: { price: bigint; time: bigint } | undefined;
-    if (published === "fixed") {
-      try {
-        const samples = await fetchOraclePrices(
-          oracleUrl,
-          position.expiry - lag,
-          position.expiry + lag,
-          AbortSignal.timeout(10_000),
-        );
-        const chosen = chooseSample(samples, position.expiry, lag);
-        if (!chosen) {
-          console.error(`publish ${position.expiry} fixing is not the oracle sample`);
+    if (hasLiveVault) {
+      const published = await askPublish(position.expiry, nowMs);
+      if (published === "failed") continue;
+      if (published === "fixed") {
+        try {
+          const samples = await fetchOraclePrices(
+            oracleUrl,
+            position.expiry - lag,
+            position.expiry + lag,
+            AbortSignal.timeout(10_000),
+          );
+          const chosen = chooseSample(samples, position.expiry, lag);
+          if (!chosen) {
+            console.error(`publish ${position.expiry} fixing is not the oracle sample`);
+            continue;
+          }
+          expected = { price: BigInt(chosen.price), time: BigInt(chosen.time) };
+        } catch (err) {
+          console.error(`publish ${position.expiry} ${err instanceof Error ? err.message : err}`);
           continue;
         }
-        expected = { price: BigInt(chosen.price), time: BigInt(chosen.time) };
-      } catch (err) {
-        console.error(`publish ${position.expiry} ${err instanceof Error ? err.message : err}`);
-        continue;
       }
     }
     try {
@@ -277,6 +304,13 @@ server.listen(port, () => {
   console.log(`relay ${relay}`);
   console.log(`status http://127.0.0.1:${port}/status`);
 });
+
+try {
+  const initial = parseOracleBeacon(await fetchOracleStatus(oracleUrl, AbortSignal.timeout(10_000)));
+  if (initial.ok) updateBeaconFilter(initial.beacon.assetId);
+} catch {
+  // Oracle may not be up yet; progressDue refreshes the beacon filter once reachable.
+}
 
 const positions = watchPositions({ relays: relayList, onPosition });
 
