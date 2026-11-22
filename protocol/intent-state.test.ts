@@ -161,3 +161,63 @@ test("an underfunded live coin above dust is refundable after the deadline and t
   });
   assert.deepEqual(refunded, { phase: "refunded", refundable: false, fundingTxid: funding, closeTxid: close });
 });
+
+test("double payment reports filled while flagging the leftover coin refundable after deadline", () => {
+  const fillFunding = "55".repeat(32);
+  const extraFunding = "66".repeat(32);
+  const fillTx = "77".repeat(32);
+  const refundTx = "88".repeat(32);
+  const vault = "5120" + "ab".repeat(32);
+  const desk = "5120" + "cd".repeat(32);
+  const spends = {
+    [fillTx]: [{ amount: 50_000n, script: desk }, { amount: 95_000n, script: vault }],
+    [refundTx]: [{ amount: 50_000n, script: writer }],
+  };
+  const beforeDeadline = classifyIntent({
+    coins: [
+      { value: 50_000n, spent: false, spentBy: "", txid: extraFunding },
+      { value: 50_000n, spent: true, spentBy: fillTx, txid: fillFunding },
+    ],
+    spends,
+    collateral: 95_000n,
+    premium: 50_000n,
+    writerScript: writer,
+    now: 500,
+    deadline: 1_000,
+    side: 1,
+    vaultScript: vault,
+  });
+  assert.deepEqual(beforeDeadline, { phase: "filled", refundable: false, fundingTxid: fillFunding, closeTxid: fillTx });
+
+  const afterDeadline = classifyIntent({
+    coins: [
+      { value: 50_000n, spent: false, spentBy: "", txid: extraFunding },
+      { value: 50_000n, spent: true, spentBy: fillTx, txid: fillFunding },
+    ],
+    spends,
+    collateral: 95_000n,
+    premium: 50_000n,
+    writerScript: writer,
+    now: 1_500,
+    deadline: 1_000,
+    side: 1,
+    vaultScript: vault,
+  });
+  assert.deepEqual(afterDeadline, { phase: "filled", refundable: true, fundingTxid: fillFunding, closeTxid: fillTx });
+
+  const afterRefund = classifyIntent({
+    coins: [
+      { value: 50_000n, spent: true, spentBy: refundTx, txid: extraFunding },
+      { value: 50_000n, spent: true, spentBy: fillTx, txid: fillFunding },
+    ],
+    spends,
+    collateral: 95_000n,
+    premium: 50_000n,
+    writerScript: writer,
+    now: 1_500,
+    deadline: 1_000,
+    side: 1,
+    vaultScript: vault,
+  });
+  assert.deepEqual(afterRefund, { phase: "filled", refundable: false, fundingTxid: fillFunding, closeTxid: fillTx });
+});
