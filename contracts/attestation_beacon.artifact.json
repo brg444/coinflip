@@ -63,47 +63,53 @@
         ],
         "asm": [
           "<expiryLag>",
+          "10000000000000000",
           "OP_PUSHCURRENTINPUTINDEX",
           "0",
           "OP_NUMEQUALVERIFY",
-          "OP_OVER",
+          "OP_2",
+          "OP_PICK",
           "1800",
           "OP_GREATERTHAN",
           "OP_VERIFY",
-          "OP_DUP",
+          "OP_OVER",
           "0",
           "OP_GREATERTHANOREQUAL",
           "OP_IF",
-          "OP_2DUP",
+          "OP_2",
+          "OP_PICK",
+          "OP_2",
+          "OP_PICK",
           "OP_ADD",
           "OP_CHECKTIME",
           "OP_VERIFY",
           "OP_ENDIF",
-          "OP_2",
+          "OP_3",
           "OP_PICK",
           "0",
           "OP_GREATERTHAN",
           "OP_VERIFY",
-          "OP_3",
+          "OP_4",
           "OP_PICK",
-          "OP_2",
+          "OP_3",
           "OP_PICK",
           "OP_GREATERTHANOREQUAL",
           "OP_VERIFY",
+          "OP_4",
+          "OP_PICK",
           "OP_3",
           "OP_PICK",
-          "OP_2",
-          "OP_PICK",
-          "OP_ROT",
+          "OP_3",
+          "OP_ROLL",
           "OP_ADD",
           "OP_LESSTHANOREQUAL",
           "OP_VERIFY",
-          "OP_OVER",
-          "10000000000000000",
+          "OP_3DUP",
+          "OP_NIP",
           "OP_DIV",
-          "OP_2",
+          "OP_3",
           "OP_PICK",
-          "10000000000000000",
+          "OP_ROT",
           "OP_MOD",
           "OP_OVER",
           "OP_SWAP",
@@ -127,9 +133,7 @@
           "OP_CAT",
           "0xe6bbd6277e1bf288eed5e8d1780f9a50b239e86b153736bceebccf4ea79d90b3",
           "OP_CAT",
-          "1050",
-          "32",
-          "OP_NUM2BIN",
+          "0x1a04000000000000000000000000000000000000000000000000000000000000",
           "OP_REVERSEBYTES",
           "OP_CAT",
           "OP_6",
@@ -417,22 +421,14 @@
           "name": "attest",
           "witness": [
             {
-              "name": "serverSig",
-              "type": "signature",
-              "encoding": "schnorr-64",
-              "injected": true
-            },
-            {
-              "name": "emulatorSig",
+              "name": "operatorSig",
               "type": "signature",
               "encoding": "schnorr-64",
               "injected": true
             }
           ],
           "asm": [
-            "<SERVER_KEY>",
-            "OP_CHECKSIGVERIFY",
-            "<EMULATOR_KEY:attest>",
+            "<OPERATOR_KEY:attest>",
             "OP_CHECKSIG"
           ]
         }
@@ -504,22 +500,14 @@
           "name": "read",
           "witness": [
             {
-              "name": "serverSig",
-              "type": "signature",
-              "encoding": "schnorr-64",
-              "injected": true
-            },
-            {
-              "name": "emulatorSig",
+              "name": "operatorSig",
               "type": "signature",
               "encoding": "schnorr-64",
               "injected": true
             }
           ],
           "asm": [
-            "<SERVER_KEY>",
-            "OP_CHECKSIGVERIFY",
-            "<EMULATOR_KEY:read>",
+            "<OPERATOR_KEY:read>",
             "OP_CHECKSIG"
           ]
         }
@@ -618,22 +606,14 @@
           "name": "migrate",
           "witness": [
             {
-              "name": "serverSig",
-              "type": "signature",
-              "encoding": "schnorr-64",
-              "injected": true
-            },
-            {
-              "name": "emulatorSig",
+              "name": "operatorSig",
               "type": "signature",
               "encoding": "schnorr-64",
               "injected": true
             }
           ],
           "asm": [
-            "<SERVER_KEY>",
-            "OP_CHECKSIGVERIFY",
-            "<EMULATOR_KEY:migrate>",
+            "<OPERATOR_KEY:migrate>",
             "OP_CHECKSIG"
           ]
         }
@@ -662,19 +642,20 @@
       ]
     }
   ],
+  "codeHash": "sha256:7abc9bd81b8ff8490653df1ca6cfc70d27fe0b3fd8bce70789b23f932b26f897",
   "source": {
     "entry": "attestation_beacon.ark",
     "files": {
-      "attestation_beacon.ark": "pragma arkade ^0.1.0;\n\n// AttestationBeacon: a price registry that other covenants read by spending\n// it in the same transaction.\n//\n// A fixing is one DIA OracleUpdate for BTC/USD. attest rebuilds the EIP-712\n// digest and checks it against the pinned DIA signer. The option expiry is\n// the slot key. The stored price is the intent price in USD cents. The sample\n// time is the intent timestamp, and it must sit in [expiry, expiry + expiryLag].\n// adminPk migrates the coin and takes the unilateral exit. It does not sign prices.\n//\n// State is the extension packet of type STATE, 329 bytes:\n//   0        version, 0x01\n//   1..9     round, num2bin(round, 8)\n//   9..329   8 slots of 40 bytes, newest first: expiry num2bin(expiry, 8), value 32 bytes\n// The value keeps the cents in the first 8 bytes. The next 8 are the sample\n// time. The rest are zero. An expiry already in a slot cannot be replaced.\n\ncontract AttestationBeacon(\n  bytes32 ctrlTxid,\n  int ctrlGidx,\n  bytes domain,\n  int expiryLag,\n  int readFee,\n  pubkey adminPk,\n  int exit\n) {\n  const int STATE = 32;\n  const int SIZE = 329;\n  const int SLOTS = 9;\n  const int VALUE_AT = 17;\n  const int HISTORY_AT = 49;\n  const int HISTORY = 280;\n  const int PRICE_MAX = 1000000000;\n  const int SCALE = 10000000000000000;\n  const int HALF = 5000000000000000;\n\n  private function continues(bytes state) {\n    require(size(state) == SIZE, \"state size\");\n    require(substr(state, 0, 1) == 0x01, \"state version\");\n    require(tx.outputs[0].script == tx.input.current.script, \"script\");\n    require(tx.outputs[0].assets.lookup(ctrlTxid, ctrlGidx) == 1, \"identity asset\");\n  }\n\n  private function absent(bytes prev, int expiry) {\n    int[8] slots = [9, 49, 89, 129, 169, 209, 249, 289];\n    for (i, offset) in slots {\n      require(substr(prev, offset, 8) != num2bin(expiry, 8), \"expiry already in a slot\");\n    }\n  }\n\n  private function word(int n) bytes {\n    return reverseBytes(num2bin(n, 32));\n  }\n\n  function attest(int expiry, int price, int time, int nonce, int intentExpiry, signature sig) {\n    require(this.activeInputIndex == 0, \"beacon is input 0\");\n    require(expiry > 1800, \"expiry\");\n    if (expiryLag >= 0) {\n      require(checkTime(expiry + expiryLag), \"before expiry time\");\n    }\n    require(price > 0, \"nonpositive price\");\n    require(time >= expiry, \"sample before expiry\");\n    require(time <= expiry + expiryLag, \"sample after close\");\n\n    int q = price / SCALE;\n    int r = price % SCALE;\n    int cents = q;\n    if (r >= HALF) {\n      cents = q + 1;\n    }\n    require(cents > 0, \"price\");\n    require(cents <= PRICE_MAX, \"price cap\");\n\n    bytes body = 0x24e574fa7512cc24e9109b981256e33759d91bc2ee9b74a2bf633e013c0620b5\n      + 0xef9b6324ed493183babb66ed98fcf36e9bcb0243ae4c5a29fcd99184b08f1899\n      + 0xe6bbd6277e1bf288eed5e8d1780f9a50b239e86b153736bceebccf4ea79d90b3\n      + word(1050)\n      + word(nonce)\n      + word(intentExpiry)\n      + 0xee62665949c883f9e0f6f002eac32e00bd59dfe6c34e92a91c37d6a8322d6489\n      + word(price)\n      + word(time)\n      + 0xf5a695b63ab16fd8278cb1cf7d29f274a9574b64e0b894750e08c990fc8891bc;\n    bytes32 message = bytes32(digest(\n      0x1901\n        + 0xf57d55f057fd4aba6b1a7f8bccb6a3e826cf71fd34971f22a39d7ffd6e620fb3\n        + bytes32(digest(body, 4)),\n      4\n    ));\n    require(checkSigFromStack(sig, 0x100211ee120bca9f272034d98b1b026bb4ab735ebeb5da8be6a69bf7ee0ea24cfd48, message), \"dia\");\n\n    bytes prev = tx.inputs[0].packet(STATE);\n    bytes next = tx.packet(STATE);\n    require(size(prev) == SIZE, \"prev size\");\n    require(size(next) == SIZE, \"next size\");\n    require(substr(prev, 0, 1) == 0x01, \"prev version\");\n    require(substr(next, 0, 1) == 0x01, \"next version\");\n    absent(prev, expiry);\n    require(bin2num(substr(next, 1, 8)) == bin2num(substr(prev, 1, 8)) + 1, \"round\");\n    require(substr(next, SLOTS, 8) == num2bin(expiry, 8), \"slot expiry\");\n    let slotValue = num2bin(cents, 8) + num2bin(time, 8) + num2bin(0, 16);\n    require(substr(next, VALUE_AT, 32) == slotValue, \"slot value\");\n    require(substr(next, HISTORY_AT, HISTORY) == substr(prev, SLOTS, HISTORY), \"history\");\n    require(tx.outputs[0].value >= tx.input.current.value, \"value\");\n    continues(next);\n  }\n\n  function read(int selfIndex) {\n    require(selfIndex == this.activeInputIndex, \"self index\");\n    bytes state = tx.packet(STATE);\n    require(state == tx.inputs[selfIndex].packet(STATE), \"state carried\");\n    require(tx.outputs[0].value >= tx.input.current.value + readFee, \"read fee\");\n    continues(state);\n  }\n\n  function migrate(ScriptPubKey next, signature opSig) {\n    require(this.activeInputIndex == 0, \"beacon is input 0\");\n    bytes state = tx.packet(STATE);\n    require(state == tx.inputs[0].packet(STATE), \"state carried\");\n    require(size(state) == SIZE, \"state size\");\n    int round = bin2num(substr(state, 1, 8));\n    let msg = sha256(domain + \"migrate\" + ctrlTxid + num2bin(ctrlGidx, 4) + num2bin(round, 8) + next.program);\n    require(checkSigFromStack(opSig, adminPk, msg), \"oracle service\");\n    require(tx.outputs[0].script == next, \"next script\");\n    require(tx.outputs[0].value >= tx.input.current.value, \"value\");\n    require(tx.outputs[0].assets.lookup(ctrlTxid, ctrlGidx) == 1, \"identity asset\");\n  }\n\n  function unilateral(signature adminSig) tapscript {\n    require(older(exit));\n    require(checkSig(adminSig, adminPk));\n  }\n}\n"
+      "attestation_beacon.ark": "pragma arkade ^0.1.0;\n\n// AttestationBeacon: a price registry that other covenants read by spending\n// it in the same transaction.\n//\n// A fixing is one DIA OracleUpdate for BTC/USD. attest rebuilds the EIP-712\n// digest and checks it against the pinned DIA signer. The option expiry is\n// the slot key. The stored price is the intent price in USD cents. The sample\n// time is the intent timestamp, and it must sit in [expiry, expiry + expiryLag].\n// adminPk migrates the coin and takes the unilateral exit. It does not sign prices.\n//\n// State is the extension packet of type STATE, 329 bytes:\n//   0        version, 0x01\n//   1..9     round, num2bin(round, 8)\n//   9..329   8 slots of 40 bytes, newest first: expiry num2bin(expiry, 8), value 32 bytes\n// The value keeps the cents in the first 8 bytes. The next 8 are the sample\n// time. The rest are zero. An expiry already in a slot cannot be replaced.\n\ncontract AttestationBeacon(\n  bytes32 ctrlTxid,\n  int ctrlGidx,\n  bytes domain,\n  int expiryLag,\n  int readFee,\n  pubkey adminPk,\n  int exit\n) {\n  const int STATE = 32;\n  const int SIZE = 329;\n  const int SLOTS = 9;\n  const int VALUE_AT = 17;\n  const int HISTORY_AT = 49;\n  const int HISTORY = 280;\n  const int PRICE_MAX = 1000000000;\n  const int SCALE = 10000000000000000;\n  const int HALF = 5000000000000000;\n\n  private function continues(bytes state) {\n    require(size(state) == SIZE, \"state size\");\n    require(substr(state, 0, 1) == 0x01, \"state version\");\n    require(tx.outputs[0].script == tx.input.current.script, \"script\");\n    require(tx.outputs[0].assets.lookup(AssetId { txid: ctrlTxid, gidx: ctrlGidx }) == 1, \"identity asset\");\n  }\n\n  private function absent(bytes prev, int expiry) {\n    int[8] slots = [9, 49, 89, 129, 169, 209, 249, 289];\n    for (i, offset) in slots {\n      require(substr(prev, offset, 8) != int2bytes(expiry, 8), \"expiry already in a slot\");\n    }\n  }\n\n  private function word(int n) bytes {\n    return reverseBytes(int2bytes(n, 32));\n  }\n\n  @allow(unsigned-spend-path, \"authorized by pinned DIA EIP-712 signature\")\n  function attest(int expiry, int price, int time, int nonce, int intentExpiry, signature sig) {\n    require(this.activeInputIndex == 0, \"beacon is input 0\");\n    require(expiry > 1800, \"expiry\");\n    if (expiryLag >= 0) {\n      require(checkTime(expiry + expiryLag), \"before expiry time\");\n    }\n    require(price > 0, \"nonpositive price\");\n    require(time >= expiry, \"sample before expiry\");\n    require(time <= expiry + expiryLag, \"sample after close\");\n\n    int q = price / SCALE;\n    int r = price % SCALE;\n    int cents = q;\n    if (r >= HALF) {\n      cents = q + 1;\n    }\n    require(cents > 0, \"price\");\n    require(cents <= PRICE_MAX, \"price cap\");\n\n    bytes body = 0x24e574fa7512cc24e9109b981256e33759d91bc2ee9b74a2bf633e013c0620b5\n      + 0xef9b6324ed493183babb66ed98fcf36e9bcb0243ae4c5a29fcd99184b08f1899\n      + 0xe6bbd6277e1bf288eed5e8d1780f9a50b239e86b153736bceebccf4ea79d90b3\n      + word(1050)\n      + word(nonce)\n      + word(intentExpiry)\n      + 0xee62665949c883f9e0f6f002eac32e00bd59dfe6c34e92a91c37d6a8322d6489\n      + word(price)\n      + word(time)\n      + 0xf5a695b63ab16fd8278cb1cf7d29f274a9574b64e0b894750e08c990fc8891bc;\n    bytes32 message = bytes32(digest(\n      0x1901\n        + 0xf57d55f057fd4aba6b1a7f8bccb6a3e826cf71fd34971f22a39d7ffd6e620fb3\n        + bytes32(digest(body, 4)),\n      4\n    ));\n    require(checkSigFromStack(sig, 0x100211ee120bca9f272034d98b1b026bb4ab735ebeb5da8be6a69bf7ee0ea24cfd48, message), \"dia\");\n\n    bytes prev = tx.inputs[0].packet(STATE);\n    bytes next = tx.packet(STATE);\n    require(size(prev) == SIZE, \"prev size\");\n    require(size(next) == SIZE, \"next size\");\n    require(substr(prev, 0, 1) == 0x01, \"prev version\");\n    require(substr(next, 0, 1) == 0x01, \"next version\");\n    absent(prev, expiry);\n    require(bytes2int(substr(next, 1, 8)) == bytes2int(substr(prev, 1, 8)) + 1, \"round\");\n    require(substr(next, SLOTS, 8) == int2bytes(expiry, 8), \"slot expiry\");\n    let slotValue = int2bytes(cents, 8) + int2bytes(time, 8) + int2bytes(0, 16);\n    require(substr(next, VALUE_AT, 32) == slotValue, \"slot value\");\n    require(substr(next, HISTORY_AT, HISTORY) == substr(prev, SLOTS, HISTORY), \"history\");\n    require(tx.outputs[0].value >= tx.input.current.value, \"value\");\n    continues(next);\n  }\n\n  @allow(unsigned-spend-path, \"permissionless read preserves state and pays readFee; batch-expiry inheritance still applies\")\n  function read(int selfIndex) {\n    require(selfIndex == this.activeInputIndex, \"self index\");\n    bytes state = tx.packet(STATE);\n    require(state == tx.inputs[selfIndex].packet(STATE), \"state carried\");\n    require(tx.outputs[0].value >= tx.input.current.value + readFee, \"read fee\");\n    continues(state);\n  }\n\n  @allow(unsigned-spend-path, \"authorized by adminPk checkSigFromStack over round and next script\")\n  function migrate(ScriptPubKey next, signature opSig) {\n    require(this.activeInputIndex == 0, \"beacon is input 0\");\n    bytes state = tx.packet(STATE);\n    require(state == tx.inputs[0].packet(STATE), \"state carried\");\n    require(size(state) == SIZE, \"state size\");\n    int round = bytes2int(substr(state, 1, 8));\n    let msg = sha256(domain + \"migrate\" + ctrlTxid + int2bytes(ctrlGidx, 4) + int2bytes(round, 8) + next.program);\n    require(checkSigFromStack(opSig, adminPk, msg), \"oracle service\");\n    require(tx.outputs[0].script == next, \"next script\");\n    require(tx.outputs[0].value >= tx.input.current.value, \"value\");\n    require(tx.outputs[0].assets.lookup(AssetId { txid: ctrlTxid, gidx: ctrlGidx }) == 1, \"identity asset\");\n  }\n\n  function unilateral(signature adminSig) tapscript {\n    require(older(exit));\n    require(checkSig(adminSig, adminPk));\n  }\n}\n"
     }
   },
   "compiler": {
     "name": "arkadec",
-    "version": "0.1.0-rc.1",
+    "version": "0.1.0",
     "options": {
       "optimize": true
     }
   },
-  "updatedAt": "2026-11-14T22:35:13.683415583+00:00",
-  "fingerprint": "sha256:e1136a4278caa8e576e7269f4ead54cb84d8bed194ac40e1ea77e1a99ea2a951"
+  "updatedAt": "2026-11-22T13:54:45.114+00:00",
+  "fingerprint": "sha256:cf07b5980b6a5a32a50288c932858baaa8ea4c548dd0935cb7a527be3d83cb96"
 }

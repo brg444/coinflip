@@ -29,6 +29,7 @@ contract NonInteractiveSwap(
   int exit
 ) {
   // Swap: Any taker can fulfill - introspection makes cooperative path trustless
+  @allow(signer-from-witness, "open swap allows any taker who funds wantAsset")
   function swap(pubkey takerPk, signature takerSig, ScriptPubKey takerScriptPubKey) {
     // Taker must sign to authorize spending their wantAsset
     require(checkSig(takerSig, takerPk), "invalid taker signature");
@@ -36,7 +37,7 @@ contract NonInteractiveSwap(
     // Introspection verifies the atomic exchange:
     // Output 0: maker receives wantAsset
     require(
-      tx.outputs[0].assets.lookup(wantAssetIdTxid, wantAssetIdGidx) >= wantAmount,
+      tx.outputs[0].assets.lookup(AssetId { txid: wantAssetIdTxid, gidx: wantAssetIdGidx }) >= wantAmount,
       "insufficient want asset for maker"
     );
     require(
@@ -46,7 +47,7 @@ contract NonInteractiveSwap(
 
     // Output 1: taker receives offerAsset
     require(
-      tx.outputs[1].assets.lookup(offerAssetIdTxid, offerAssetIdGidx) >= offerAmount,
+      tx.outputs[1].assets.lookup(AssetId { txid: offerAssetIdTxid, gidx: offerAssetIdGidx }) >= offerAmount,
       "insufficient offer asset for taker"
     );
     require(
@@ -57,7 +58,7 @@ contract NonInteractiveSwap(
 
   // Cancel: Maker reclaims after expiration if no taker
   function cancel(signature makerSig) {
-    require(tx.locktime >= expirationTime, "swap not expired");
+    require(checkTime(expirationTime), "swap not expired");
     require(checkSig(makerSig, makerPk), "invalid maker signature");
   }
 

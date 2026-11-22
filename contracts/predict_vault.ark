@@ -44,6 +44,7 @@ contract PredictVault(
   const int STATE = 32;
   const int SIZE = 329;
 
+  @allow(unsigned-spend-path, "permissionless settlement constrained by beacon price and payoff outputs")
   function settle() {
     require(kind == 2 || kind == 3, "kind");
     require(strike > 0, "strike");
@@ -53,7 +54,7 @@ contract PredictVault(
     require(checkTime(expiry), "before expiry");
     require(this.activeInputIndex == 0, "vault is input 0");
     require(tx.numInputs >= 2, "vault and beacon");
-    require(tx.inputs[1].assets.lookup(beaconTxid, beaconGidx) == 1, "beacon");
+    require(tx.inputs[1].assets.lookup(AssetId { txid: beaconTxid, gidx: beaconGidx }) == 1, "beacon");
 
     bytes state = tx.inputs[1].packet(STATE);
     require(size(state) == SIZE, "state size");
@@ -64,9 +65,9 @@ contract PredictVault(
     int found = 0;
     int[8] slots = [9, 49, 89, 129, 169, 209, 249, 289];
     for (i, offset) in slots {
-      if (found == 0 && substr(state, offset, 8) == num2bin(expiry, 8)) {
-        st = bin2num(substr(state, (offset + 8), 8));
-        sampleTime = bin2num(substr(state, (offset + 16), 8));
+      if (found == 0 && substr(state, offset, 8) == int2bytes(expiry, 8)) {
+        st = bytes2int(substr(state, (offset + 8), 8));
+        sampleTime = bytes2int(substr(state, (offset + 16), 8));
         found = 1;
       }
     }
@@ -99,19 +100,20 @@ contract PredictVault(
     }
     int writerAmt = pot - phPay;
 
+    let out1 = tx.outputs[1].script;
     if (phPay > DUST && writerAmt > DUST) {
       require(tx.outputs[1].value >= phPay, "holder short");
-      require(tx.outputs[1].script == holderScript, "holder script");
+      require(out1 == holderScript, "holder script");
       require(tx.outputs[2].value >= writerAmt, "writer short");
       require(tx.outputs[2].script == writerScript, "writer script");
     }
     if (phPay <= DUST) {
       require(tx.outputs[1].value >= pot, "writer short");
-      require(tx.outputs[1].script == writerScript, "writer script");
+      require(out1 == writerScript, "writer script");
     }
     if (writerAmt <= DUST && phPay > DUST) {
       require(tx.outputs[1].value >= pot, "holder short");
-      require(tx.outputs[1].script == holderScript, "holder script");
+      require(out1 == holderScript, "holder script");
     }
   }
 
