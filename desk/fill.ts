@@ -8,7 +8,7 @@ import { intentProgram } from "../protocol/programs.ts";
 import { virtualTxsById } from "../protocol/virtual-txs.ts";
 import type { QuoteRow } from "./book.ts";
 import { finalizeDeskSpends, pendingOutpoints, settleEmulatorTx, type PendingArk } from "./finalize.ts";
-import { coinOutlives, minCoinExpiry } from "./guards.ts";
+import { beaconExpiryRefusal, coinOutlives, minFillCoinExpiry } from "./guards.ts";
 
 type Client = Awaited<ReturnType<typeof arkade.Arkade.connect>>;
 export type Coin = { txid: string; vout: number; value: number; expiresAt?: Date };
@@ -67,6 +67,7 @@ export async function fillQuote(opts: {
    * submits; without finalizeTx the premium and the desk change never become vtxos.
    */
   ark?: PendingArk;
+  beaconExpiry?: number | null;
   checkPredict?: (row: QuoteRow, now: number) => Promise<PredictFillVerdict>;
 }): Promise<{ result: FillResult; txid?: string; spent?: Coin[] }> {
   const bound = bindContracts(opts.termsFor(opts.row));
@@ -77,7 +78,7 @@ export async function fillQuote(opts: {
   const predict = isPredict(opts.row.kind);
   // The user's coin: the collateral they lock, or the stake they bet.
   const locks = predict ? premium : collateral;
-  const minExpiry = minCoinExpiry(opts.row.expiry);
+  const minExpiry = minFillCoinExpiry(opts.row.expiry, opts.beaconExpiry ?? null);
   const funding = coins.filter((item) => BigInt(item.value) >= locks);
   const coin = funding.find((item) => coinOutlives(item, minExpiry));
   if (!coin) {
@@ -96,6 +97,9 @@ export async function fillQuote(opts: {
     return { result: opts.now >= opts.row.deadline ? "expired" : "waiting" };
   }
   if (opts.now >= opts.row.deadline) return { result: "expired" };
+  if ("beaconExpiry" in opts && beaconExpiryRefusal(opts.row.expiry, opts.beaconExpiry ?? null)) {
+    return { result: "declined" };
+  }
   if (predict && opts.checkPredict) {
     const verdict = await opts.checkPredict(opts.row, opts.now);
     if (verdict === "decline") return { result: "declined" };

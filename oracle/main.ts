@@ -41,6 +41,8 @@ function optionalKey(name: string): Uint8Array | undefined {
 }
 
 const oracleKey = optionalKey("ORACLE_KEY");
+const deskPubkeyRaw = process.env.DESK_PUBKEY?.trim().toLowerCase() || undefined;
+if (deskPubkeyRaw && !/^[0-9a-f]{64}$/.test(deskPubkeyRaw)) throw new Error("DESK_PUBKEY must be 32 bytes");
 const adminToken = process.env.ORACLE_ADMIN?.trim() || undefined;
 const dataDir = process.env.DATA_DIR?.trim() || "data";
 const port = Number(process.env.PORT ?? "8789");
@@ -101,6 +103,7 @@ function pruneAnnounced(now = Math.floor(Date.now() / 1000)) {
 watchPositions({
   relays: DEFAULT_RELAYS,
   onPosition(position) {
+    if (deskPubkeyRaw && position.writer_pubkey !== deskPubkeyRaw && position.holder_pubkey !== deskPubkeyRaw) return;
     const now = Math.floor(Date.now() / 1000);
     if (now - position.expiry > MAX_ANNOUNCE_AGE_S) return;
     announced.set(position.rfq_id, position);
@@ -122,6 +125,7 @@ const oracle = await createOracle({
   emulator: new RestEmulatorProvider(emulatorUrl),
   pull: () => feed.latest(),
   sampleEveryMs: sampleInterval,
+  allowedPubkey: deskPubkeyRaw,
   announcedPositions: () => {
     pruneAnnounced();
     return announced.values();

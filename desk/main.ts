@@ -53,7 +53,7 @@ import { countFill, countQuote, emptyHour, hourLine, msUntilNextHour } from "./d
 import { finalizeDeskSpends, pendingOutpoints } from "./finalize.ts";
 import { maintainDeskCoins } from "./maintain.ts";
 import { fillQuote, type PredictFillVerdict } from "./fill.ts";
-import { beaconExpiryRefusal, coinOutlives, minCoinExpiry, predictFillAllowed, predictSpot } from "./guards.ts";
+import { beaconExpiryRefusal, coinOutlives, minFillCoinExpiry, predictFillAllowed, predictSpot } from "./guards.ts";
 import { spotCents } from "./spot.ts";
 
 /**
@@ -391,7 +391,7 @@ async function onPredict(message: RfqRequest & { profile: PredictRequestProfile 
     await refuse(from, message.rfq_id, bad);
     return;
   }
-  const minExpiry = minCoinExpiry(message.profile.expiry);
+  const minExpiry = minFillCoinExpiry(message.profile.expiry, beaconExpiry);
   if (eligibleFloatBalance(minExpiry) < openPremium(book.list(), now) + payout) await refreshFloat();
   if (eligibleFloatBalance(minExpiry) < openPremium(book.list(), now) + payout) {
     await refuse(from, message.rfq_id, "float short");
@@ -510,7 +510,7 @@ async function onRequest(message: RfqRequest, from: string) {
     await refuse(from, message.rfq_id, dust);
     return;
   }
-  const minExpiry = minCoinExpiry(profile.expiry);
+  const minExpiry = minFillCoinExpiry(profile.expiry, beaconExpiry);
   if (eligibleFloatBalance(minExpiry) < openPremium(book.list(), now) + sats) await refreshFloat();
   if (eligibleFloatBalance(minExpiry) < openPremium(book.list(), now) + sats) {
     await refuse(from, message.rfq_id, "float short");
@@ -584,6 +584,8 @@ async function refreshOracleStatus(force = false) {
     if (parsed.ok) {
       beaconExpiryLag = parsed.beacon.expiryLag;
       beaconExpiry = parsed.beacon.beaconExpiry ?? null;
+    } else {
+      beaconExpiry = null;
     }
     const latest = parseOracleLatest(body);
     if (latest) oracleSpot = latest;
@@ -595,6 +597,9 @@ async function refreshOracleStatus(force = false) {
 await refreshOracleStatus(true);
 if (beaconWindowRefusal(beaconExpiryLag)) {
   console.error(beaconExpiryLag == null ? "oracle unreachable, quotes refused" : `beacon expiryLag ${beaconExpiryLag}, quotes refused`);
+}
+if (beaconExpiry == null || beaconExpiry <= 0) {
+  console.error(beaconExpiry === 0 ? "beacon coin missing or swept, quotes refused" : "beacon expiry unknown, quotes refused");
 }
 
 const transport = connectTransport({ relays, secretKey: secret, onMessage });
@@ -836,6 +841,7 @@ async function pump() {
           now,
           float: [...deskCoins.values()],
           ark,
+          beaconExpiry,
           checkPredict: checkPredictFill,
         });
         if (outcome.result === "filled") {
@@ -882,11 +888,11 @@ async function housekeeping() {
   if (polling) return;
   polling = true;
   try {
-    const hadLag = beaconExpiryLag != null;
-    if (!hadLag || Date.now() - oracleStatusAt >= 20_000) {
-      await refreshOracleStatus(!hadLag);
-      if (!hadLag && beaconExpiryLag != null && !beaconWindowRefusal(beaconExpiryLag)) {
-        console.log(`beacon expiryLag ${beaconExpiryLag}, quotes enabled`);
+    const hadBeacon = beaconExpiryLag != null && beaconExpiry != null && beaconExpiry > 0;
+    if (!hadBeacon || Date.now() - oracleStatusAt >= 20_000) {
+      await refreshOracleStatus(!hadBeacon);
+      if (!hadBeacon && !beaconWindowRefusal(beaconExpiryLag) && beaconExpiry != null && beaconExpiry > 0) {
+        console.log(`beacon expiryLag ${beaconExpiryLag} expiry ${beaconExpiry}, quotes enabled`);
       }
     }
     if (!filling) await refreshFloat();

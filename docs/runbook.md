@@ -45,6 +45,7 @@ From [oracle/main.ts](../oracle/main.ts) and [oracle/Dockerfile](../oracle/Docke
 | --- | --- |
 | `ORACLE_KEY` | New 32-byte hex. Wallet, issuer, migrate, and exit. It does not sign prices. |
 | `ORACLE_ADMIN` | New bearer for `/api/issue`, `/api/deploy`, `/api/recover`, `/api/intent`, and `/api/publish`. Unset disables those routes. |
+| `DESK_PUBKEY` | Optional 64-hex x-only pubkey. When set, auto-publishing from Nostr announcements ignores positions where that key is neither writer nor holder. |
 | `ARK_URL` | `https://mutinynet.arkade.sh` (the code default). |
 | `EMULATOR_URL` | `https://emulator.mutinynet.arkade.sh` (the code default). |
 | `SAMPLE_MS` | Leave unset. Reads DIA about once a minute. `0` uses that same minute. |

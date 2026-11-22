@@ -487,6 +487,9 @@ test("parseOracleBeacon preserves beaconExpiry and parseOracleLatest validates l
   const parsed = parseOracleBeacon(status, DISPLAY, 0);
   assert.equal(parsed.ok, true);
   if (parsed.ok) assert.equal(parsed.beacon.beaconExpiry, 1_700_050_000);
+  const dead = parseOracleBeacon({ ...status, beaconExpiry: 0 }, DISPLAY, 0);
+  assert.equal(dead.ok, true);
+  if (dead.ok) assert.equal(dead.beacon.beaconExpiry, 0);
   assert.deepEqual(parseOracleLatest(status), { cents: 9_123_456n, time: 1_700_000_123 });
   assert.equal(parseOracleLatest({ latest: { price: "0", time: 1_700_000_123 } }), null);
   assert.equal(parseOracleLatest({ latest: null }), null);

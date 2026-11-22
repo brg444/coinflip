@@ -42,6 +42,7 @@ export type HeldCoin = {
   vout: number;
   value: number | bigint;
   isSpent?: boolean;
+  isSwept?: boolean;
   expiresAt?: Date;
   assets?: readonly { assetId: string; amount: bigint | number }[];
 };
@@ -88,6 +89,8 @@ export type OracleDeps = {
   announcedExpiries?: () => Iterable<number>;
   /** Full positions announced on nostr; filtered by beacon, freshness, grid, and live vault. */
   announcedPositions?: () => Iterable<OptionPosition>;
+  /** Optional x-only pubkey; when set, auto-publish only positions where it is writer or holder. */
+  allowedPubkey?: string;
   /** Called after an announced expiry is published or confirmed already on the beacon. */
   onPublishedExpiry?: (expiry: number) => void;
   now?: () => number;
@@ -104,7 +107,7 @@ export function dueExpiries(expiries: Iterable<number>, now: number, done: Reado
 
 export function duePositionExpiries(
   positions: Iterable<OptionPosition>,
-  opts: { assetId: string; now: number; done: ReadonlySet<number>; lag?: number; maxAge?: number; limit?: number },
+  opts: { assetId: string; now: number; done: ReadonlySet<number>; lag?: number; maxAge?: number; limit?: number; allowedPubkey?: string },
 ): { expiry: number; positions: OptionPosition[] }[] {
   const id = asset.AssetId.fromString(opts.assetId);
   const ourTxid = bytesToHex(id.txid).toLowerCase();
@@ -112,9 +115,11 @@ export function duePositionExpiries(
   const lag = opts.lag ?? 60;
   const maxAge = opts.maxAge ?? MAX_ANNOUNCE_AGE_S;
   const limit = opts.limit ?? MAX_PUBLISH_PER_PASS;
+  const allowed = opts.allowedPubkey?.toLowerCase();
   const byExpiry = new Map<number, OptionPosition[]>();
   for (const pos of positions) {
     if (pos.beacon_txid.toLowerCase() !== ourTxid || pos.beacon_gidx !== ourGidx) continue;
+    if (allowed && pos.writer_pubkey.toLowerCase() !== allowed && pos.holder_pubkey.toLowerCase() !== allowed) continue;
     if (pos.program_id !== vaultProgramId(pos.kind)) continue;
     if (BigInt(pos.collateral) < READ_FEE + DUST_SATS) continue;
     if (opts.done.has(pos.expiry)) continue;
@@ -247,9 +252,11 @@ export async function createOracle(deps: OracleDeps) {
     if (!store.deployTxid || !store.assetId || !script || !deps.indexer) return null;
     try {
       const found = await deps.indexer.getVtxos({ scripts: [bytesToHex(script.pkScript)], spendableOnly: true });
-      const coin = found.vtxos.find((vtxo) => !vtxo.isSpent && vtxo.assets?.some((item) => item.assetId === store.assetId && BigInt(item.amount) === 1n));
-      const ms = coin?.expiresAt instanceof Date ? coin.expiresAt.getTime() : NaN;
-      return Number.isFinite(ms) && ms > 0 ? Math.floor(ms / 1000) : null;
+      const coin = found.vtxos.find((vtxo) => !vtxo.isSpent && !vtxo.isSwept && vtxo.assets?.some((item) => item.assetId === store.assetId && BigInt(item.amount) === 1n));
+      if (!coin) return 0;
+      if (!(coin.expiresAt instanceof Date)) return null;
+      const ms = coin.expiresAt.getTime();
+      return Number.isFinite(ms) && ms > 0 ? Math.floor(ms / 1000) : 0;
     } catch {
       return null;
     }
@@ -594,6 +601,7 @@ export async function createOracle(deps: OracleDeps) {
           now: clock,
           done: publishedExpiries,
           lag: Number(EXPIRY_LAG),
+          allowedPubkey: deps.allowedPubkey,
         })
       : dueExpiries(deps.announcedExpiries!(), clock, publishedExpiries, Number(EXPIRY_LAG)).map((expiry) => ({ expiry }));
     for (const item of items) {

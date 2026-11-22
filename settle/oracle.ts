@@ -113,7 +113,7 @@ export function parseOracleBeacon(body: unknown, beaconTxid?: string, gidx = 0):
     : null;
   const adminPk = hexBytes(args.adminPk, 32);
   if (expiryLag == null || readFee == null || exit == null || !domain || !adminPk) return { ok: false, error: "oracle args" };
-  const beaconExpiry = typeof root.beaconExpiry === "number" && Number.isSafeInteger(root.beaconExpiry) && root.beaconExpiry > 0
+  const beaconExpiry = typeof root.beaconExpiry === "number" && Number.isSafeInteger(root.beaconExpiry) && root.beaconExpiry >= 0
     ? root.beaconExpiry
     : null;
   return {
