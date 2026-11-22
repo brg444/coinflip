@@ -185,6 +185,8 @@ Use one small option. Collateral must be at least `Q_MIN` (10_000 sats). Pick an
 
 **Settle.** On the Oracle dashboard, preview the holder and writer amounts for that position's kind, strike, collateral, and the price you want. Then **Publish price** with the position expiry. After `expiry + 60`, `GET /api/status` shows the fixing and the Settler logs `settled` with a txid. `GET /status` on the Settler increments `settled`. No page click is required. The 1,000-sat read fee is the difference between the collateral and the holder plus writer amounts in the preview.
 
+**Unfixed windows (closed beta policy).** If DIA produces no `BTC/USD` print inside `[expiry, expiry + 60]` or a filled Predict vault cannot settle automatically, the vault cannot execute `settle` without a matching fixing. The desk (as writer) can recover the locked vault coin on Bitcoin via `unilateral` after `EXIT` (`2048` seconds) or cooperatively via `close`; during the closed beta, the operator refunds the bettor's stake manually whenever an unfixed window occurs.
+
 `scripts/e2e-mutinynet.ts` (`pnpm e2e`) is a scripted Mutinynet fill and cancel against `BEACON_TXID`. It is not the tester path, and its default keys are not the Dokploy `DESK_KEY`.
 
 ## Local regtest
