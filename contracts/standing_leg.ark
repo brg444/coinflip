@@ -26,6 +26,7 @@ contract StandingLeg(
 
   function fill() {
     require(side == 0 || side == 1, "side");
+    require(this.activeInputIndex == side, "leg input index");
     require(collateral > DUST, "collateral");
     require(premium > DUST, "premium");
     require(!checkTime(deadline), "expired");
