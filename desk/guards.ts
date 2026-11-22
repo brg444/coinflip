@@ -5,11 +5,24 @@ import { probAbove } from "../protocol/pricing.ts";
 const YEAR = 365 * 24 * 60 * 60;
 
 export const COIN_EXPIRY_MARGIN_S = 300;
+export const BEACON_RATCHET_MARGIN_S = 1_800;
 export const ORACLE_SPOT_MAX_AGE_S = 180;
 export const BASIS_MAX_BPS = 100;
 
 export function minCoinExpiry(expiry: number, margin = COIN_EXPIRY_MARGIN_S): number {
   return expiry + Number(VAULT_EXPIRY_LAG) + margin;
+}
+
+// Outputs inherit the earliest input expiry in arkd, so vault inputs must not sit far behind the beacon coin.
+export function minFillCoinExpiry(
+  expiry: number,
+  beaconExpiry: number | null,
+  margin = COIN_EXPIRY_MARGIN_S,
+  ratchetMargin = BEACON_RATCHET_MARGIN_S,
+): number {
+  const floor = minCoinExpiry(expiry, margin);
+  if (beaconExpiry == null || beaconExpiry <= 0) return floor;
+  return Math.max(floor, beaconExpiry - ratchetMargin);
 }
 
 export function coinOutlives(coin: { expiresAt?: Date }, minExpiryS: number): boolean {
@@ -19,7 +32,7 @@ export function coinOutlives(coin: { expiresAt?: Date }, minExpiryS: number): bo
 }
 
 export function beaconExpiryRefusal(expiry: number, beaconExpiry: number | null, margin = COIN_EXPIRY_MARGIN_S): string {
-  if (beaconExpiry == null) return "";
+  if (beaconExpiry == null || beaconExpiry <= 0) return "beacon expiry";
   return minCoinExpiry(expiry, margin) > beaconExpiry ? "beacon expiry" : "";
 }
 

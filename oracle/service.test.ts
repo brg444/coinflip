@@ -784,21 +784,14 @@ test("ingestIntent stores distinct DIA intents immediately and skips before issu
   }
 });
 
-test("status reports beaconExpiry in Unix seconds when the beacon coin has a wall-clock expiresAt", async () => {
+test("status reports beaconExpiry for live and past coins, and 0 when deployed coin is swept or missing", async () => {
   const expectedExpiry = 1_700_050_000;
   let assetId = "";
+  let vtxos: HeldCoin[] = [];
   const ctx = await boot({
     indexer: {
       async getVtxos() {
-        return {
-          vtxos: [{
-            txid: "aa".repeat(32),
-            vout: 0,
-            value: 330,
-            expiresAt: new Date(expectedExpiry * 1000),
-            assets: [{ assetId, amount: 1n }],
-          }],
-        };
+        return { vtxos };
       },
       async getVirtualTxs() {
         return { txs: [] };
@@ -811,9 +804,54 @@ test("status reports beaconExpiry in Unix seconds when the beacon coin has a wal
     assert.equal(issued.status, 200);
     assetId = String(issued.json.assetId);
     assert.equal((await call(ctx.oracle.url, "/api/deploy", {}, "test-token")).status, 200);
-    const status = await call(ctx.oracle.url, "/api/status");
-    assert.equal(status.json.beaconExpiry, expectedExpiry);
+
+    vtxos = [];
+    assert.equal((await call(ctx.oracle.url, "/api/status")).json.beaconExpiry, 0);
+
+    vtxos = [{ txid: "aa".repeat(32), vout: 0, value: 330, isSwept: true, expiresAt: new Date(expectedExpiry * 1000), assets: [{ assetId, amount: 1n }] }];
+    assert.equal((await call(ctx.oracle.url, "/api/status")).json.beaconExpiry, 0);
+
+    const pastExpiry = 1_699_000_000;
+    vtxos = [{ txid: "aa".repeat(32), vout: 0, value: 330, expiresAt: new Date(pastExpiry * 1000), assets: [{ assetId, amount: 1n }] }];
+    assert.equal((await call(ctx.oracle.url, "/api/status")).json.beaconExpiry, pastExpiry);
+
+    vtxos = [{ txid: "aa".repeat(32), vout: 0, value: 330, expiresAt: new Date(expectedExpiry * 1000), assets: [{ assetId, amount: 1n }] }];
+    assert.equal((await call(ctx.oracle.url, "/api/status")).json.beaconExpiry, expectedExpiry);
   } finally {
     await ctx.close();
   }
+});
+
+test("duePositionExpiries restricts auto-publishing to allowedPubkey when configured", () => {
+  const txid = "ee".repeat(32);
+  const assetId = asset.AssetId.create(txid, 0).toString();
+  const desk = "11".repeat(32);
+  const attacker = "99".repeat(32);
+  const base = 1_700_000_100;
+  const make = (rfq: string, writer: string, holder: string, expiry: number): OptionPosition => ({
+    v: 1,
+    type: "option_position",
+    program_id: OPTION_VAULT_PROGRAM_ID,
+    rfq_id: rfq.repeat(32),
+    pair: PAIR,
+    kind: 0,
+    collateral: "50000",
+    strike: "9000000",
+    expiry,
+    exit: Number(EXIT),
+    writer_pubkey: writer,
+    writer_pk_script: "5120" + "22".repeat(32),
+    holder_pubkey: holder,
+    beacon_txid: txid,
+    beacon_gidx: 0,
+    vault_address: "tark1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqq",
+    fill_txid: rfq.repeat(32),
+  });
+  const positions = [
+    make("aa", attacker, attacker, base + 300),
+    make("bb", desk, attacker, base + 200),
+    make("cc", attacker, desk, base + 100),
+  ];
+  const filtered = duePositionExpiries(positions, { assetId, now: base + 600, done: new Set(), allowedPubkey: desk });
+  assert.deepEqual(filtered.map((item) => item.expiry), [base + 200, base + 100]);
 });
