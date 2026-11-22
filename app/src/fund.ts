@@ -160,9 +160,8 @@ export function btcAmount(sats: bigint) {
   return frac ? `${whole}.${frac}` : whole.toString();
 }
 
-/** BIP21 deposit link. Amount stays a decimal string so 1 sat is not `1e-8`. */
 export function paymentUri(address: string, sats: bigint): string {
-  return BIP21.create({ ark: address, amount: btcAmount(sats) as unknown as number });
+  return BIP21.create({ ark: address, amount: Number(sats) / 1e8 });
 }
 
 function storedHex(name: string): string | null {

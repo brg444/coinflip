@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { mkdir, open, rename } from "node:fs/promises";
 import path from "node:path";
-import { DatabaseSync } from "node:sqlite";
+import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 
 import {
   SQLiteContractRepository,
@@ -51,13 +51,13 @@ export async function openSqliteStorage(dataDir: string, name = "arkade.sqlite")
   db.exec("PRAGMA journal_mode = WAL");
   const executor: SQLExecutor = {
     async run(sql, params) {
-      db.prepare(sql).run(...(params ?? []));
+      db.prepare(sql).run(...((params ?? []) as SQLInputValue[]));
     },
-    async get(sql, params) {
-      return db.prepare(sql).get(...(params ?? [])) as Record<string, unknown> | undefined;
+    async get<T = Record<string, unknown>>(sql: string, params?: unknown[]) {
+      return db.prepare(sql).get(...((params ?? []) as SQLInputValue[])) as T | undefined;
     },
-    async all(sql, params) {
-      return db.prepare(sql).all(...(params ?? [])) as Record<string, unknown>[];
+    async all<T = Record<string, unknown>>(sql: string, params?: unknown[]) {
+      return db.prepare(sql).all(...((params ?? []) as SQLInputValue[])) as T[];
     },
   };
   return {

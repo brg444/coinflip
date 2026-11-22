@@ -6,7 +6,7 @@ import { beaconIdOf, type BeaconId } from "./beacon-id.ts";
 import { DUST_SATS, EXIT } from "./constants.ts";
 import { addressOf } from "./contracts.ts";
 import { xOnly } from "./hex.ts";
-import { beaconProgram } from "./programs.ts";
+import { beaconProgram, exitSequence } from "./programs.ts";
 
 export { beaconIdOf, type BeaconId };
 
@@ -137,7 +137,7 @@ export type Bound = {
   pkScript: Uint8Array;
   program: Uint8Array;
   args: Record<string, bigint | Uint8Array>;
-  script: arkade.ArkadeProgramScript;
+  script: InstanceType<typeof arkade.ArkadeProgramScript>;
 };
 
 export function bindBeacon(input: BeaconArgs): Bound {
@@ -150,7 +150,7 @@ export function bindBeacon(input: BeaconArgs): Bound {
     expiryLag: input.expiryLag,
     readFee: input.readFee,
     adminPk: xOnly(input.adminPk),
-    exit: input.exit ?? EXIT,
+    exit: exitSequence(input.exit ?? EXIT),
     server: serverKey,
   };
   const script = new arkade.ArkadeProgramScript(beaconProgram(), args, {

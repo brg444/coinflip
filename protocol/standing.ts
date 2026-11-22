@@ -5,7 +5,9 @@ import { DUST_SATS } from "./constants.ts";
 import { addressOf, directPayout, payoutVtxo, scriptArg } from "./contracts.ts";
 import { build, type Built, type Coin } from "./cospend.ts";
 import { bytesToHex, xOnly } from "./hex.ts";
-import { standingLegProgram, standingVaultProgram } from "./programs.ts";
+import { exitSequence, standingLegProgram, standingVaultProgram } from "./programs.ts";
+
+type ProgramScript = InstanceType<typeof arkade.ArkadeProgramScript>;
 
 /** Packet on the match. Version, holder key, holder payout program. */
 export const STANDING_PARTY = 33;
@@ -33,7 +35,7 @@ export type StandingScript = {
   pkScript: Uint8Array;
   program: Uint8Array;
   args: Record<string, bigint | Uint8Array>;
-  script: arkade.ArkadeProgramScript;
+  script: ProgramScript;
 };
 
 function keysOf(terms: { serverKey: Uint8Array; emulatorKey: Uint8Array }) {
@@ -71,7 +73,7 @@ export function bindStandingVault(terms: StandingTerms): StandingScript {
     beaconTxid: terms.beacon.txid,
     beaconGidx: terms.beacon.gidx,
     readFee: terms.readFee ?? 0n,
-    exit: terms.exit,
+    exit: exitSequence(terms.exit),
     server: keys.serverKey,
   };
   return compile(standingVaultProgram(), args, keys, keys.serverKey);
@@ -88,7 +90,7 @@ function leg(terms: StandingTerms, side: 0 | 1, userPk: Uint8Array, userScript: 
     collateral: terms.collateral,
     premium: terms.premium,
     deadline: terms.deadline,
-    exit: terms.exit,
+    exit: exitSequence(terms.exit),
     server: keys.serverKey,
   };
   return compile(standingLegProgram(), args, keys, keys.serverKey);
@@ -124,13 +126,13 @@ export function standingParty(holderPk: Uint8Array, holderScript: Uint8Array): U
   return body;
 }
 
-function bytesArg(script: arkade.ArkadeProgramScript, name: string): Uint8Array {
+function bytesArg(script: ProgramScript, name: string): Uint8Array {
   const value = script.args[name];
   if (!(value instanceof Uint8Array)) throw new Error(`${name} missing`);
   return value;
 }
 
-function intArg(script: arkade.ArkadeProgramScript, name: string): bigint {
+function intArg(script: ProgramScript, name: string): bigint {
   const value = script.args[name];
   if (typeof value !== "bigint") throw new Error(`${name} missing`);
   return value;
@@ -157,8 +159,8 @@ function programPk(program: Uint8Array): Uint8Array {
  * OptionIntent from its float.
  */
 export function buildStandingMatch(input: {
-  writer: { script: arkade.ArkadeProgramScript; coin: Coin };
-  holder: { script: arkade.ArkadeProgramScript; coin: Coin };
+  writer: { script: ProgramScript; coin: Coin };
+  holder: { script: ProgramScript; coin: Coin };
   checkpoint: CSVMultisigTapscript.Type;
 }): Built {
   const writer = input.writer.script;
