@@ -5,6 +5,7 @@ import { bindContracts, type Terms } from "../protocol/contracts.ts";
 import { bytesToHex } from "../protocol/hex.ts";
 import { classifyIntent, psbtView } from "../protocol/intent-state.ts";
 import { intentProgram } from "../protocol/programs.ts";
+import { virtualTxsById } from "../protocol/virtual-txs.ts";
 import type { QuoteRow } from "./book.ts";
 import { finalizeDeskSpends, pendingOutpoints, settleEmulatorTx, type PendingArk } from "./finalize.ts";
 
@@ -214,16 +215,17 @@ export async function recoverFilled(
   const ids = [...new Set(coins.map((coin) => coin.spentBy))];
   if (!ids.length) return undefined;
   const page = await client.indexer.getVirtualTxs(ids);
+  const byId = virtualTxsById(page.txs ?? []);
   const spends: Record<string, ReturnType<typeof psbtView>["outputs"]> = {};
-  ids.forEach((id, index) => {
-    const raw = page.txs[index];
-    if (!raw) return;
+  for (const id of ids) {
+    const raw = byId.get(id.toLowerCase());
+    if (!raw) continue;
     try {
       spends[id] = psbtView(raw).outputs;
     } catch {
       // Checkpoint ids are not payouts.
     }
-  });
+  }
   const seen = classifyIntent({
     coins,
     spends,
@@ -236,7 +238,7 @@ export async function recoverFilled(
     vaultScript: terms.vaultScript,
   });
   if (seen.phase !== "filled") return undefined;
-  const txid = coins.find((coin) => spends[coin.spentBy])?.spentBy;
+  const txid = seen.closeTxid || coins.find((coin) => spends[coin.spentBy])?.spentBy;
   if (!txid) return undefined;
   // The virtual tx can exist before arkd finalizes it. The fill landed only once
   // its output is a vtxo: the writer's premium, or for predict the vault.

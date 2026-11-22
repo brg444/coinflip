@@ -5,6 +5,7 @@ import { statePacketOf } from "../../protocol/beacon.ts";
 import { ARK_URL } from "../../protocol/constants.ts";
 import { bytesToHex } from "../../protocol/hex.ts";
 import { classifyIntent, psbtView, type CoinView, type IntentPhase, type TxOutput } from "../../protocol/intent-state.ts";
+import { virtualTxsById } from "../../protocol/virtual-txs.ts";
 import { slotPrice } from "../../settle/vault.ts";
 import { intentCoins, onContractEvent } from "./fund.ts";
 import { splitPayouts } from "./position-status.ts";
@@ -53,7 +54,7 @@ export async function readKept(
 ): Promise<{ writer: bigint; desk: bigint; cents?: bigint } | null> {
   try {
     const page = await indexer.getVirtualTxs([settleTxid]);
-    const raw = page.txs?.[0];
+    const raw = virtualTxsById(page.txs ?? []).get(settleTxid.toLowerCase());
     if (!raw) return null;
     const split = splitPayouts(psbtView(raw).outputs, writerScript, deskScript);
     if (!split) return null;
@@ -100,25 +101,23 @@ async function payoutEvidence(writerScript: string, intentScript: string, since:
   const raws: string[] = [];
   for (let i = 0; i < ids.length; i += 8) {
     const page = await indexer.getVirtualTxs(ids.slice(i, i + 8));
-    raws.push(...page.txs);
+    raws.push(...(page.txs ?? []));
   }
+  const byId = virtualTxsById(raws);
   const found: CoinView[] = [];
   const spends: Record<string, TxOutput[]> = {};
-  raws.forEach((raw, index) => {
-    if (!raw) return;
+  for (const [id, raw] of byId) {
     let view;
     try {
       view = psbtView(raw);
     } catch {
-      return;
+      continue;
     }
     const input = view.inputs.find((item) => item.script.toLowerCase() === intentScript);
-    if (!input) return;
-    const id = ids[index] || "";
-    if (!id) return;
+    if (!input) continue;
     found.push({ value: input.amount, spent: true, spentBy: id });
     spends[id] = view.outputs;
-  });
+  }
   return { coins: found, spends };
 }
 
@@ -132,15 +131,16 @@ export async function readIntent(row: WatchRow, now = Math.floor(Date.now() / 10
   const spends: Record<string, TxOutput[]> = {};
   if (ids.length && writerScript) {
     const page = await indexer.getVirtualTxs(ids);
-    ids.forEach((id, index) => {
-      const raw = page.txs[index];
-      if (!raw) return;
+    const byId = virtualTxsById(page.txs ?? []);
+    for (const id of ids) {
+      const raw = byId.get(id.toLowerCase());
+      if (!raw) continue;
       try {
         spends[id] = psbtView(raw).outputs;
       } catch {
         // A checkpoint id is not the payout. The writer coins below still count.
       }
-    });
+    }
   }
   const seen = classifyIntent({
     coins,
