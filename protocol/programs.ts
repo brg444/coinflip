@@ -120,7 +120,7 @@ export function swapProgram() {
   return secondsExit(swapArtifact as arkade.ContractArtifact);
 }
 
-/** The committee registry the beacon vault reads. See contracts/beacon.md. */
+/** The attestation beacon the option vault reads. See contracts/beacon.md. */
 export function beaconProgram() {
   return secondsExit(beaconArtifact as arkade.ContractArtifact);
 }

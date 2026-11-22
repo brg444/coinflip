@@ -53,11 +53,6 @@ async function refresh(): Promise<void> {
   ]);
 }
 
-function sampleBody(price: string): { price: string; time?: string } {
-  const time = byId("sample-time").value.trim();
-  return time ? { price, time } : { price };
-}
-
 function shown(errorId: string, work: () => Promise<void>): void {
   byId(errorId).textContent = "";
   work().then(refresh).catch((err: Error) => {
@@ -91,21 +86,7 @@ for (const id of ["kind", "settle-price", "strike", "collateral"]) {
   byId(id).addEventListener("change", renderPreview);
 }
 byId("publish-price").addEventListener("click", () => {
-  shown("publish-error", async () => {
-    const price = byId("settle-price").value.trim();
-    const expiry = byId("expiry").value.trim();
-    await post("/api/samples", sampleBody(price));
-    try {
-      await post("/api/publish", { expiry });
-    } catch (err) {
-      const message = err instanceof Error ? err.message : "publish failed";
-      throw new Error(`Sample stored. Publish failed: ${message}`);
-    }
-  });
-});
-byId("sample").addEventListener("submit", (event) => {
-  event.preventDefault();
-  shown("sample-error", () => post("/api/samples", sampleBody(byId("price").value)));
+  shown("publish-error", () => post("/api/publish", { expiry: byId("expiry").value.trim() }));
 });
 
 void refresh().catch((err: Error) => {

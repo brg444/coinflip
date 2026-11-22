@@ -193,8 +193,6 @@ export async function settleQuote(env: {
 
   const beaconBound = bindBeacon({
     id: beaconId,
-    signers: env.beacon.signers,
-    threshold: env.beacon.threshold,
     domain: env.beacon.domain,
     expiryLag: env.beacon.expiryLag,
     readFee: env.beacon.readFee,

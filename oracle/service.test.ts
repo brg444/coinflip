@@ -9,14 +9,15 @@ import { schnorr } from "@noble/curves/secp256k1.js";
 import { ArkAddress, asset, CSVMultisigTapscript, Extension, networks, SingleKey, Transaction } from "@arkade-os/sdk";
 import { base64, hex } from "@scure/base";
 
-import { beaconIdOf, bindBeacon, decodeState, genesisState, nextState, priceValue, sampleDigest, statePacketOf } from "../protocol/beacon.ts";
+import { beaconIdOf, bindBeacon, decodeState, genesisState, nextState, priceValue, statePacketOf } from "../protocol/beacon.ts";
+import { centsOf, intentSigned, SCALE, type DiaIntent } from "../protocol/dia.ts";
 import { BEACON_READ_FEE, EXIT, OPTION_VAULT_PROGRAM_ID, PAIR, PREDICT_VAULT_PROGRAM_ID } from "../protocol/constants.ts";
 import { bindContracts } from "../protocol/contracts.ts";
 import { statePacket } from "../protocol/cospend.ts";
 import { bytesToHex } from "../protocol/hex.ts";
 import type { OptionPosition } from "../protocol/messages.ts";
 import { createOracle, dueExpiries, duePositionExpiries, skippedPublish, type HeldCoin, type OracleDeps, type OracleWallet } from "./service.ts";
-import { chooseSample, loadStore, pruneSamples, SAMPLE_HISTORY_S, saveStore } from "./store.ts";
+import { chooseSample, loadStore, pruneSamples, SAMPLE_HISTORY_S, saveStore, type StoredSample } from "./store.ts";
 
 const CHECKPOINT_HEX = "03080040b27520dfcaec558c7e78cf3e38b898ba8a43cfb5727266bae32c5c5b3aeb32c558aa0bac";
 
@@ -26,8 +27,12 @@ function secret(byte: number): Uint8Array {
   return Uint8Array.from(hex.decode(byte.toString(16).padStart(2, "0").repeat(32)));
 }
 
-async function boot(extra: Partial<OracleDeps> & { adminToken?: string } = {}) {
+async function boot(extra: Partial<OracleDeps> & { adminToken?: string; samples?: StoredSample[] } = {}) {
+  const { samples, ...depsExtra } = extra;
   const dir = await mkdtemp(path.join(tmpdir(), "oracle-"));
+  if (samples?.length) {
+    await saveStore(dir, { assetId: null, issueTxid: null, deployTxid: null, samples, fixings: [] });
+  }
   const serverKey = await SingleKey.fromHex(hex.encode(secret(1))).xOnlyPublicKey();
   const emulatorKey = await SingleKey.fromHex(hex.encode(secret(2))).compressedPublicKey();
   const recorded: { outputs?: { script: Uint8Array; amount: bigint }[]; issue?: { amount: bigint } } = {};
@@ -66,42 +71,88 @@ async function boot(extra: Partial<OracleDeps> & { adminToken?: string } = {}) {
   };
   let creating: Transaction | undefined;
   const submitted: string[] = [];
+  const indexer = {
+    async getVtxos(opts: { scripts: string[] }) {
+      const script = hex.decode(opts.scripts[0]!);
+      const last = submitted.at(-1);
+      if (last) {
+        creating = Transaction.fromPSBT(base64.decode(last));
+      } else {
+        creating = new Transaction({ version: 3, allowUnknownOutputs: true });
+        creating.addInput({ txid: new Uint8Array(32).fill(8), index: 1 });
+        creating.addOutput({ script, amount: 330n });
+        creating.addOutput(Extension.create([statePacket(genesisState())]).txOut());
+      }
+      const dust = { txid: "11".repeat(32), vout: 0, value: 1 };
+      return { vtxos: [dust, { txid: creating.id, vout: 0, value: 330, assets: [{ assetId, amount: 1n }] }] };
+    },
+    async getVirtualTxs(txids: string[]) {
+      if (!creating || txids[0] !== creating.id) return { txs: [] };
+      return { txs: [base64.encode(creating.toPSBT())] };
+    },
+  };
+  const emulator = {
+    async submitTx(arkTx: string) {
+      submitted.push(arkTx);
+      return { signedArkTx: arkTx };
+    },
+  };
   const oracle = await createOracle({
     dataDir: dir,
     adminToken: "test-token",
     oracleKey: secret(9),
     emulatorKey,
     wallet,
-    indexer: {
-      async getVtxos(opts) {
-        const script = hex.decode(opts.scripts[0]!);
-        const last = submitted.at(-1);
-        if (last) {
-          creating = Transaction.fromPSBT(base64.decode(last));
-        } else {
-          creating = new Transaction({ version: 3, allowUnknownOutputs: true });
-          creating.addInput({ txid: new Uint8Array(32).fill(8), index: 1 });
-          creating.addOutput({ script, amount: 330n });
-          creating.addOutput(Extension.create([statePacket(genesisState())]).txOut());
-        }
-        const dust = { txid: "11".repeat(32), vout: 0, value: 1 };
-        return { vtxos: [dust, { txid: creating.id, vout: 0, value: 330, assets: [{ assetId, amount: 1n }] }] };
-      },
-      async getVirtualTxs(txids) {
-        if (!creating || txids[0] !== creating.id) return { txs: [] };
-        return { txs: [base64.encode(creating.toPSBT())] };
-      },
-    },
-    emulator: {
-      async submitTx(arkTx) {
-        submitted.push(arkTx);
-        return { signedArkTx: arkTx };
-      },
-    },
+    indexer,
+    emulator,
     now: () => 1_700_000_000 + 60,
-    ...extra,
+    ...depsExtra,
   });
-  return { oracle, dir, recorded, submitted, serverKey, emulatorKey, other, wallet, close: async () => { await oracle.close(); await rm(dir, { recursive: true, force: true }); } };
+  return { oracle, dir, recorded, submitted, serverKey, emulatorKey, other, wallet, indexer, emulator, close: async () => { await oracle.close(); await rm(dir, { recursive: true, force: true }); } };
+}
+
+const DIA_SIG = "11".repeat(64);
+
+/** A DIA intent whose 18-decimal price scales to `cents` with no remainder. */
+function diaSample(cents: string | number, time: number) {
+  return {
+    price: (BigInt(cents) * SCALE).toString(),
+    time,
+    nonce: "1",
+    intentExpiry: time + 3_600,
+    sig: DIA_SIG,
+  };
+}
+
+/** Bypasses `/api/intent` signature checks. For publish-path unit tests only. */
+function storedSample(cents: string | number, time: number): StoredSample {
+  return {
+    price: String(cents),
+    time,
+    raw: (BigInt(cents) * SCALE).toString(),
+    nonce: "1",
+    intentExpiry: time + 3_600,
+    sig: DIA_SIG,
+  };
+}
+
+/** A real Lasernet OracleUpdate signed by the pinned DIA key. */
+const RECORDED: DiaIntent = {
+  price: 63907720609324293160960n,
+  time: 1794696202,
+  nonce: 1793790301274550603n,
+  intentExpiry: 1794699802,
+  sig: Buffer.from("c7036e95adf3073c3cd65e440505f447ff9397685952de165a2871f28fc24b5b2764dfd31c3a6e1cb2d8378175227fa523616c7fe9ca4cd6c752494a5598209e", "hex"),
+};
+
+function recordedBody(intent: DiaIntent = RECORDED) {
+  return {
+    price: intent.price.toString(),
+    time: intent.time,
+    nonce: intent.nonce.toString(),
+    intentExpiry: intent.intentExpiry,
+    sig: bytesToHex(intent.sig),
+  };
 }
 
 async function call(url: string, pathName: string, body?: unknown, token?: string) {
@@ -161,7 +212,8 @@ test("price history keeps one day", () => {
 });
 
 test("status, admin order, deploy change, and a print that becomes a fixing", async () => {
-  const ctx = await boot();
+  const expiry = 1_700_000_000n;
+  const ctx = await boot({ samples: [storedSample("10000000", Number(expiry + 60n))] });
   try {
     const home = await fetch(ctx.oracle.url + "/");
     assert.equal(home.headers.get("content-security-policy"), "default-src 'none'; script-src 'self'; connect-src 'self'; style-src 'self'; frame-ancestors 'none'");
@@ -171,10 +223,7 @@ test("status, admin order, deploy change, and a print that becomes a fixing", as
     assert.match(html, /id="settle-price"/);
     assert.match(html, /id="publish-price"/);
     assert.match(html, /id="payout"/);
-    assert.match(html, /id="sample-time"/);
-    assert.match(html, /Testing only/);
-    const timeInput = html.match(/<input id="sample-time"[^>]*>/)?.[0] ?? "";
-    assert.equal(timeInput.includes("value="), false);
+    assert.doesNotMatch(html, /id="sample-time"/);
     assert.doesNotMatch(html, /publish-price" type="submit"/);
     assert.doesNotMatch(html, /<script(?![^>]*src=)/);
     assert.equal((await fetch(ctx.oracle.url + "/page.js")).status, 200);
@@ -186,7 +235,7 @@ test("status, admin order, deploy change, and a print that becomes a fixing", as
     assert.equal((open.json.args as { domain: string }).domain, hex.encode(new TextEncoder().encode("BTCUSD-FIX")));
     assert.equal((open.json.args as { expiryLag: number }).expiryLag, 60);
     assert.equal((open.json.args as { readFee: number }).readFee, 1_000);
-    assert.equal(open.json.samples, 0);
+    assert.equal(open.json.samples, 1);
     assert.equal("minValue" in (open.json.args as object), false);
     assert.equal((open.json.args as { exit: number }).exit, 2048);
     assert.equal((open.json.args as { adminPk: string }).adminPk, hex.encode(schnorr.getPublicKey(secret(9))));
@@ -217,8 +266,6 @@ test("status, admin order, deploy change, and a print that becomes a fixing", as
     assert.equal((status.json.args as { ctrlTxid: string }).ctrlTxid, bytesToHex(beaconIdOf(asset.AssetId.create("ee".repeat(32), 0)).txid));
     const bound = bindBeacon({
       id: beaconIdOf(asset.AssetId.create("ee".repeat(32), 0)),
-      signers: [schnorr.getPublicKey(secret(9))],
-      threshold: 1n,
       domain: new TextEncoder().encode("BTCUSD-FIX"),
       expiryLag: 60n,
       readFee: 1_000n,
@@ -229,22 +276,16 @@ test("status, admin order, deploy change, and a print that becomes a fixing", as
     });
     assert.equal(status.json.address, bound.address);
 
-    const expiry = 1_700_000_000n;
-    const huge = await fetch(ctx.oracle.url + "/api/samples", { method: "POST", body: "x".repeat(5000), headers: { "content-type": "application/json", authorization: "Bearer test-token" } });
+    const huge = await fetch(ctx.oracle.url + "/api/intent", { method: "POST", body: "x".repeat(5000), headers: { "content-type": "application/json", authorization: "Bearer test-token" } });
     assert.equal(huge.status, 413);
-    assert.equal((await call(ctx.oracle.url, "/api/samples", { price: "10000000", extra: 1 }, "test-token")).status, 400);
-    const recorded = await call(ctx.oracle.url, "/api/samples", { price: "10000000" }, "test-token");
-    assert.equal(recorded.status, 200, JSON.stringify(recorded.json));
-    const againSample = await call(ctx.oracle.url, "/api/samples", { price: "10000000" }, "test-token");
-    assert.equal(againSample.status, 200);
-    assert.equal(againSample.json.duplicate, true);
+    assert.equal((await call(ctx.oracle.url, "/api/intent", { ...diaSample("10000000", 1_700_000_060), extra: 1 }, "test-token")).status, 400);
     const historyRes = await fetch(ctx.oracle.url + `/api/prices?from=${expiry}&to=${expiry + 60n}`);
     const history = (await historyRes.json()) as { samples: Record<string, unknown>[] };
     assert.equal(history.samples.length, 1);
     assert.equal("sigs" in history.samples[0]!, false);
 
     const disabled = await boot({ adminToken: undefined, now: () => Number(expiry + 60n) });
-    assert.equal((await call(disabled.oracle.url, "/api/samples", { price: "1" }, "test-token")).status, 404);
+    assert.equal((await call(disabled.oracle.url, "/api/intent", diaSample("1", 1), "test-token")).status, 404);
     await disabled.close();
 
     assert.equal((await call(ctx.oracle.url, "/api/publish", { expiry: Number(expiry) })).status, 401);
@@ -268,33 +309,16 @@ test("status, admin order, deploy change, and a print that becomes a fixing", as
     const again = await call(ctx.oracle.url, "/api/publish", { expiry: Number(expiry) }, "test-token");
     assert.equal(again.status, 409);
     const after = await call(ctx.oracle.url, "/api/status");
-    assert.deepEqual(after.json.fixings, [{ expiry: Number(expiry), price: "10000000", time: Number(expiry + 60n), txid: published.json.txid }]);
+    const fixing = (after.json.fixings as { expiry: number; price: string; time: number; txid: string }[])[0]!;
+    assert.equal(fixing.expiry, Number(expiry));
+    assert.equal(fixing.price, "10000000");
+    assert.equal(fixing.time, Number(expiry + 60n));
+    assert.equal(fixing.txid, published.json.txid);
     const tx = Transaction.fromPSBT(base64.decode(ctx.submitted[0]!));
     const next = nextState(genesisState(), expiry, priceValue(10_000_000n, expiry + 60n));
     assert.deepEqual(statePacketOf(tx), next);
     const witness = Extension.fromTx(tx).getEmulatorPacket()!.entries[0]!.witness!;
-    const ctrl = beaconIdOf(asset.AssetId.create("ee".repeat(32), 0)).txid;
-    const digest = sampleDigest(ctrl, expiry, 10_000_000n, expiry + 60n);
-    const pubkey = schnorr.getPublicKey(secret(9));
-    let found = false;
-    for (let i = 0; i + 64 <= witness.length; i += 1) {
-      try {
-        if (schnorr.verify(witness.subarray(i, i + 64), digest, pubkey)) found = true;
-      } catch {
-        // not a signature at this offset
-      }
-    }
-    assert.equal(found, true, bytesToHex(witness));
-    const shifted = sampleDigest(ctrl, expiry, 10_000_001n, expiry + 60n);
-    let shiftedOk = false;
-    for (let i = 0; i + 64 <= witness.length; i += 1) {
-      try {
-        if (schnorr.verify(witness.subarray(i, i + 64), shifted, pubkey)) shiftedOk = true;
-      } catch {
-        // a one-cent change is not this signature
-      }
-    }
-    assert.equal(shiftedOk, false);
+    assert.ok(bytesToHex(witness).includes(DIA_SIG), bytesToHex(witness));
   } finally {
     await ctx.close();
   }
@@ -304,19 +328,16 @@ test("admin backdate publishes a sample inside a closed window", async () => {
   const expiry = 1_791_821_976;
   const sampleTime = 1_791_822_006;
   const price = "8277570";
-  const ctx = await boot({ now: () => expiry + 120 });
+  const ctx = await boot({
+    now: () => expiry + 120,
+    samples: [storedSample("1", expiry - 1), storedSample(price, sampleTime)],
+  });
   try {
-    assert.equal((await call(ctx.oracle.url, "/api/samples", { price, time: sampleTime })).status, 401);
+    assert.equal((await call(ctx.oracle.url, "/api/intent", diaSample(price, sampleTime))).status, 401);
     assert.equal((await call(ctx.oracle.url, "/api/issue", {}, "test-token")).status, 200);
     assert.equal((await call(ctx.oracle.url, "/api/deploy", {}, "test-token")).status, 200);
-    assert.equal((await call(ctx.oracle.url, "/api/samples", { price, time: 0 }, "test-token")).status, 400);
-    assert.equal((await call(ctx.oracle.url, "/api/samples", { price, time: expiry + 121 }, "test-token")).status, 400);
-    const beforeKey = await call(ctx.oracle.url, "/api/samples", { price: "1", time: expiry - 1 }, "test-token");
-    assert.equal(beforeKey.status, 200, JSON.stringify(beforeKey.json));
-    const recorded = await call(ctx.oracle.url, "/api/samples", { price, time: sampleTime }, "test-token");
-    assert.equal(recorded.status, 200, JSON.stringify(recorded.json));
-    assert.equal(recorded.json.time, sampleTime);
-    assert.equal(recorded.json.price, price);
+    assert.equal((await call(ctx.oracle.url, "/api/intent", diaSample(price, 0), "test-token")).status, 400);
+    assert.equal((await call(ctx.oracle.url, "/api/intent", diaSample(price, expiry + 121), "test-token")).status, 400);
     const published = await call(ctx.oracle.url, "/api/publish", { expiry }, "test-token");
     assert.equal(published.status, 200, JSON.stringify(published.json));
     assert.equal(published.json.expiry, expiry);
@@ -325,88 +346,72 @@ test("admin backdate publishes a sample inside a closed window", async () => {
     const tx = Transaction.fromPSBT(base64.decode(ctx.submitted[0]!));
     assert.deepEqual(statePacketOf(tx), nextState(genesisState(), BigInt(expiry), priceValue(BigInt(price), BigInt(sampleTime))));
     const witness = Extension.fromTx(tx).getEmulatorPacket()!.entries[0]!.witness!;
-    const digest = sampleDigest(beaconIdOf(asset.AssetId.create("ee".repeat(32), 0)).txid, BigInt(expiry), BigInt(price), BigInt(sampleTime));
-    const pubkey = schnorr.getPublicKey(secret(9));
-    let found = false;
-    for (let i = 0; i + 64 <= witness.length; i += 1) {
-      try {
-        if (schnorr.verify(witness.subarray(i, i + 64), digest, pubkey)) found = true;
-      } catch {
-        // not a signature at this offset
-      }
-    }
-    assert.equal(found, true, bytesToHex(witness));
+    assert.ok(bytesToHex(witness).includes(DIA_SIG), bytesToHex(witness));
   } finally {
     await ctx.close();
   }
 });
-
-function verifies(sig: Uint8Array, digest: Uint8Array, pub: Uint8Array): boolean {
-  try {
-    return schnorr.verify(sig, digest, pub) === true;
-  } catch {
-    return false;
-  }
-}
 
 test("a print before the expiry is rejected and a print inside the minute is accepted", async () => {
   const expiry = 1_700_000_000;
-  const ctx = await boot({ now: () => expiry + 120 });
+  const early = await boot({ now: () => expiry + 120, samples: [storedSample("10000000", expiry - 1)] });
   try {
-    assert.equal((await call(ctx.oracle.url, "/api/issue", {}, "test-token")).status, 200);
-    assert.equal((await call(ctx.oracle.url, "/api/deploy", {}, "test-token")).status, 200);
-    const early = await call(ctx.oracle.url, "/api/samples", { price: "10000000", time: expiry - 1 }, "test-token");
-    assert.equal(early.status, 200, JSON.stringify(early.json));
-    const rejected = await call(ctx.oracle.url, "/api/publish", { expiry }, "test-token");
+    assert.equal((await call(early.oracle.url, "/api/issue", {}, "test-token")).status, 200);
+    assert.equal((await call(early.oracle.url, "/api/deploy", {}, "test-token")).status, 200);
+    const rejected = await call(early.oracle.url, "/api/publish", { expiry }, "test-token");
     assert.equal(rejected.status, 400);
     assert.equal(rejected.json.error, "sample before expiry");
-    assert.equal(ctx.submitted.length, 0);
-
-    const inside = await call(ctx.oracle.url, "/api/samples", { price: "10000000", time: expiry + 30 }, "test-token");
-    assert.equal(inside.status, 200, JSON.stringify(inside.json));
-    const accepted = await call(ctx.oracle.url, "/api/publish", { expiry }, "test-token");
+    assert.equal(early.submitted.length, 0);
+  } finally {
+    await early.close();
+  }
+  const inside = await boot({ now: () => expiry + 120, samples: [storedSample("10000000", expiry + 30)] });
+  try {
+    assert.equal((await call(inside.oracle.url, "/api/issue", {}, "test-token")).status, 200);
+    assert.equal((await call(inside.oracle.url, "/api/deploy", {}, "test-token")).status, 200);
+    const accepted = await call(inside.oracle.url, "/api/publish", { expiry }, "test-token");
     assert.equal(accepted.status, 200, JSON.stringify(accepted.json));
     assert.equal(accepted.json.price, "10000000");
     assert.equal(accepted.json.time, expiry + 30);
-    const tx = Transaction.fromPSBT(base64.decode(ctx.submitted[0]!));
+    const tx = Transaction.fromPSBT(base64.decode(inside.submitted[0]!));
     assert.deepEqual(statePacketOf(tx), nextState(genesisState(), BigInt(expiry), priceValue(10_000_000n, BigInt(expiry + 30))));
   } finally {
-    await ctx.close();
+    await inside.close();
   }
-});
-
-test("a one-cent price change fails verification", async () => {
-  const secretKey = secret(9);
-  const pub = schnorr.getPublicKey(secretKey);
-  const ctrl = beaconIdOf(asset.AssetId.create("ee".repeat(32), 0)).txid;
-  const expiry = 1_700_000_000n;
-  const price = 8_277_570n;
-  const time = expiry + 15n;
-  const digest = sampleDigest(ctrl, expiry, price, time);
-  const sig = await SingleKey.fromHex(hex.encode(secretKey)).signSchnorrDeterministic(digest);
-  assert.equal(verifies(sig, digest, pub), true);
-  assert.equal(verifies(sig, sampleDigest(ctrl, expiry, price + 1n, time), pub), false);
-  assert.equal(verifies(sig, sampleDigest(ctrl, expiry + 60n, price, time), pub), false);
 });
 
 test("an evicted expiry is rewritten with the same price and time", async () => {
   const base = 1_700_000_000;
-  const ctx = await boot({ now: () => base + 800 + 60 });
+  const now = () => base + 800 + 60;
+  const ctx = await boot({ now, samples: [storedSample("111", base + 10)] });
+  let restarted: Awaited<ReturnType<typeof createOracle>> | null = null;
   try {
     assert.equal((await call(ctx.oracle.url, "/api/issue", {}, "test-token")).status, 200);
     assert.equal((await call(ctx.oracle.url, "/api/deploy", {}, "test-token")).status, 200);
-    assert.equal((await call(ctx.oracle.url, "/api/samples", { price: "111", time: base + 10 }, "test-token")).status, 200);
     const first = await call(ctx.oracle.url, "/api/publish", { expiry: base }, "test-token");
     assert.equal(first.status, 200, JSON.stringify(first.json));
     assert.equal(first.json.price, "111");
-    assert.equal((await call(ctx.oracle.url, "/api/samples", { price: "999", time: base + 50 }, "test-token")).status, 200);
+    await ctx.oracle.close();
+    const file = await loadStore(ctx.dir);
+    file.samples.push(storedSample("999", base + 50));
+    for (let i = 1; i <= 8; i += 1) file.samples.push(storedSample(String(2_000 + i), base + i * 100 + 10));
+    await saveStore(ctx.dir, file);
+    restarted = await createOracle({
+      dataDir: ctx.dir,
+      adminToken: "test-token",
+      oracleKey: secret(9),
+      emulatorKey: ctx.emulatorKey,
+      wallet: ctx.wallet,
+      indexer: ctx.indexer,
+      emulator: ctx.emulator,
+      now,
+    });
     for (let i = 1; i <= 8; i += 1) {
       const expiry = base + i * 100;
-      assert.equal((await call(ctx.oracle.url, "/api/samples", { price: String(2_000 + i), time: expiry + 10 }, "test-token")).status, 200);
-      const published = await call(ctx.oracle.url, "/api/publish", { expiry }, "test-token");
+      const published = await call(restarted.url, "/api/publish", { expiry }, "test-token");
       assert.equal(published.status, 200, JSON.stringify(published.json));
     }
-    const again = await call(ctx.oracle.url, "/api/publish", { expiry: base }, "test-token");
+    const again = await call(restarted.url, "/api/publish", { expiry: base }, "test-token");
     assert.equal(again.status, 200, JSON.stringify(again.json));
     assert.equal(again.json.price, "111");
     assert.equal(again.json.time, base + 10);
@@ -416,7 +421,9 @@ test("an evicted expiry is rewritten with the same price and time", async () => 
     assert.deepEqual(decoded.slots[0]?.value, priceValue(111n, BigInt(base + 10)));
     assert.equal(decoded.slots.some((item) => item.expiry === BigInt(base + 100)), false);
   } finally {
-    await ctx.close();
+    await ctx.oracle.close().catch(() => {});
+    await restarted?.close().catch(() => {});
+    await rm(ctx.dir, { recursive: true, force: true });
   }
 });
 
@@ -484,12 +491,12 @@ test("the sampler stores a price without the admin route", async () => {
     dataDir: dir,
     oracleKey: secret(9),
     emulatorKey,
-    quote: async () => 8_275_570n,
+    pull: async () => RECORDED,
     sampleEveryMs: 60_000,
-    now: () => 1_791_822_000,
+    now: () => RECORDED.time,
   });
   try {
-    assert.equal((await call(oracle.url, "/api/samples", { price: "1" })).status, 404);
+    assert.equal((await call(oracle.url, "/api/intent", diaSample("1", 1))).status, 404);
     let samples = 0;
     let latest: { price?: string; time?: number } | null = null;
     for (let i = 0; i < 40 && samples < 1; i++) {
@@ -499,8 +506,8 @@ test("the sampler stores a price without the admin route", async () => {
       if (samples < 1) await new Promise((resolve) => setTimeout(resolve, 25));
     }
     assert.equal(samples, 1);
-    assert.equal(latest?.price, "8275570");
-    assert.equal(latest?.time, 1_791_822_000);
+    assert.equal(latest?.price, centsOf(RECORDED.price).toString());
+    assert.equal(latest?.time, RECORDED.time);
   } finally {
     await oracle.close();
     await rm(dir, { recursive: true, force: true });
@@ -513,7 +520,11 @@ test("a print before the expiry or after the close is skipped on the minute pass
   assert.equal(skippedPublish("beacon coin"), false);
   const expiry = 1_700_000_000;
   const later = expiry + 80;
-  const ctx = await boot({ now: () => expiry + 200, announcedExpiries: () => [expiry, later] });
+  const ctx = await boot({
+    now: () => expiry + 200,
+    announcedExpiries: () => [expiry, later],
+    samples: [storedSample("10000000", expiry - 1), storedSample("10000000", later + 61)],
+  });
   const errors: string[] = [];
   const log = console.error;
   console.error = (...args: unknown[]) => {
@@ -522,8 +533,6 @@ test("a print before the expiry or after the close is skipped on the minute pass
   try {
     assert.equal((await call(ctx.oracle.url, "/api/issue", {}, "test-token")).status, 200);
     assert.equal((await call(ctx.oracle.url, "/api/deploy", {}, "test-token")).status, 200);
-    assert.equal((await call(ctx.oracle.url, "/api/samples", { price: "10000000", time: expiry - 1 }, "test-token")).status, 200);
-    assert.equal((await call(ctx.oracle.url, "/api/samples", { price: "10000000", time: later + 61 }, "test-token")).status, 200);
     await ctx.oracle.publishAnnounced();
     assert.equal(ctx.submitted.length, 0);
     assert.deepEqual(errors, []);
@@ -546,13 +555,23 @@ test("the minute pass publishes an announced expiry once a sample exists", async
   const later = expiry + 86_400;
   const missed = expiry - 120;
   const announced = new Set<number>([later, expiry, missed]);
-  const ctx = await boot({ now: () => expiry + 60, announcedExpiries: () => announced });
+  const empty = await boot({ now: () => expiry + 60, announcedExpiries: () => announced });
+  try {
+    assert.equal((await call(empty.oracle.url, "/api/issue", {}, "test-token")).status, 200);
+    assert.equal((await call(empty.oracle.url, "/api/deploy", {}, "test-token")).status, 200);
+    await empty.oracle.publishAnnounced();
+    assert.deepEqual((await call(empty.oracle.url, "/api/status")).json.fixings, []);
+  } finally {
+    await empty.close();
+  }
+  const ctx = await boot({
+    now: () => expiry + 60,
+    announcedExpiries: () => announced,
+    samples: [storedSample("10000000", expiry + 60)],
+  });
   try {
     assert.equal((await call(ctx.oracle.url, "/api/issue", {}, "test-token")).status, 200);
     assert.equal((await call(ctx.oracle.url, "/api/deploy", {}, "test-token")).status, 200);
-    await ctx.oracle.publishAnnounced();
-    assert.deepEqual((await call(ctx.oracle.url, "/api/status")).json.fixings, []);
-    assert.equal((await call(ctx.oracle.url, "/api/samples", { price: "10000000" }, "test-token")).status, 200);
     await ctx.oracle.publishAnnounced();
     const fixings = (await call(ctx.oracle.url, "/api/status")).json.fixings as { expiry: number; price: string }[];
     assert.equal(fixings.length, 1);
@@ -570,7 +589,7 @@ test("the minute pass publishes an announced expiry once a sample exists", async
 test("duePositionExpiries filters by beacon, freshness, predict grid, newest-first, and cap", () => {
   const ourTxid = "ee".repeat(32);
   const assetId = asset.AssetId.create(ourTxid, 0).toString();
-  const base = 1_700_000_100; // divisible by 300
+  const base = 1_700_000_100;
   const make = (over: Partial<OptionPosition>): OptionPosition => ({
     v: 1,
     type: "option_position",
@@ -594,19 +613,18 @@ test("duePositionExpiries filters by beacon, freshness, predict grid, newest-fir
   });
   const now = base + 1_800;
   const positions: OptionPosition[] = [
-    make({ rfq_id: "01".repeat(32), beacon_txid: "ff".repeat(32), expiry: base }), // foreign beacon
-    make({ rfq_id: "02".repeat(32), beacon_gidx: 1, expiry: base }), // wrong gidx
-    make({ rfq_id: "03".repeat(32), expiry: base - 3_600 }), // stale (> 1h old)
-    make({ rfq_id: "04".repeat(32), expiry: base + 60 }), // off 300s grid for predict
-    make({ rfq_id: "05".repeat(32), kind: 0, program_id: OPTION_VAULT_PROGRAM_ID, expiry: base + 60 }), // options don't need 300s grid
+    make({ rfq_id: "01".repeat(32), beacon_txid: "ff".repeat(32), expiry: base }),
+    make({ rfq_id: "02".repeat(32), beacon_gidx: 1, expiry: base }),
+    make({ rfq_id: "03".repeat(32), expiry: base - 3_600 }),
+    make({ rfq_id: "04".repeat(32), expiry: base + 60 }),
+    make({ rfq_id: "05".repeat(32), kind: 0, program_id: OPTION_VAULT_PROGRAM_ID, expiry: base + 60 }),
     make({ rfq_id: "06".repeat(32), expiry: base + 300 }),
     make({ rfq_id: "07".repeat(32), expiry: base + 600 }),
     make({ rfq_id: "08".repeat(32), expiry: base + 900 }),
     make({ rfq_id: "09".repeat(32), expiry: base + 1_200 }),
-    make({ rfq_id: "0a".repeat(32), expiry: base + 1_800 }), // not due yet (lag 60)
+    make({ rfq_id: "0a".repeat(32), expiry: base + 1_800 }),
   ];
   const due = duePositionExpiries(positions, { assetId, now, done: new Set() });
-  // Capped at 4 newest-first: base+1200, base+900, base+600, base+300 (base+60 option is 5th so deferred).
   assert.deepEqual(due.map((item) => item.expiry), [base + 1_200, base + 900, base + 600, base + 300]);
   const done = new Set([base + 1_200]);
   const next = duePositionExpiries(positions, { assetId, now, done });
@@ -674,6 +692,7 @@ test("publishAnnounced requires a derived vault address funded to at least colla
   ];
   const ctx = await boot({
     now: () => expiry + 120,
+    samples: [storedSample("9800000", expiry - 600 + 10), storedSample("9900000", expiry - 300 + 10), storedSample("10000000", expiry + 10)],
     announcedPositions: () => announced,
     onPublishedExpiry: (exp) => pruned.push(exp),
     indexer: {
@@ -716,13 +735,50 @@ test("publishAnnounced requires a derived vault address funded to at least colla
     assert.equal(issued.status, 200);
     assetId = String(issued.json.assetId);
     assert.equal((await call(ctx.oracle.url, "/api/deploy", {}, "test-token")).status, 200);
-    assert.equal((await call(ctx.oracle.url, "/api/samples", { price: "9800000", time: expiry - 600 + 10 }, "test-token")).status, 200);
-    assert.equal((await call(ctx.oracle.url, "/api/samples", { price: "9900000", time: expiry - 300 + 10 }, "test-token")).status, 200);
-    assert.equal((await call(ctx.oracle.url, "/api/samples", { price: "10000000", time: expiry + 10 }, "test-token")).status, 200);
     await ctx.oracle.publishAnnounced();
     const fixings = (await call(ctx.oracle.url, "/api/status")).json.fixings as { expiry: number; price: string }[];
     assert.deepEqual(fixings.map((f) => f.expiry), [expiry]);
     assert.deepEqual(pruned, [expiry]);
+  } finally {
+    await ctx.close();
+  }
+});
+
+test("an intent is stored only when the pinned DIA key signed it", async () => {
+  assert.equal(intentSigned(RECORDED), true);
+  const ctx = await boot({ now: () => RECORDED.time });
+  try {
+    assert.equal((await call(ctx.oracle.url, "/api/issue", {}, "test-token")).status, 200);
+    const bad = await call(ctx.oracle.url, "/api/intent", { ...recordedBody(), sig: "ab".repeat(64) }, "test-token");
+    assert.equal(bad.status, 400);
+    assert.equal(bad.json.error, "dia signature");
+    const tampered = await call(ctx.oracle.url, "/api/intent", recordedBody({ ...RECORDED, price: RECORDED.price + 1n }), "test-token");
+    assert.equal(tampered.status, 400);
+    assert.equal(tampered.json.error, "dia signature");
+    const stored = await call(ctx.oracle.url, "/api/intent", recordedBody(), "test-token");
+    assert.equal(stored.status, 200, JSON.stringify(stored.json));
+    assert.equal(stored.json.price, centsOf(RECORDED.price).toString());
+    assert.equal(stored.json.time, RECORDED.time);
+    const again = await call(ctx.oracle.url, "/api/intent", recordedBody(), "test-token");
+    assert.equal(again.status, 200);
+    assert.equal(again.json.duplicate, true);
+    assert.equal((await call(ctx.oracle.url, "/api/status")).json.samples, 1);
+  } finally {
+    await ctx.close();
+  }
+});
+
+test("ingestIntent stores distinct DIA intents immediately and skips before issue", async () => {
+  const ctx = await boot({ now: () => RECORDED.time });
+  try {
+    await ctx.oracle.ingestIntent(RECORDED);
+    assert.equal((await call(ctx.oracle.url, "/api/status")).json.samples, 0);
+    assert.equal((await call(ctx.oracle.url, "/api/issue", {}, "test-token")).status, 200);
+    await ctx.oracle.ingestIntent(RECORDED);
+    await ctx.oracle.ingestIntent(RECORDED);
+    const status = await call(ctx.oracle.url, "/api/status");
+    assert.equal(status.json.samples, 1);
+    assert.equal((status.json.latest as { price?: string } | null)?.price, centsOf(RECORDED.price).toString());
   } finally {
     await ctx.close();
   }

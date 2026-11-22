@@ -11,7 +11,7 @@
   <h1>Oracle</h1>
   <section id="status"></section>
   <section>
-    <p class="muted">One key signs prices. It stays on the server. The admin token is sent only as a bearer.</p>
+    <p class="muted">DIA signs the price. The admin token is sent only as a bearer. It does not sign the price.</p>
     <label>Admin token <input id="token" type="password" autocomplete="off"></label>
     <button id="issue" type="button">Issue</button>
     <button id="recover" type="button">Recover pending</button>
@@ -31,20 +31,10 @@
     <label>Strike, USD cents <input id="strike" inputmode="numeric" autocomplete="off"></label>
     <label>Collateral, sats <input id="collateral" inputmode="numeric" autocomplete="off"></label>
     <p id="payout" class="mono"></p>
-    <p class="muted">Publish is separate. It records this price, then writes it on the beacon for one expiry so the settler can spend the vault.</p>
+    <p class="muted">Publish writes the DIA print whose timestamp sits in [expiry, expiry + 60].</p>
     <label>Expiry, unix seconds <input id="expiry" inputmode="numeric" autocomplete="off"></label>
-    <label>Sample time, unix seconds <input id="sample-time" inputmode="numeric" autocomplete="off"></label>
-    <p class="muted">Testing only. Leave sample time blank and the server stamps its own clock. The field is never filled in for you. A value is the signed sample time. Publish can select it for this expiry when it sits in [expiry, expiry + 60].</p>
     <button id="publish-price" type="button">Publish price</button>
     <p id="publish-error" class="err"></p>
-  </section>
-  <section>
-    <p class="muted">This records one price and does not publish it. Blank sample time uses the server clock. The service also stores a Deribit index sample about once a minute.</p>
-    <form id="sample">
-      <label>Price, USD cents <input id="price" inputmode="numeric"></label>
-      <button type="submit">Record price</button>
-    </form>
-    <p id="sample-error" class="err"></p>
   </section>
 </main>
 <script type="module" src="/page.js"></script>

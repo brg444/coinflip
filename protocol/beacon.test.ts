@@ -40,7 +40,6 @@ const FIXTURE = {
   beaconSats: 330n,
   readFee: 0n,
   expiryLag: 60n,
-  threshold: 3n,
   domain: new TextEncoder().encode("BTCUSD-FIX"),
   /** Display-order txid whose script form is 0x07 followed by zeros. */
   assetTxid: "00".repeat(31) + "07",
@@ -75,8 +74,6 @@ async function buildFixture() {
   const id: BeaconId = beaconIdOf(assetId);
   const beacon = bindBeacon({
     id,
-    signers: [adminPk],
-    threshold: 1n,
     domain: FIXTURE.domain,
     expiryLag: FIXTURE.expiryLag,
     readFee: FIXTURE.readFee,
@@ -115,9 +112,11 @@ async function buildFixture() {
   const attest = buildAttest({
     beacon: { script: beacon.script, coin: coinOf(genesis, FIXTURE.beaconSats), state: genesisState(), id: assetId },
     expiry: FIXTURE.expiry,
-    price: FIXTURE.price,
+    price: FIXTURE.price * 10n ** 16n,
     time: FIXTURE.expiry,
-    sigs: [dummy, dummy, dummy, dummy, dummy],
+    nonce: 1n,
+    intentExpiry: FIXTURE.expiry + 3600n,
+    sig: dummy,
     next: fixed,
     checkpoint,
   });
@@ -189,7 +188,8 @@ test("slot offsets match both contract sources", () => {
   assert.ok(beacon.includes("const int VALUE_AT = 17;"));
   assert.ok(beacon.includes("const int HISTORY_AT = 49;"));
   assert.ok(beacon.includes("const int HISTORY = 280;"));
-  assert.ok(beacon.includes("num2bin(expiry, 8) + num2bin(price, 8) + num2bin(time, 8)"));
+  assert.ok(beacon.includes("num2bin(cents, 8) + num2bin(time, 8) + num2bin(0, 16)"));
+  assert.ok(beacon.includes("0x100211ee120bca9f272034d98b1b026bb4ab735ebeb5da8be6a69bf7ee0ea24cfd48"));
   assert.ok(beacon.includes('require(time >= expiry, "sample before expiry")'));
   const vault = readFileSync(here("../contracts/option_vault.ark"), "utf8");
   assert.ok(vault.includes('require(sampleTime >= expiry, "sample before expiry")'));
@@ -200,7 +200,8 @@ test("the beacon leaves check what the design says", () => {
   const count = (asm: readonly unknown[] | undefined, name: string) => (asm ?? []).filter((token) => token === name).length;
   const beacon = beaconProgram();
   const attest = beacon.functions.attest?.arkadeScript?.asm;
-  assert.equal(count(attest, "CHECKSIGFROMSTACK"), 5);
+  assert.equal(count(attest, "CHECKSIGFROMSTACK"), 1);
+  assert.equal(count(attest, "DIGEST"), 2);
   assert.equal(count(attest, "INSPECTINPUTPACKET"), 1);
   assert.equal(count(attest, "INSPECTPACKET"), 1);
   assert.equal(count(attest, "CHECKTIME"), 1);
@@ -213,7 +214,7 @@ test("the beacon leaves check what the design says", () => {
   assert.deepEqual(Object.keys(beacon.functions), ["attest", "read", "migrate", "unilateral"]);
 });
 
-test("bindings are deterministic Mutinynet addresses and refuse a bad committee", async () => {
+test("bindings are deterministic Mutinynet addresses", async () => {
   const built = await buildFixture();
   assert.ok(built.beacon.address.startsWith("tark1"));
   assert.ok(built.vault.address.startsWith("tark1"));
@@ -229,8 +230,6 @@ test("bindings are deterministic Mutinynet addresses and refuse a bad committee"
   const emulatorKey = await key(2).compressedPublicKey();
   const againBound = bindBeacon({
     id: built.vault.args.beaconTxid ? { txid: built.vault.args.beaconTxid as Uint8Array, gidx: 0n } : { txid: new Uint8Array(32), gidx: 0n },
-    signers: [await key(9).xOnlyPublicKey()],
-    threshold: 1n,
     domain: FIXTURE.domain,
     expiryLag: 60n,
     readFee: 0n,
@@ -298,5 +297,5 @@ test("the settle transaction has the documented layout", async () => {
   assert.deepEqual(attestExt.getAssetPacket()!.groups[0]!.inputs.map((i) => i.input), [{ type: 1, vin: 0, amount: 1n }]);
   assert.equal(bytesToHex(attestExt.getPacketByType(STATE_TYPE)!.serialize()), bytesToHex(built.fixed));
   assert.ok((attestExt.getEmulatorPacket()!.entries[0]!.witness?.length ?? 0) > 64);
-  assert.deepEqual(built.beacon.script.functionByName("attest")!.def.arkadeScript?.witness?.slice(0, 4), ["sigs.4", "sigs.3", "sigs.2", "sigs.1"]);
+  assert.deepEqual(built.beacon.script.functionByName("attest")!.def.arkadeScript?.witness?.slice(0, 4), ["sig", "intentExpiry", "nonce", "time"]);
 });
