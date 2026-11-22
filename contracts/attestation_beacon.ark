@@ -107,7 +107,7 @@ contract AttestationBeacon(
     continues(next);
   }
 
-  @allow(unsigned-spend-path, "permissionless read preserves state and pays readFee")
+  @allow(unsigned-spend-path, "permissionless read preserves state and pays readFee; batch-expiry inheritance still applies")
   function read(int selfIndex) {
     require(selfIndex == this.activeInputIndex, "self index");
     bytes state = tx.packet(STATE);
