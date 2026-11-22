@@ -10,7 +10,8 @@ import { ArkAddress, asset, CSVMultisigTapscript, Extension, networks, SingleKey
 import { base64, hex } from "@scure/base";
 
 import { beaconIdOf, bindBeacon, decodeState, genesisState, nextState, priceValue, sampleDigest, statePacketOf } from "../protocol/beacon.ts";
-import { EXIT, OPTION_VAULT_PROGRAM_ID, PAIR, PREDICT_VAULT_PROGRAM_ID } from "../protocol/constants.ts";
+import { BEACON_READ_FEE, EXIT, OPTION_VAULT_PROGRAM_ID, PAIR, PREDICT_VAULT_PROGRAM_ID } from "../protocol/constants.ts";
+import { bindContracts } from "../protocol/contracts.ts";
 import { statePacket } from "../protocol/cospend.ts";
 import { bytesToHex } from "../protocol/hex.ts";
 import type { OptionPosition } from "../protocol/messages.ts";
@@ -612,58 +613,64 @@ test("duePositionExpiries filters by beacon, freshness, predict grid, newest-fir
   assert.deepEqual(next.map((item) => item.expiry), [base + 900, base + 600, base + 300, base + 60]);
 });
 
-test("publishAnnounced skips announced positions without a live vault on the indexer", async () => {
-  const expiry = 1_700_000_100; // divisible by 300
+test("publishAnnounced requires a derived vault address funded to at least collateral", async () => {
+  const expiry = 1_700_000_100;
   const ourTxid = "ee".repeat(32);
   const serverKey = await SingleKey.fromHex(hex.encode(secret(1))).xOnlyPublicKey();
-  const liveAddr = new ArkAddress(serverKey, new Uint8Array(32).fill(5), networks.mutinynet.hrp);
-  const emptyAddr = new ArkAddress(serverKey, new Uint8Array(32).fill(6), networks.mutinynet.hrp);
-  const liveScriptHex = bytesToHex(liveAddr.pkScript);
+  const emulatorKey = await SingleKey.fromHex(hex.encode(secret(2))).compressedPublicKey();
+  const deskPk = await SingleKey.fromHex(hex.encode(secret(21))).xOnlyPublicKey();
+  const bettorPk = await SingleKey.fromHex(hex.encode(secret(22))).xOnlyPublicKey();
+  const beacon = beaconIdOf(asset.AssetId.create(ourTxid, 0));
+  const derive = (exp: number) => bindContracts({
+    kind: 2,
+    strike: 8_000_000n,
+    collateral: 95_000n,
+    premium: 50_000n,
+    expiry: BigInt(exp),
+    deadline: BigInt(exp),
+    exit: EXIT,
+    writerPk: deskPk,
+    holderPk: bettorPk,
+    holderPayoutKey: bettorPk,
+    beacon,
+    readFee: BEACON_READ_FEE,
+    serverKey,
+    emulatorKey,
+  });
+  const liveVault = derive(expiry);
+  const shortVault = derive(expiry - 300);
+  const arbitraryAddr = new ArkAddress(serverKey, new Uint8Array(32).fill(5), networks.mutinynet.hrp);
+  const liveScriptHex = bytesToHex(liveVault.vaultPkScript);
+  const shortScriptHex = bytesToHex(shortVault.vaultPkScript);
+  const arbitraryScriptHex = bytesToHex(arbitraryAddr.pkScript);
   const pruned: number[] = [];
   let creating: Transaction | undefined;
   const submitted: string[] = [];
   let assetId = "";
+  const makePos = (rfqByte: string, exp: number, bound: ReturnType<typeof derive>, vaultAddress: string): OptionPosition => ({
+    v: 1,
+    type: "option_position",
+    program_id: PREDICT_VAULT_PROGRAM_ID,
+    rfq_id: rfqByte.repeat(32),
+    pair: PAIR,
+    kind: 2,
+    collateral: "95000",
+    strike: "8000000",
+    expiry: exp,
+    exit: Number(EXIT),
+    writer_pubkey: bytesToHex(deskPk),
+    writer_pk_script: bytesToHex(bound.writerPkScript),
+    holder_pubkey: bytesToHex(bettorPk),
+    holder_pk_script: bytesToHex(bound.holderPkScript),
+    beacon_txid: ourTxid,
+    beacon_gidx: 0,
+    vault_address: vaultAddress,
+    fill_txid: rfqByte.repeat(32),
+  });
   const announced: OptionPosition[] = [
-    {
-      v: 1,
-      type: "option_position",
-      program_id: PREDICT_VAULT_PROGRAM_ID,
-      rfq_id: "aa".repeat(32),
-      pair: PAIR,
-      kind: 2,
-      collateral: "95000",
-      strike: "8000000",
-      expiry: expiry - 300,
-      exit: 2048,
-      writer_pubkey: "21".repeat(32),
-      writer_pk_script: `5120${"21".repeat(32)}`,
-      holder_pubkey: "22".repeat(32),
-      holder_pk_script: `5120${"22".repeat(32)}`,
-      beacon_txid: ourTxid,
-      beacon_gidx: 0,
-      vault_address: emptyAddr.encode(),
-      fill_txid: "11".repeat(32),
-    },
-    {
-      v: 1,
-      type: "option_position",
-      program_id: PREDICT_VAULT_PROGRAM_ID,
-      rfq_id: "bb".repeat(32),
-      pair: PAIR,
-      kind: 2,
-      collateral: "95000",
-      strike: "8000000",
-      expiry,
-      exit: 2048,
-      writer_pubkey: "21".repeat(32),
-      writer_pk_script: `5120${"21".repeat(32)}`,
-      holder_pubkey: "22".repeat(32),
-      holder_pk_script: `5120${"22".repeat(32)}`,
-      beacon_txid: ourTxid,
-      beacon_gidx: 0,
-      vault_address: liveAddr.encode(),
-      fill_txid: "22".repeat(32),
-    },
+    makePos("aa", expiry - 600, liveVault, arbitraryAddr.encode()),
+    makePos("bb", expiry - 300, shortVault, shortVault.vaultAddress),
+    makePos("cc", expiry, liveVault, liveVault.vaultAddress),
   ];
   const ctx = await boot({
     now: () => expiry + 120,
@@ -672,10 +679,13 @@ test("publishAnnounced skips announced positions without a live vault on the ind
     indexer: {
       async getVtxos(opts) {
         if (opts.scripts.includes(liveScriptHex)) {
-          return { vtxos: [{ txid: "22".repeat(32), vout: 1, value: 95_000 }] };
+          return { vtxos: [{ txid: "cc".repeat(32), vout: 1, value: 95_000 }] };
         }
-        if (opts.scripts.includes(bytesToHex(emptyAddr.pkScript))) {
-          return { vtxos: [] };
+        if (opts.scripts.includes(shortScriptHex)) {
+          return { vtxos: [{ txid: "bb".repeat(32), vout: 1, value: 1_000 }] };
+        }
+        if (opts.scripts.includes(arbitraryScriptHex)) {
+          return { vtxos: [{ txid: "aa".repeat(32), vout: 1, value: 95_000 }] };
         }
         const script = hex.decode(opts.scripts[0]!);
         const last = submitted.at(-1);
@@ -695,9 +705,9 @@ test("publishAnnounced skips announced positions without a live vault on the ind
       },
     },
     emulator: {
-      async submitTx(arkTx) {
+      async submitTx(arkTx, checkpointTxs = []) {
         submitted.push(arkTx);
-        return { signedArkTx: arkTx };
+        return { signedArkTx: arkTx, signedCheckpointTxs: checkpointTxs };
       },
     },
   });
@@ -706,10 +716,10 @@ test("publishAnnounced skips announced positions without a live vault on the ind
     assert.equal(issued.status, 200);
     assetId = String(issued.json.assetId);
     assert.equal((await call(ctx.oracle.url, "/api/deploy", {}, "test-token")).status, 200);
+    assert.equal((await call(ctx.oracle.url, "/api/samples", { price: "9800000", time: expiry - 600 + 10 }, "test-token")).status, 200);
     assert.equal((await call(ctx.oracle.url, "/api/samples", { price: "9900000", time: expiry - 300 + 10 }, "test-token")).status, 200);
     assert.equal((await call(ctx.oracle.url, "/api/samples", { price: "10000000", time: expiry + 10 }, "test-token")).status, 200);
     await ctx.oracle.publishAnnounced();
-    // Only the live vault's expiry was published; the empty vault's expiry was ignored.
     const fixings = (await call(ctx.oracle.url, "/api/status")).json.fixings as { expiry: number; price: string }[];
     assert.deepEqual(fixings.map((f) => f.expiry), [expiry]);
     assert.deepEqual(pruned, [expiry]);
