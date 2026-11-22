@@ -13,6 +13,7 @@
     "dev": "node scripts/dev.mjs",
     "build": "node scripts/build.mjs",
     "check": "node scripts/check.mjs",
+    "compile:contracts": "node scripts/compile-contracts.mjs",
     "test": "node --experimental-strip-types --test app/settle-math.test.mjs app/account.test.mjs app/wallet-link.test.mjs app/src/browser-crypto.test.ts app/src/restore.test.ts app/src/position-status.test.ts app/src/rfq.test.ts protocol/protocol.test.ts protocol/lifecycle.test.ts protocol/standing.test.ts protocol/intent-state.test.ts protocol/deribit.test.ts protocol/beacon.test.ts protocol/sqlite-storage.test.ts contracts/index.test.ts oracle/service.test.ts oracle/preview.test.ts desk/book.test.ts desk/digest.test.ts desk/fill.test.ts desk/finalize.test.ts desk/maintain.test.ts settle/settle.test.ts settle/predict.test.ts viz/flow.test.mjs && pnpm check",
     "settle": "node --experimental-strip-types settle/main.ts",
     "desk": "node --experimental-strip-types --experimental-eventsource desk/main.ts",
@@ -29,6 +30,7 @@
     "nostr-tools": "2.17.4"
   },
   "devDependencies": {
+    "@arkade-os/compiler": "0.1.0-rc.1",
     "@types/node": "22.19.1",
     "esbuild": "0.25.10",
     "typescript": "5.9.2"
