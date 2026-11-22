@@ -99,22 +99,14 @@
           "name": "swap",
           "witness": [
             {
-              "name": "serverSig",
-              "type": "signature",
-              "encoding": "schnorr-64",
-              "injected": true
-            },
-            {
-              "name": "emulatorSig",
+              "name": "operatorSig",
               "type": "signature",
               "encoding": "schnorr-64",
               "injected": true
             }
           ],
           "asm": [
-            "<SERVER_KEY>",
-            "OP_CHECKSIGVERIFY",
-            "<EMULATOR_KEY:swap>",
+            "<OPERATOR_KEY:swap>",
             "OP_CHECKSIG"
           ]
         }
@@ -130,9 +122,8 @@
           }
         ],
         "asm": [
-          "OP_INSPECTLOCKTIME",
           "<expirationTime>",
-          "OP_GREATERTHANOREQUAL",
+          "OP_CHECKTIME",
           "OP_VERIFY",
           "<makerPk>",
           "OP_CHECKSIG"
@@ -143,22 +134,14 @@
           "name": "cancel",
           "witness": [
             {
-              "name": "serverSig",
-              "type": "signature",
-              "encoding": "schnorr-64",
-              "injected": true
-            },
-            {
-              "name": "emulatorSig",
+              "name": "operatorSig",
               "type": "signature",
               "encoding": "schnorr-64",
               "injected": true
             }
           ],
           "asm": [
-            "<SERVER_KEY>",
-            "OP_CHECKSIGVERIFY",
-            "<EMULATOR_KEY:cancel>",
+            "<OPERATOR_KEY:cancel>",
             "OP_CHECKSIG"
           ]
         }
@@ -187,20 +170,24 @@
       ]
     }
   ],
+  "contracts": {
+    "SingleSig": "sha256:540e20c5963c375e9a938a4adca729d6129ec88778ed9170ef90094eb6c29acc"
+  },
+  "codeHash": "sha256:9fec056bf66760f0648bf20f88a32e9c0d3b7bb287782846b6ab96c36f0e42aa",
   "source": {
     "entry": "non_interactive_swap.ark",
     "files": {
-      "non_interactive_swap.ark": "pragma arkade ^0.1.0;\n\n// Non-Interactive Swap Contract\n// Allows users to exchange assets without requiring both parties to be online simultaneously.\n//\n// Paths:\n// - swap cooperative: takerSig + serverSig + OP_INSPECT* (trustless via introspection)\n// - cancel cooperative: makerSig + serverSig + after(expiration)\n// - unilateral: makerSig + CSV (maker recovers if no taker)\n\nimport \"single_sig.ark\";\n\ncontract NonInteractiveSwap(\n  // Maker's public key (creator of the swap offer)\n  pubkey makerPk,\n  // Asset ID the maker is offering (locked in this contract)\n  bytes32 offerAssetIdTxid,\n  int offerAssetIdGidx,\n  // Amount of offer asset locked\n  int offerAmount,\n  // Asset ID the maker wants to receive\n  bytes32 wantAssetIdTxid,\n  int wantAssetIdGidx,\n  // Amount of want asset required for the swap\n  int wantAmount,\n  // Expiration timestamp (block height) after which maker can cancel\n  int expirationTime,\n  // Exit timelock in blocks\n  int exit\n) {\n  // Swap: Any taker can fulfill - introspection makes cooperative path trustless\n  function swap(pubkey takerPk, signature takerSig, ScriptPubKey takerScriptPubKey) {\n    // Taker must sign to authorize spending their wantAsset\n    require(checkSig(takerSig, takerPk), \"invalid taker signature\");\n\n    // Introspection verifies the atomic exchange:\n    // Output 0: maker receives wantAsset\n    require(\n      tx.outputs[0].assets.lookup(wantAssetIdTxid, wantAssetIdGidx) >= wantAmount,\n      \"insufficient want asset for maker\"\n    );\n    require(\n      tx.outputs[0].script == new SingleSig(makerPk, exit),\n      \"output 0 not spendable by maker\"\n    );\n\n    // Output 1: taker receives offerAsset\n    require(\n      tx.outputs[1].assets.lookup(offerAssetIdTxid, offerAssetIdGidx) >= offerAmount,\n      \"insufficient offer asset for taker\"\n    );\n    require(\n      tx.outputs[1].script == takerScriptPubKey,\n      \"output 1 not spendable by taker\"\n    );\n  }\n\n  // Cancel: Maker reclaims after expiration if no taker\n  function cancel(signature makerSig) {\n    require(tx.locktime >= expirationTime, \"swap not expired\");\n    require(checkSig(makerSig, makerPk), \"invalid maker signature\");\n  }\n\n  // Unilateral exit (CSV): maker recovers after exit delay.\n  function unilateral(signature makerSig) tapscript {\n    require(older(exit));\n    require(checkSig(makerSig, makerPk));\n  }\n}\n",
+      "non_interactive_swap.ark": "pragma arkade ^0.1.0;\n\n// Non-Interactive Swap Contract\n// Allows users to exchange assets without requiring both parties to be online simultaneously.\n//\n// Paths:\n// - swap cooperative: takerSig + serverSig + OP_INSPECT* (trustless via introspection)\n// - cancel cooperative: makerSig + serverSig + after(expiration)\n// - unilateral: makerSig + CSV (maker recovers if no taker)\n\nimport \"single_sig.ark\";\n\ncontract NonInteractiveSwap(\n  // Maker's public key (creator of the swap offer)\n  pubkey makerPk,\n  // Asset ID the maker is offering (locked in this contract)\n  bytes32 offerAssetIdTxid,\n  int offerAssetIdGidx,\n  // Amount of offer asset locked\n  int offerAmount,\n  // Asset ID the maker wants to receive\n  bytes32 wantAssetIdTxid,\n  int wantAssetIdGidx,\n  // Amount of want asset required for the swap\n  int wantAmount,\n  // Expiration timestamp (block height) after which maker can cancel\n  int expirationTime,\n  // Exit timelock in blocks\n  int exit\n) {\n  // Swap: Any taker can fulfill - introspection makes cooperative path trustless\n  @allow(signer-from-witness, \"open swap allows any taker who funds wantAsset\")\n  function swap(pubkey takerPk, signature takerSig, ScriptPubKey takerScriptPubKey) {\n    // Taker must sign to authorize spending their wantAsset\n    require(checkSig(takerSig, takerPk), \"invalid taker signature\");\n\n    // Introspection verifies the atomic exchange:\n    // Output 0: maker receives wantAsset\n    require(\n      tx.outputs[0].assets.lookup(AssetId { txid: wantAssetIdTxid, gidx: wantAssetIdGidx }) >= wantAmount,\n      \"insufficient want asset for maker\"\n    );\n    require(\n      tx.outputs[0].script == new SingleSig(makerPk, exit),\n      \"output 0 not spendable by maker\"\n    );\n\n    // Output 1: taker receives offerAsset\n    require(\n      tx.outputs[1].assets.lookup(AssetId { txid: offerAssetIdTxid, gidx: offerAssetIdGidx }) >= offerAmount,\n      \"insufficient offer asset for taker\"\n    );\n    require(\n      tx.outputs[1].script == takerScriptPubKey,\n      \"output 1 not spendable by taker\"\n    );\n  }\n\n  // Cancel: Maker reclaims after expiration if no taker\n  function cancel(signature makerSig) {\n    require(checkTime(expirationTime), \"swap not expired\");\n    require(checkSig(makerSig, makerPk), \"invalid maker signature\");\n  }\n\n  // Unilateral exit (CSV): maker recovers after exit delay.\n  function unilateral(signature makerSig) tapscript {\n    require(older(exit));\n    require(checkSig(makerSig, makerPk));\n  }\n}\n",
       "single_sig.ark": "pragma arkade ^0.1.0;\n\ncontract SingleSig(\n  pubkey user,\n  int exit\n) {\n  // Single signature spend path\n  function spend(signature userSig) {\n    require(checkSig(userSig, user));\n  }\n\n  // Unilateral exit (CSV).\n  function unilateral(signature userSig) tapscript {\n    require(older(exit));\n    require(checkSig(userSig, user));\n  }\n}\n"
     }
   },
   "compiler": {
     "name": "arkadec",
-    "version": "0.1.0-rc.1",
+    "version": "0.1.0",
     "options": {
       "optimize": true
     }
   },
-  "updatedAt": "2026-11-07T19:25:28.721481078+00:00",
-  "fingerprint": "sha256:f255d63e5bf5eafec2d3237a41064ec06701fe1cb24565bd69029a3522e494f8"
+  "updatedAt": "2026-11-22T12:52:35.891+00:00",
+  "fingerprint": "sha256:b3cfe61c8ada16afe4b1291d8c5d33ef7b4e9e381b7203dc5b0ecdd33b6f6f6c"
 }

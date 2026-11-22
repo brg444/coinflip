@@ -124,7 +124,7 @@ Emulator:
 | Fixing published before the settlement minute closes | blocked when `expiryLag ≥ 0`: `checkTime(expiry + expiryLag)`. |
 | A print from before its expiry written into that slot | blocked: `time >= expiry`. |
 | One DIA print written into an expiry more than 60 seconds away | blocked: `time` must sit in `[expiry, expiry + expiryLag]`. |
-| Consumer attaches a forged previous transaction for input 1 | not blocked by any script. The VM's `OP_INSPECTINPUTPACKET` takes the previous transaction from its fetcher without comparing a hash; the compiler's test harness maps it by outpoint with no check, and a probe against that harness accepted a forged previous transaction. Whether the emulator service binds the attached transaction to the input, through the checkpoint hop, is unverified here. Everything that reads a previous packet, this design and the LayerZero example alike, rests on it. |
+| Consumer attaches a forged previous transaction for input 1 | blocked in `arkade-os/emulator` v0.0.10, which fetches the creating virtual tx from `arkd` and validates the input outpoint binding across the checkpoint hop (earlier compiler test harnesses did not verify the outpoint hash). |
 | Two settlements race for the beacon | one is rejected and rebuilt on the new outpoint. Bounded, not impossible. |
 | Someone reads the beacon to move it | costs `readFee` per read. The service sets that to 1000, above dust and paid by the vault, and the sats stay on the beacon. Each read still lengthens the beacon's off-chain ancestry. |
 | The same DIA print attested on another beacon | the digest does not name `ctrlTxid`. The price is the public DIA print. A consumer trusts the asset id it was given. |
@@ -139,7 +139,7 @@ The signature is checked inside `attest`. What stays off-chain is whether the si
 
 ## 5. Checked
 
-Both contracts compile with `arkadec` 0.1.0-rc.1. It warns that `OptionVault.settle` inspects `tx.outputs[1].script` more than once, and that `AttestationBeacon.attest` uses `checkSigFromStack` where an invalid signature fails the spend. The artifacts are committed. `AttestationBeacon.attest` has one `CHECKSIGFROMSTACK`, two `DIGEST`, one `DIV`, and one `MOD`. `OptionVault.settle` has no `CHECKSIGFROMSTACK`, one `INSPECTINASSETLOOKUP`, one `INSPECTINPUTPACKET`, and checks the stored sample time.
+All contracts compile with `@arkade-os/compiler` 0.1.0 with zero unexplained diagnostics (`int2bytes`/`bytes2int`, `AssetId`, single-inspection output script bindings, and `@allow` annotations on intentional covenant paths). The artifacts are committed. `AttestationBeacon.attest` has one `CHECKSIGFROMSTACK`, two `DIGEST`, one `DIV`, and one `MOD`. `OptionVault.settle` has no `CHECKSIGFROMSTACK`, one `INSPECTINASSETLOOKUP`, one `INSPECTINPUTPACKET`, and checks the stored sample time.
 
 `pnpm test` covers the state codec, the artifacts, the bindings, the deploy outputs, the oracle service, and the layout of the transactions `cospend.ts` builds.
 

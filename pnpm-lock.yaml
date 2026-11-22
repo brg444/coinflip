@@ -10,7 +10,7 @@ importers:
     dependencies:
       '@arkade-os/sdk':
         specifier: 0.5.11
-        version: 0.5.11(@arkade-os/compiler@0.1.0-rc.1)
+        version: 0.5.11(@arkade-os/compiler@0.1.0)
       '@noble/curves':
         specifier: 2.4.0
         version: 2.4.0
@@ -25,8 +25,8 @@ importers:
         version: 2.26.1(nostr-wasm@0.1.0)(typescript@5.9.2)
     devDependencies:
       '@arkade-os/compiler':
-        specifier: 0.1.0-rc.1
-        version: 0.1.0-rc.1
+        specifier: 0.1.0
+        version: 0.1.0
       '@types/node':
         specifier: 22.19.1
         version: 22.19.1
@@ -39,8 +39,8 @@ importers:
 
 packages:
 
-  '@arkade-os/compiler@0.1.0-rc.1':
-    resolution: {integrity: sha512-CEdNBYpq7qcb4j1bMyOzgOHDVnFs5CcduSTbSwGLcZT1mVdF5oDv6k1E9fddnWvVExNrYWwZEV9C8UcEYgl3pg==}
+  '@arkade-os/compiler@0.1.0':
+    resolution: {integrity: sha512-GNiltjTqAvIGclUSGbgIvb+OkpDY5c7hrml5WvhSH5oJv7zrytTVqvDmplOp+nrWpMpnl9rfQs2j/sAI902J3g==}
     engines: {node: '>=22.12.0'}
 
   '@arkade-os/sdk@0.5.11':
@@ -392,9 +392,9 @@ packages:
 
 snapshots:
 
-  '@arkade-os/compiler@0.1.0-rc.1': {}
+  '@arkade-os/compiler@0.1.0': {}
 
-  '@arkade-os/sdk@0.5.11(@arkade-os/compiler@0.1.0-rc.1)':
+  '@arkade-os/sdk@0.5.11(@arkade-os/compiler@0.1.0)':
     dependencies:
       '@bitcoinerlab/descriptors-scure': 3.1.7
       '@marcbachmann/cel-js': 8.0.0
@@ -407,7 +407,7 @@ snapshots:
       micro-packed: 0.11.1
       ws-electrumx-client: 1.0.5
     optionalDependencies:
-      '@arkade-os/compiler': 0.1.0-rc.1
+      '@arkade-os/compiler': 0.1.0
     transitivePeerDependencies:
       - '@ledgerhq/ledger-bitcoin'
       - bip32

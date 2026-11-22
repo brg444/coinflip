@@ -31,7 +31,7 @@
     "nostr-tools": "2.26.1"
   },
   "devDependencies": {
-    "@arkade-os/compiler": "0.1.0-rc.1",
+    "@arkade-os/compiler": "0.1.0",
     "@types/node": "22.19.1",
     "esbuild": "0.28.2",
     "typescript": "5.9.2"

@@ -39,20 +39,21 @@ contract AttestationBeacon(
     require(size(state) == SIZE, "state size");
     require(substr(state, 0, 1) == 0x01, "state version");
     require(tx.outputs[0].script == tx.input.current.script, "script");
-    require(tx.outputs[0].assets.lookup(ctrlTxid, ctrlGidx) == 1, "identity asset");
+    require(tx.outputs[0].assets.lookup(AssetId { txid: ctrlTxid, gidx: ctrlGidx }) == 1, "identity asset");
   }
 
   private function absent(bytes prev, int expiry) {
     int[8] slots = [9, 49, 89, 129, 169, 209, 249, 289];
     for (i, offset) in slots {
-      require(substr(prev, offset, 8) != num2bin(expiry, 8), "expiry already in a slot");
+      require(substr(prev, offset, 8) != int2bytes(expiry, 8), "expiry already in a slot");
     }
   }
 
   private function word(int n) bytes {
-    return reverseBytes(num2bin(n, 32));
+    return reverseBytes(int2bytes(n, 32));
   }
 
+  @allow(unsigned-spend-path, "authorized by pinned DIA EIP-712 signature")
   function attest(int expiry, int price, int time, int nonce, int intentExpiry, signature sig) {
     require(this.activeInputIndex == 0, "beacon is input 0");
     require(expiry > 1800, "expiry");
@@ -97,15 +98,16 @@ contract AttestationBeacon(
     require(substr(prev, 0, 1) == 0x01, "prev version");
     require(substr(next, 0, 1) == 0x01, "next version");
     absent(prev, expiry);
-    require(bin2num(substr(next, 1, 8)) == bin2num(substr(prev, 1, 8)) + 1, "round");
-    require(substr(next, SLOTS, 8) == num2bin(expiry, 8), "slot expiry");
-    let slotValue = num2bin(cents, 8) + num2bin(time, 8) + num2bin(0, 16);
+    require(bytes2int(substr(next, 1, 8)) == bytes2int(substr(prev, 1, 8)) + 1, "round");
+    require(substr(next, SLOTS, 8) == int2bytes(expiry, 8), "slot expiry");
+    let slotValue = int2bytes(cents, 8) + int2bytes(time, 8) + int2bytes(0, 16);
     require(substr(next, VALUE_AT, 32) == slotValue, "slot value");
     require(substr(next, HISTORY_AT, HISTORY) == substr(prev, SLOTS, HISTORY), "history");
     require(tx.outputs[0].value >= tx.input.current.value, "value");
     continues(next);
   }
 
+  @allow(unsigned-spend-path, "permissionless read preserves state and pays readFee")
   function read(int selfIndex) {
     require(selfIndex == this.activeInputIndex, "self index");
     bytes state = tx.packet(STATE);
@@ -114,17 +116,18 @@ contract AttestationBeacon(
     continues(state);
   }
 
+  @allow(unsigned-spend-path, "authorized by adminPk checkSigFromStack over round and next script")
   function migrate(ScriptPubKey next, signature opSig) {
     require(this.activeInputIndex == 0, "beacon is input 0");
     bytes state = tx.packet(STATE);
     require(state == tx.inputs[0].packet(STATE), "state carried");
     require(size(state) == SIZE, "state size");
-    int round = bin2num(substr(state, 1, 8));
-    let msg = sha256(domain + "migrate" + ctrlTxid + num2bin(ctrlGidx, 4) + num2bin(round, 8) + next.program);
+    int round = bytes2int(substr(state, 1, 8));
+    let msg = sha256(domain + "migrate" + ctrlTxid + int2bytes(ctrlGidx, 4) + int2bytes(round, 8) + next.program);
     require(checkSigFromStack(opSig, adminPk, msg), "oracle service");
     require(tx.outputs[0].script == next, "next script");
     require(tx.outputs[0].value >= tx.input.current.value, "value");
-    require(tx.outputs[0].assets.lookup(ctrlTxid, ctrlGidx) == 1, "identity asset");
+    require(tx.outputs[0].assets.lookup(AssetId { txid: ctrlTxid, gidx: ctrlGidx }) == 1, "identity asset");
   }
 
   function unilateral(signature adminSig) tapscript {
