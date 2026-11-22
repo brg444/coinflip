@@ -435,6 +435,11 @@ async function onRequest(message: RfqRequest, from: string) {
     await refuse(from, message.rfq_id, bad);
     return;
   }
+  const lagRefusal = beaconWindowRefusal(beaconExpiryLag);
+  if (lagRefusal) {
+    await refuse(from, message.rfq_id, lagRefusal);
+    return;
+  }
   if (isPredictRequest(message.profile)) {
     await onPredict(message as RfqRequest & { profile: PredictRequestProfile }, from, now);
     return;
@@ -515,11 +520,6 @@ async function onRequest(message: RfqRequest, from: string) {
     createdAt: now,
     clientPubkey: from,
   };
-  const lagRefusal = beaconWindowRefusal(beaconExpiryLag);
-  if (lagRefusal) {
-    await refuse(from, message.rfq_id, lagRefusal);
-    return;
-  }
   const bound = bindContracts(termsFor(row));
   if (bytesToHex(bound.writerPkScript) !== profile.writer_pk_script) {
     await refuse(from, message.rfq_id, "writer script");
@@ -554,16 +554,19 @@ async function onMessage({ from, message }: Incoming) {
 }
 
 let beaconExpiryLag: bigint | null = null;
-try {
-  const parsed = parseOracleBeacon(
-    await fetchOracleStatus(oracleUrl, AbortSignal.timeout(10_000)),
-    beaconDisplay.txid,
-    beaconDisplay.gidx,
-  );
-  if (parsed.ok) beaconExpiryLag = parsed.beacon.expiryLag;
-} catch {
-  beaconExpiryLag = null;
+async function refreshBeaconLag() {
+  try {
+    const parsed = parseOracleBeacon(
+      await fetchOracleStatus(oracleUrl, AbortSignal.timeout(10_000)),
+      beaconDisplay.txid,
+      beaconDisplay.gidx,
+    );
+    if (parsed.ok) beaconExpiryLag = parsed.beacon.expiryLag;
+  } catch {
+    // Keep previous reading; housekeeping retries while null.
+  }
 }
+await refreshBeaconLag();
 if (beaconWindowRefusal(beaconExpiryLag)) {
   console.error(beaconExpiryLag == null ? "oracle unreachable, quotes refused" : `beacon expiryLag ${beaconExpiryLag}, quotes refused`);
 }
@@ -805,6 +808,12 @@ async function housekeeping() {
   if (polling) return;
   polling = true;
   try {
+    if (beaconExpiryLag == null) {
+      await refreshBeaconLag();
+      if (beaconExpiryLag != null && !beaconWindowRefusal(beaconExpiryLag)) {
+        console.log(`beacon expiryLag ${beaconExpiryLag}, quotes enabled`);
+      }
+    }
     if (!filling) await refreshFloat();
     try {
       spot = await spotCents();
