@@ -1,3 +1,4 @@
+import { DUST_SATS } from "./constants.ts";
 import { bytesToHex } from "./hex.ts";
 
 export type IntentPhase = "open" | "funded" | "expired" | "filled" | "refunded";
@@ -80,6 +81,29 @@ export function classifyIntent(input: {
     if (paid >= coin.value) return { phase: "refunded", ...view };
     if (side === 0 && paid >= input.premium) return { phase: "filled", ...view };
     if (side === 1 && sumTo(outputs, vault) >= input.collateral) return { phase: "filled", ...view };
+  }
+  const underfunded = input.coins.find((coin) => !coin.spent && coin.value > DUST_SATS);
+  if (underfunded && input.now >= input.deadline) {
+    return {
+      phase: "expired",
+      refundable: true,
+      fundingTxid: txid(underfunded.txid),
+      closeTxid: "",
+    };
+  }
+  const spentSmall = input.coins
+    .filter((coin) => coin.spent && coin.value > DUST_SATS && coin.value < locks && coin.spentBy)
+    .sort((a, b) => Number(b.value - a.value));
+  for (const coin of spentSmall) {
+    const outputs = input.spends[coin.spentBy] ?? [];
+    if (sumTo(outputs, writer) >= coin.value) {
+      return {
+        phase: "refunded",
+        refundable: false,
+        fundingTxid: txid(coin.txid),
+        closeTxid: txid(coin.spentBy),
+      };
+    }
   }
   return {
     phase: input.now < input.deadline ? "open" : "expired",

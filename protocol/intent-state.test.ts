@@ -113,3 +113,51 @@ test("the deposit transaction pays the intent, not the writer", () => {
   assert.equal(outputs[1]?.amount, 71_340n);
   assert.equal(outputs[1]?.script, writer);
 });
+
+test("an underfunded live coin above dust is refundable after the deadline and transitions to refunded once cancelled", () => {
+  const funding = "33".repeat(32);
+  const close = "44".repeat(32);
+  const before = classifyIntent({
+    coins: [{ value: 5_000n, spent: false, spentBy: "", txid: funding }],
+    spends: {},
+    collateral: 20_000n,
+    premium: 383n,
+    writerScript: writer,
+    now: 500,
+    deadline: 1_000,
+  });
+  assert.deepEqual(before, { phase: "open", refundable: false, fundingTxid: "", closeTxid: "" });
+
+  const after = classifyIntent({
+    coins: [{ value: 5_000n, spent: false, spentBy: "", txid: funding }],
+    spends: {},
+    collateral: 20_000n,
+    premium: 383n,
+    writerScript: writer,
+    now: 1_500,
+    deadline: 1_000,
+  });
+  assert.deepEqual(after, { phase: "expired", refundable: true, fundingTxid: funding, closeTxid: "" });
+
+  const dust = classifyIntent({
+    coins: [{ value: 330n, spent: false, spentBy: "", txid: funding }],
+    spends: {},
+    collateral: 20_000n,
+    premium: 383n,
+    writerScript: writer,
+    now: 1_500,
+    deadline: 1_000,
+  });
+  assert.deepEqual(dust, { phase: "expired", refundable: false, fundingTxid: "", closeTxid: "" });
+
+  const refunded = classifyIntent({
+    coins: [{ value: 5_000n, spent: true, spentBy: close, txid: funding }],
+    spends: { [close]: [{ amount: 5_000n, script: writer }] },
+    collateral: 20_000n,
+    premium: 383n,
+    writerScript: writer,
+    now: 1_500,
+    deadline: 1_000,
+  });
+  assert.deepEqual(refunded, { phase: "refunded", refundable: false, fundingTxid: funding, closeTxid: close });
+});
