@@ -44,3 +44,29 @@ test("a spent vault says the collateral left and the writer kept 99000 sats", ()
   }, 2_000_000_000);
   assert.equal(paid, "Premium paid. The collateral stays in the vault until expiry. The read fee takes 1000 sats of the collateral.");
 });
+
+test("splitPayouts recognizes a 0-user-payout settlement when deskScript matches and rejects unrelated outputs", () => {
+  const DESK = "51201111111111111111111111111111111111111111111111111111111111111111";
+  const OTHER = "51202222222222222222222222222222222222222222222222222222222222222222";
+  const beacon = "5120d4b6184f166070f100567c938dbd61c7d12fe24a360002286fc56072dd0cd395";
+
+  const lost = splitPayouts([
+    { amount: 1330n, script: beacon },
+    { amount: 94000n, script: DESK },
+    { amount: 0n, script: "6a00" },
+  ], WRITER, DESK);
+  assert.deepEqual(lost, { writer: 0n, desk: 94000n });
+
+  const unrelated = splitPayouts([
+    { amount: 1330n, script: beacon },
+    { amount: 94000n, script: OTHER },
+  ], WRITER, DESK);
+  assert.equal(unrelated, null);
+
+  const partial = splitPayouts([
+    { amount: 1330n, script: beacon },
+    { amount: 30000n, script: DESK },
+    { amount: 69000n, script: WRITER },
+  ], WRITER, DESK);
+  assert.deepEqual(partial, { writer: 69000n, desk: 30000n });
+});

@@ -49,12 +49,13 @@ export async function readKept(
   settleTxid: string,
   writerScript: string,
   expiry?: bigint,
+  deskScript?: string,
 ): Promise<{ writer: bigint; desk: bigint; cents?: bigint } | null> {
   try {
     const page = await indexer.getVirtualTxs([settleTxid]);
     const raw = page.txs?.[0];
     if (!raw) return null;
-    const split = splitPayouts(psbtView(raw).outputs, writerScript);
+    const split = splitPayouts(psbtView(raw).outputs, writerScript, deskScript);
     if (!split) return null;
     const cents = expiry == null ? null : fixingOf(raw, expiry);
     return cents == null ? split : { ...split, cents };

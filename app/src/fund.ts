@@ -243,6 +243,12 @@ export async function writerBinding(address: string): Promise<WriterBinding> {
   };
 }
 
+/** Desk's default VTXO pkScript for a position, used to recognize 0-user-payout settlements. */
+export async function deskPkScript(deskPkHex: string, exit?: bigint | number): Promise<string> {
+  const { client } = await operatorSession();
+  return bytesToHex(payoutVtxo(hexToBytes(deskPkHex), client.serverKey, exit ? BigInt(exit) : EXIT).pkScript);
+}
+
 /** Address finalize pays the premium to, for an older stored key. */
 export async function writerPayoutAddress(writerHex: string): Promise<string> {
   const writer = SingleKey.fromHex(writerHex);

@@ -3,6 +3,7 @@ import {
   cancelIntent,
   clearAddress,
   depositAddress,
+  deskPkScript,
   legacyWriterHex,
   paymentUri,
   readAddress,
@@ -3499,7 +3500,14 @@ async function fillKept() {
     if (position.keptChecked || position.writerKeep || !settlementKnown(position)) return;
     const script = writerScriptOf(position);
     if (!script) return;
-    const split = await readKept(position.settleTxid, script, isPredict(position.kind) ? BigInt(position.expiry) : undefined);
+    const deskPk = position.deskPkHex || position.holderPkHex || "";
+    const deskScript = deskPk ? await deskPkScript(deskPk, position.exit).catch(() => "") : "";
+    const split = await readKept(
+      position.settleTxid,
+      script,
+      isPredict(position.kind) ? BigInt(position.expiry) : undefined,
+      deskScript,
+    );
     if (!split) return;
     position.keptChecked = true;
     position.writerKeep = split.writer.toString();
