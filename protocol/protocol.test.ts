@@ -204,6 +204,9 @@ test("a filled vault is public on nostr and a sealed quote is not", () => {
     sig: event.sig,
   };
   assert.equal(readPosition(tampered), null);
+  const writerKey = generateSecretKey();
+  const writerSigned: OptionPosition = { ...position, writer_pubkey: nostrPubkey(writerKey) };
+  assert.deepEqual(readPosition(positionEvent(writerKey, writerSigned, 1_790_000_000)), writerSigned);
   const quoted = { ...position, holder_pubkey: "ff".repeat(32) };
   const mismatched = positionEvent(desk, quoted, 1_790_000_000);
   assert.equal(readPosition(mismatched), null);

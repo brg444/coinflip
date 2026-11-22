@@ -12,6 +12,7 @@ import { statePacket } from "../protocol/cospend.ts";
 import { bytesToHex, hexToBytes } from "../protocol/hex.ts";
 import { classifyIntent } from "../protocol/intent-state.ts";
 import { parsePosition, parseWire, payoutRefusal, predictRefusal, requestRefusal, type RfqRequest } from "../protocol/messages.ts";
+import { positionEvent, readPosition } from "../protocol/nostr.ts";
 import { payoutMultiplier, predictMultiplier, predictPayout, probAbove } from "../protocol/pricing.ts";
 import { predictVaultProgram, rawPredictVaultProgram, vaultProgram } from "../protocol/programs.ts";
 import { outlay, openPremium, type QuoteRow } from "../desk/book.ts";
@@ -318,6 +319,13 @@ test("a filled prediction settles to the bettor above the line and to the desk a
     fill_txid: vaultTx.id,
   });
   assert.ok(announcement);
+  // A desk-signed Predict position (signer is writer_pubkey) passes readPosition; a third party does not.
+  const deskEvent = positionEvent(hexToBytes(key(21).toHex()), announcement, EXPIRY);
+  assert.deepEqual(readPosition(deskEvent), announcement);
+  const bettorEvent = positionEvent(hexToBytes(key(22).toHex()), announcement, EXPIRY);
+  assert.deepEqual(readPosition(bettorEvent), announcement);
+  const strangerEvent = positionEvent(hexToBytes(key(23).toHex()), announcement, EXPIRY);
+  assert.equal(readPosition(strangerEvent), null);
   const { holder_pk_script: _dropped, ...withoutHolder } = announcement;
   assert.equal(parsePosition(withoutHolder), null);
   const watched = positionFromAnnouncement(announcement)!;
