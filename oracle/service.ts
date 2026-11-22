@@ -8,9 +8,12 @@ import { asset, ArkAddress, SingleKey, Transaction, type CSVMultisigTapscript, t
 import { base64 } from "@scure/base";
 
 import { beaconIdOf, bindBeacon, decodeState, genesisOutputs, nextState, priceValue, sampleDigest, SIGNER_SLOTS, statePacketOf } from "../protocol/beacon.ts";
-import { BEACON_READ_FEE, EXIT, PRICE_MAX } from "../protocol/constants.ts";
+import { BEACON_READ_FEE, DUST_SATS, EXIT, isPredict, PRICE_MAX, vaultProgramId } from "../protocol/constants.ts";
+import { bindContracts } from "../protocol/contracts.ts";
 import { buildAttest, submit } from "../protocol/cospend.ts";
 import { bytesToHex } from "../protocol/hex.ts";
+import type { OptionPosition } from "../protocol/messages.ts";
+import { positionFromAnnouncement, termsFor } from "../settle/positions.ts";
 import { chooseSample as pickSample, loadStore, pruneSamples, saveStore, type StoredSample } from "./store.ts";
 
 /**
@@ -85,12 +88,49 @@ export type OracleDeps = {
   sampleEveryMs?: number;
   /** Expiries announced on nostr. The minute pass publishes these, not every clock minute. */
   announcedExpiries?: () => Iterable<number>;
+  /** Full positions announced on nostr; filtered by beacon, freshness, grid, and live vault. */
+  announcedPositions?: () => Iterable<OptionPosition>;
+  /** Called after an announced expiry is published or confirmed already on the beacon. */
+  onPublishedExpiry?: (expiry: number) => void;
   now?: () => number;
 };
+
+export const MAX_ANNOUNCE_AGE_S = 3_600;
+const PREDICT_GRID_S = 300;
+const MAX_PUBLISH_PER_PASS = 4;
 
 /** Announced expiries whose close minute has passed and that are not published yet. */
 export function dueExpiries(expiries: Iterable<number>, now: number, done: ReadonlySet<number>, lag = 60): number[] {
   return [...new Set(expiries)].filter((expiry) => !done.has(expiry) && now >= expiry + lag).sort((a, b) => a - b);
+}
+
+export function duePositionExpiries(
+  positions: Iterable<OptionPosition>,
+  opts: { assetId: string; now: number; done: ReadonlySet<number>; lag?: number; maxAge?: number; limit?: number },
+): { expiry: number; positions: OptionPosition[] }[] {
+  const id = asset.AssetId.fromString(opts.assetId);
+  const ourTxid = bytesToHex(id.txid).toLowerCase();
+  const ourGidx = Number(id.groupIndex);
+  const lag = opts.lag ?? 60;
+  const maxAge = opts.maxAge ?? MAX_ANNOUNCE_AGE_S;
+  const limit = opts.limit ?? MAX_PUBLISH_PER_PASS;
+  const byExpiry = new Map<number, OptionPosition[]>();
+  for (const pos of positions) {
+    if (pos.beacon_txid.toLowerCase() !== ourTxid || pos.beacon_gidx !== ourGidx) continue;
+    if (pos.program_id !== vaultProgramId(pos.kind)) continue;
+    if (BigInt(pos.collateral) < READ_FEE + DUST_SATS) continue;
+    if (opts.done.has(pos.expiry)) continue;
+    if (opts.now < pos.expiry + lag) continue;
+    if (opts.now - pos.expiry > maxAge) continue;
+    if (isPredict(pos.kind) && pos.expiry % PREDICT_GRID_S !== 0) continue;
+    const list = byExpiry.get(pos.expiry);
+    if (list) list.push(pos);
+    else byExpiry.set(pos.expiry, [pos]);
+  }
+  return [...byExpiry.entries()]
+    .sort((a, b) => b[0] - a[0])
+    .slice(0, limit)
+    .map(([expiry, list]) => ({ expiry, positions: list }));
 }
 
 /** A missing or out-of-window print. The minute pass skips it quietly and tries that expiry again later. */
@@ -522,23 +562,59 @@ export async function createOracle(deps: OracleDeps) {
   const port = typeof address === "object" && address ? address.port : 0;
   const publishedExpiries = new Set<number>();
 
+  async function hasLiveVault(positions: readonly OptionPosition[]): Promise<boolean> {
+    if (!deps.indexer || !deps.wallet) return false;
+    const minByScript = new Map<string, bigint>();
+    for (const pos of positions) {
+      const watched = positionFromAnnouncement(pos);
+      if (!watched || watched.programId !== vaultProgramId(watched.kind)) continue;
+      if (watched.collateral < READ_FEE + DUST_SATS) continue;
+      let bound;
+      try {
+        bound = bindContracts(termsFor(watched, deps.wallet.arkServerPublicKey, deps.emulatorKey, READ_FEE));
+      } catch {
+        continue;
+      }
+      if (bound.vaultAddress !== pos.vault_address) continue;
+      const scriptHex = bytesToHex(bound.vaultPkScript);
+      const prev = minByScript.get(scriptHex);
+      if (prev == null || watched.collateral < prev) minByScript.set(scriptHex, watched.collateral);
+    }
+    for (const [scriptHex, required] of minByScript) {
+      const found = await deps.indexer.getVtxos({ scripts: [scriptHex], spendableOnly: true });
+      if ((found.vtxos ?? []).some((coin) => !coin.isSpent && BigInt(coin.value) >= required)) return true;
+    }
+    return false;
+  }
+
   /** Publish each announced expiry once. No sample skips it. Already a fixing is done. */
   async function publishAnnounced() {
-    if (!deps.announcedExpiries || !store.assetId || !store.deployTxid) return;
+    if ((!deps.announcedPositions && !deps.announcedExpiries) || !store.assetId || !store.deployTxid) return;
     const clock = now();
-    for (const expiry of dueExpiries(deps.announcedExpiries(), clock, publishedExpiries, Number(EXPIRY_LAG))) {
-      if (!chooseSample(expiry)) continue;
+    const items: { expiry: number; positions?: OptionPosition[] }[] = deps.announcedPositions
+      ? duePositionExpiries(deps.announcedPositions(), {
+          assetId: store.assetId,
+          now: clock,
+          done: publishedExpiries,
+          lag: Number(EXPIRY_LAG),
+        })
+      : dueExpiries(deps.announcedExpiries!(), clock, publishedExpiries, Number(EXPIRY_LAG)).map((expiry) => ({ expiry }));
+    for (const item of items) {
+      if (!chooseSample(item.expiry)) continue;
+      if (item.positions && !(await hasLiveVault(item.positions))) continue;
       try {
-        await publish({ expiry });
-        publishedExpiries.add(expiry);
+        await publish({ expiry: item.expiry });
+        publishedExpiries.add(item.expiry);
+        deps.onPublishedExpiry?.(item.expiry);
       } catch (err) {
         const message = err instanceof HttpError ? err.message : "";
         if (err instanceof HttpError && err.status === 409 && message === "already a fixing") {
-          publishedExpiries.add(expiry);
+          publishedExpiries.add(item.expiry);
+          deps.onPublishedExpiry?.(item.expiry);
           continue;
         }
         if (skippedPublish(message)) continue;
-        console.error(`oracle publish ${expiry} ${message || "publish failed"}`);
+        console.error(`oracle publish ${item.expiry} ${message || "publish failed"}`);
       }
     }
   }

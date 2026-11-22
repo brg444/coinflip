@@ -9,7 +9,14 @@ import { bytesToHex, hexToBytes } from "../../protocol/hex.ts";
 import { isPredictQuote, payoutRefusal, type RfqQuote, type RfqRefusal, type RfqRequest } from "../../protocol/messages.ts";
 import { payoutMultiplier } from "../../protocol/pricing.ts";
 import { collectReplies } from "../../protocol/nostr.ts";
+import { parseOracleBeacon } from "../../settle/oracle.ts";
+import { LIVE_BEACON_STATUS } from "./beacon-status.ts";
 import { writerBinding } from "./fund.ts";
+
+/** Verify a quote targets the page's pinned beacon (both txid and asset group index). */
+export function quoteMatchesBeacon(beaconTxid: string, beaconGidx: number, status: unknown = LIVE_BEACON_STATUS): boolean {
+  return parseOracleBeacon(status, beaconTxid, beaconGidx).ok;
+}
 
 export type LiveQuote = {
   name: string;
@@ -100,6 +107,7 @@ export async function requestQuotes(input: {
     if (quote.solver_pubkey !== incoming.from || quote.profile.holder_pubkey !== incoming.from) continue;
     if (quote.valid_until <= now || quote.profile.deadline < now + 120) continue;
     if (quote.profile.exit !== Number(EXIT)) continue;
+    if (!quoteMatchesBeacon(quote.profile.beacon_txid, quote.profile.beacon_gidx)) continue;
     const premium = BigInt(quote.to_amount);
     if (premium <= DUST_SATS) continue;
     let bound;
@@ -225,6 +233,7 @@ export async function requestPredictQuotes(input: {
     if (quote.valid_until <= now || quote.profile.deadline < now + 15) continue;
     if (quote.profile.deadline > Number(input.expiry) - 30) continue;
     if (quote.profile.exit !== Number(EXIT)) continue;
+    if (!quoteMatchesBeacon(quote.profile.beacon_txid, quote.profile.beacon_gidx)) continue;
     const payout = BigInt(quote.to_amount);
     if (payoutRefusal(payout, input.stake, BEACON_READ_FEE)) continue;
     let bound;
