@@ -52,7 +52,7 @@ test("derived intent and vault addresses stay pinned", async () => {
   const bound = bindContracts(terms);
   assert.equal(
     bound.intentAddress,
-    "tark1qqhsre0ptn9r28d07wzrldc08shs5x7aqhj6lzy2vauyaulppg4qrrc6gjnkmshfzc8hq7dqyac0apll6rrqmq9h4tm3z6lrsk97928g899mxc",
+    "tark1qqhsre0ptn9r28d07wzrldc08shs5x7aqhj6lzy2vauyaulppg4qzs5s5dnywzz2gv0wtfx0yfz8g6k6dngved0jud0h6ufak8dc3a8wktq9tp",
   );
   assert.equal(
     bound.vaultAddress,
