@@ -165,6 +165,7 @@ async function oracleUp(key) {
   start("oracle", "oracle/main.ts", {
     ORACLE_KEY: key.oracleKey,
     ORACLE_ADMIN: key.admin,
+    DESK_PUBKEY: getPublicKey(Uint8Array.from(Buffer.from(key.deskKey, "hex"))),
     SAMPLE_MS: "20000",
     DATA_DIR: path.join(home, "oracle"),
     PORT: String(PORTS.oracle),

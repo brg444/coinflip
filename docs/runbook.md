@@ -45,6 +45,7 @@ From [oracle/main.ts](../oracle/main.ts) and [oracle/Dockerfile](../oracle/Docke
 | --- | --- |
 | `ORACLE_KEY` | New 32-byte hex. Wallet, issuer, migrate, and exit. It does not sign prices. |
 | `ORACLE_ADMIN` | New bearer for `/api/issue`, `/api/deploy`, `/api/recover`, `/api/intent`, and `/api/publish`. Unset disables those routes. |
+| `DESK_PUBKEY` | Optional 64-hex x-only pubkey. When set, auto-publishing from Nostr announcements ignores positions where that key is neither writer nor holder. |
 | `ARK_URL` | `https://mutinynet.arkade.sh` (the code default). |
 | `EMULATOR_URL` | `https://emulator.mutinynet.arkade.sh` (the code default). |
 | `SAMPLE_MS` | Leave unset. Reads DIA about once a minute. `0` uses that same minute. |
@@ -184,6 +185,8 @@ Use one small option. Collateral must be at least `Q_MIN` (10_000 sats). Pick an
 **Cancel.** Fund an intent and let the deadline pass without a fill. The page marks it expired and shows **Refund** when the coin is still unspent ([protocol/intent-state.ts](../protocol/intent-state.ts)). Refund spends `cancel` back to the seller. The button is not a fill. Cancel before the deadline is **Cancel trade**, which drops the row only while the intent is still open.
 
 **Settle.** On the Oracle dashboard, preview the holder and writer amounts for that position's kind, strike, collateral, and the price you want. Then **Publish price** with the position expiry. After `expiry + 60`, `GET /api/status` shows the fixing and the Settler logs `settled` with a txid. `GET /status` on the Settler increments `settled`. No page click is required. The 1,000-sat read fee is the difference between the collateral and the holder plus writer amounts in the preview.
+
+**Unfixed windows (closed beta policy).** If DIA produces no `BTC/USD` print inside `[expiry, expiry + 60]` or a filled Predict vault cannot settle automatically, the vault cannot execute `settle` without a matching fixing. The desk (as writer) can recover the locked vault coin on Bitcoin via `unilateral` after `EXIT` (`2048` seconds) or cooperatively via `close`; during the closed beta, the operator refunds the bettor's stake manually whenever an unfixed window occurs.
 
 `scripts/e2e-mutinynet.ts` (`pnpm e2e`) is a scripted Mutinynet fill and cancel against `BEACON_TXID`. It is not the tester path, and its default keys are not the Dokploy `DESK_KEY`.
 

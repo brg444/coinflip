@@ -16,7 +16,10 @@ export type BeaconSpec = {
   readFee: bigint;
   adminPk: Uint8Array;
   exit: bigint;
+  beaconExpiry?: number | null;
 };
+
+export type OracleLatest = { cents: bigint; time: number };
 
 export type ParsedBeacon = { ok: true; beacon: BeaconSpec } | { ok: false; error: string };
 
@@ -110,6 +113,9 @@ export function parseOracleBeacon(body: unknown, beaconTxid?: string, gidx = 0):
     : null;
   const adminPk = hexBytes(args.adminPk, 32);
   if (expiryLag == null || readFee == null || exit == null || !domain || !adminPk) return { ok: false, error: "oracle args" };
+  const beaconExpiry = typeof root.beaconExpiry === "number" && Number.isSafeInteger(root.beaconExpiry) && root.beaconExpiry >= 0
+    ? root.beaconExpiry
+    : null;
   return {
     ok: true,
     beacon: {
@@ -120,6 +126,17 @@ export function parseOracleBeacon(body: unknown, beaconTxid?: string, gidx = 0):
       readFee,
       adminPk,
       exit,
+      beaconExpiry,
     },
   };
+}
+
+export function parseOracleLatest(body: unknown): OracleLatest | null {
+  const root = record(body);
+  const latest = record(root?.latest);
+  if (!latest) return null;
+  const cents = whole(latest.price);
+  const time = typeof latest.time === "number" && Number.isSafeInteger(latest.time) && latest.time > 0 ? latest.time : null;
+  if (cents == null || cents <= 0n || time == null) return null;
+  return { cents, time };
 }
