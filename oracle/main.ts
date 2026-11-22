@@ -20,9 +20,9 @@ import { createOracle, type OracleWallet } from "./service.ts";
 /**
  *   ORACLE_KEY      optional 32-byte hex. Never generated. Wallet, issue, deploy, and exit.
  *   ORACLE_ADMIN    optional bearer. Unset disables /api/intent, /api/issue, /api/deploy, /api/recover, and /api/publish.
- *   SAMPLE_MS       how often to read the latest DIA OracleUpdate. Default 60000.
- *                   0 uses that same minute. Prints older than 24 hours are dropped.
- *                   That minute also publishes each nostr filled-vault expiry once
+ *   SAMPLE_MS       how often to read the latest DIA OracleUpdate. Default 20000.
+ *                   0 uses that same interval. Prints older than 24 hours are dropped.
+ *                   Each tick also publishes each nostr filled-vault expiry once
  *                   expiry + 60 has passed and a DIA print sits in the window. It does not settle.
  *   DIA_WS          default wss://rpc.diadata.org. IntentRegistered, then getLatestIntentByType.
  *   ARK_URL        default https://mutinynet.arkade.sh
@@ -43,12 +43,12 @@ const oracleKey = optionalKey("ORACLE_KEY");
 const adminToken = process.env.ORACLE_ADMIN?.trim() || undefined;
 const dataDir = process.env.DATA_DIR?.trim() || "data";
 const port = Number(process.env.PORT ?? "8789");
-const sampleEveryMs = Number(process.env.SAMPLE_MS ?? "60000");
+const sampleEveryMs = Number(process.env.SAMPLE_MS ?? "20000");
 const arkUrl = process.env.ARK_URL?.trim() || ARK_URL;
 const emulatorUrl = process.env.EMULATOR_URL?.trim() || EMULATOR_URL;
 if (!Number.isInteger(port) || port < 0) throw new Error("PORT");
 if (!Number.isInteger(sampleEveryMs) || sampleEveryMs < 0) throw new Error("SAMPLE_MS");
-const sampleInterval = sampleEveryMs > 0 ? sampleEveryMs : 60_000;
+const sampleInterval = sampleEveryMs > 0 ? sampleEveryMs : 20_000;
 if (typeof EventSource === "undefined") {
   throw new Error("Contract events need Node's EventSource. Start the oracle with --experimental-eventsource.");
 }
@@ -93,7 +93,8 @@ watchPositions({
   },
 });
 
-const feed = startDiaFeed(sampleInterval);
+let onDiaIntent: ((intent: Awaited<ReturnType<typeof startDiaFeed>> extends { latest: () => Promise<infer T> } ? NonNullable<T> : never) => void) | undefined;
+const feed = startDiaFeed(sampleInterval, undefined, (intent) => onDiaIntent?.(intent));
 const oracle = await createOracle({
   dataDir,
   port,
@@ -113,6 +114,11 @@ const oracle = await createOracle({
     }
   },
 });
+onDiaIntent = (intent) => {
+  void oracle.ingestIntent(intent).catch((err) => {
+    console.error("oracle sample", err instanceof Error ? err.message : "sample failed");
+  });
+};
 
 console.log(`oracle http://127.0.0.1:${oracle.port}/`);
 console.log(`oracle data ${path.resolve(dataDir)} sqlite ${storage.file}`);

@@ -165,6 +165,7 @@ async function oracleUp(key) {
   start("oracle", "oracle/main.ts", {
     ORACLE_KEY: key.oracleKey,
     ORACLE_ADMIN: key.admin,
+    SAMPLE_MS: "20000",
     DATA_DIR: path.join(home, "oracle"),
     PORT: String(PORTS.oracle),
   });

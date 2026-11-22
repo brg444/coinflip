@@ -618,10 +618,20 @@ export async function createOracle(deps: OracleDeps) {
   };
   const timer = deps.sampleEveryMs && deps.sampleEveryMs > 0 ? setInterval(minute, deps.sampleEveryMs) : undefined;
   if (timer) minute();
+  async function ingestIntent(intent: DiaIntent) {
+    if (!store.assetId) return;
+    await recordIntent(intent);
+  }
+
   return {
     port,
     url: `http://127.0.0.1:${port}`,
     publishAnnounced,
+    ingestIntent: (intent: DiaIntent) => {
+      const job = ingestIntent(intent);
+      track(job);
+      return job;
+    },
     close: async () => {
       if (timer) clearInterval(timer);
       await Promise.all([...pending]);
