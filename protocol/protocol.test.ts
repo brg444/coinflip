@@ -4,10 +4,11 @@ import test from "node:test";
 import { asset, SingleKey } from "@arkade-os/sdk";
 import { generateSecretKey } from "nostr-tools/pure";
 
-import { beaconIdOf } from "./beacon.ts";
+import { beaconIdOf, bindBeacon } from "./beacon.ts";
+import { BEACON_READ_FEE, EXIT, OPTION_VAULT_PROGRAM_ID, PAIR, POSITION_KIND } from "./constants.ts";
 import { bindContracts, bindSwap, directPayoutKey } from "./contracts.ts";
 import { bytesToHex, hexToBytes, xOnly } from "./hex.ts";
-import { OPTION_VAULT_PROGRAM_ID, PAIR, POSITION_KIND } from "./constants.ts";
+import { bindHolderLeg, bindStandingVault, bindWriterLeg } from "./standing.ts";
 import { beaconWindowRefusal, parsePosition, parseWire, premiumRefusal, requestRefusal, type OptionPosition, type RfqRequest } from "./messages.ts";
 import { nostrPubkey, openSealed, positionEvent, quoteRelay, readPosition, seal } from "./nostr.ts";
 import { payablePremium, premiumSats, quotedPremium } from "./pricing.ts";
@@ -237,4 +238,64 @@ test("a wire message with the wrong pair is dropped", () => {
   assert.equal(requestRefusal({ ...request, profile: { ...request.profile, expiry: 1_790_000_600 } }, 1_790_000_000), "");
   assert.equal(requestRefusal({ ...request, profile: { ...request.profile, expiry: 1_790_000_060 } }, 1_790_000_000), "expiry");
   assert.equal(requestRefusal({ ...request, profile: { ...request.profile, expiry: 1_800_000_000 } }, 1_700_000_000), "");
+});
+
+test("addresses and unilateral tapscript bytes stay identical at EXIT=2048", async () => {
+  const writerPk = await key(1).xOnlyPublicKey();
+  const holderPk = await key(2).xOnlyPublicKey();
+  const serverKey = await key(8).xOnlyPublicKey();
+  const emulatorKey = await key(9).compressedPublicKey();
+  const beacon = beaconIdOf(asset.AssetId.create("07".repeat(32), 0));
+  const common = {
+    strike: 9_700_000n,
+    collateral: 100_000n,
+    premium: 20_000n,
+    expiry: 1_790_000_100n,
+    deadline: 1_790_000_000n,
+    exit: EXIT,
+    writerPk,
+    holderPk,
+    beacon,
+    readFee: BEACON_READ_FEE,
+    serverKey,
+    emulatorKey,
+  };
+  const call = bindContracts({ ...common, kind: 0 });
+  const put = bindContracts({ ...common, kind: 1 });
+  assert.equal(call.vaultAddress, "tark1qqhsre0ptn9r28d07wzrldc08shs5x7aqhj6lzy2vauyaulppg4qzgxz7ta4z7f7ecyd9rgjzp24ve3hyjecugsxrdc20tf92jacmm2s0utxtd");
+  assert.equal(put.vaultAddress, "tark1qqhsre0ptn9r28d07wzrldc08shs5x7aqhj6lzy2vauyaulppg4qz5nxvwlwvds6ale3cjzl0xr4hc3gf5wdul2ggkz2xw6ux9l7akghz2ftv6");
+  const bcn = bindBeacon({
+    id: beacon,
+    domain: new TextEncoder().encode("BTCUSD-FIX"),
+    expiryLag: 60n,
+    readFee: BEACON_READ_FEE,
+    adminPk: writerPk,
+    exit: EXIT,
+    serverKey,
+    emulatorKey,
+  });
+  assert.equal(bcn.address, "tark1qqhsre0ptn9r28d07wzrldc08shs5x7aqhj6lzy2vauyaulppg4qz52dwnd7ltf88hxqj7rwd8vx7852gvnyysawwq80cp94gjeaqdk6kz7vmz");
+  assert.equal(
+    bytesToHex(bcn.script.functionByName("unilateral")!.tapLeafScript[1]),
+    "03040040b2752079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798acc0",
+  );
+  const sw = bindSwap({
+    makerPk: writerPk,
+    serverKey,
+    emulatorKey,
+    offerAssetIdTxid: writerPk,
+    offerAssetIdGidx: 0n,
+    offerAmount: 1n,
+    wantAssetIdTxid: holderPk,
+    wantAssetIdGidx: 0n,
+    wantAmount: 1n,
+    expirationTime: 1_790_000_100n,
+    exit: EXIT,
+    makerProgram: writerPk,
+  });
+  assert.equal(sw.address, "tark1qqhsre0ptn9r28d07wzrldc08shs5x7aqhj6lzy2vauyaulppg4qr5de3zx48l0d6hag6p5l9lln4mqhxcl2mgf45ze68sy7csjnxydykwtyyc");
+  const st = { ...common, kind: 0 as const };
+  assert.equal(bindStandingVault(st).address, "tark1qqhsre0ptn9r28d07wzrldc08shs5x7aqhj6lzy2vauyaulppg4qzp2v5te603y5d8xjvzjwnnlj57v36fuhgap2eq90c6whwtf7hrssyv7fnn");
+  assert.equal(bindWriterLeg(st).address, "tark1qqhsre0ptn9r28d07wzrldc08shs5x7aqhj6lzy2vauyaulppg4qrecp2767ezjj66fpdslrupkh3jyjn49gned87gn7w0yl0s0na2kd8kkcr4");
+  assert.equal(bindHolderLeg(st, holderPk).address, "tark1qqhsre0ptn9r28d07wzrldc08shs5x7aqhj6lzy2vauyaulppg4qr9q4tw3ly6zksvd5thu2ez7us89e32yyy3hw4z5yvvryhwm3885xuu2vgy");
 });
