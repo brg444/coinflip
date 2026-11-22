@@ -16,7 +16,7 @@ import { networkByName } from "../protocol/network.ts";
 import { watchPositions } from "../protocol/nostr.ts";
 import { openSqliteStorage } from "../protocol/sqlite-storage.ts";
 import { startDiaFeed } from "./feed.ts";
-import { createOracle, type OracleWallet } from "./service.ts";
+import { createOracle, MAX_ANNOUNCE_AGE_S, type OracleWallet } from "./service.ts";
 
 /**
  *   ORACLE_KEY      optional 32-byte hex. Never generated. Wallet, issue, deploy, and exit.
@@ -86,11 +86,25 @@ if (wallet) {
   }
 }
 
+const MAX_ANNOUNCED = 2_000;
 const announced = new Map<string, OptionPosition>();
+function pruneAnnounced(now = Math.floor(Date.now() / 1000)) {
+  for (const [id, pos] of announced) {
+    if (now - pos.expiry > MAX_ANNOUNCE_AGE_S) announced.delete(id);
+  }
+  while (announced.size > MAX_ANNOUNCED) {
+    const oldest = announced.keys().next().value;
+    if (!oldest) break;
+    announced.delete(oldest);
+  }
+}
 watchPositions({
   relays: DEFAULT_RELAYS,
   onPosition(position) {
+    const now = Math.floor(Date.now() / 1000);
+    if (now - position.expiry > MAX_ANNOUNCE_AGE_S) return;
     announced.set(position.rfq_id, position);
+    pruneAnnounced(now);
   },
 });
 
@@ -108,7 +122,10 @@ const oracle = await createOracle({
   emulator: new RestEmulatorProvider(emulatorUrl),
   pull: () => feed.latest(),
   sampleEveryMs: sampleInterval,
-  announcedPositions: () => announced.values(),
+  announcedPositions: () => {
+    pruneAnnounced();
+    return announced.values();
+  },
   onPublishedExpiry: (expiry) => {
     for (const [id, pos] of announced) {
       if (pos.expiry === expiry) announced.delete(id);

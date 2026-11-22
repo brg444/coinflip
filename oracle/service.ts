@@ -8,11 +8,13 @@ import { asset, ArkAddress, SingleKey, Transaction, type CSVMultisigTapscript, t
 import { base64 } from "@scure/base";
 
 import { beaconIdOf, bindBeacon, decodeState, genesisOutputs, nextState, priceValue, statePacketOf } from "../protocol/beacon.ts";
-import { BEACON_READ_FEE, EXIT, isPredict, PRICE_MAX } from "../protocol/constants.ts";
+import { BEACON_READ_FEE, DUST_SATS, EXIT, isPredict, PRICE_MAX, vaultProgramId } from "../protocol/constants.ts";
+import { bindContracts } from "../protocol/contracts.ts";
 import { buildAttest, submit } from "../protocol/cospend.ts";
 import { centsOf, intentSigned, type DiaIntent } from "../protocol/dia.ts";
 import { bytesToHex, hexToBytes } from "../protocol/hex.ts";
 import type { OptionPosition } from "../protocol/messages.ts";
+import { positionFromAnnouncement, termsFor } from "../settle/positions.ts";
 import { chooseSample as pickSample, loadStore, pruneSamples, saveStore, type StoredSample } from "./store.ts";
 
 /**
@@ -90,7 +92,7 @@ export type OracleDeps = {
   now?: () => number;
 };
 
-const MAX_ANNOUNCE_AGE_S = 3_600;
+export const MAX_ANNOUNCE_AGE_S = 3_600;
 const PREDICT_GRID_S = 300;
 const MAX_PUBLISH_PER_PASS = 4;
 
@@ -99,39 +101,33 @@ export function dueExpiries(expiries: Iterable<number>, now: number, done: Reado
   return [...new Set(expiries)].filter((expiry) => !done.has(expiry) && now >= expiry + lag).sort((a, b) => a - b);
 }
 
-/**
- * Announced positions eligible for auto-publish on this beacon:
- * matching beacon txid/gidx, due (`now >= expiry + lag`), recent (`<= maxAge`),
- * on the 5-minute grid for Predict kinds, newest-first, capped per pass.
- */
 export function duePositionExpiries(
   positions: Iterable<OptionPosition>,
   opts: { assetId: string; now: number; done: ReadonlySet<number>; lag?: number; maxAge?: number; limit?: number },
-): { expiry: number; vaultAddresses: string[] }[] {
+): { expiry: number; positions: OptionPosition[] }[] {
   const id = asset.AssetId.fromString(opts.assetId);
   const ourTxid = bytesToHex(id.txid).toLowerCase();
   const ourGidx = Number(id.groupIndex);
   const lag = opts.lag ?? 60;
   const maxAge = opts.maxAge ?? MAX_ANNOUNCE_AGE_S;
   const limit = opts.limit ?? MAX_PUBLISH_PER_PASS;
-  const byExpiry = new Map<number, Set<string>>();
+  const byExpiry = new Map<number, OptionPosition[]>();
   for (const pos of positions) {
     if (pos.beacon_txid.toLowerCase() !== ourTxid || pos.beacon_gidx !== ourGidx) continue;
+    if (pos.program_id !== vaultProgramId(pos.kind)) continue;
+    if (BigInt(pos.collateral) < READ_FEE + DUST_SATS) continue;
     if (opts.done.has(pos.expiry)) continue;
     if (opts.now < pos.expiry + lag) continue;
     if (opts.now - pos.expiry > maxAge) continue;
     if (isPredict(pos.kind) && pos.expiry % PREDICT_GRID_S !== 0) continue;
-    let addrs = byExpiry.get(pos.expiry);
-    if (!addrs) {
-      addrs = new Set<string>();
-      byExpiry.set(pos.expiry, addrs);
-    }
-    addrs.add(pos.vault_address);
+    const list = byExpiry.get(pos.expiry);
+    if (list) list.push(pos);
+    else byExpiry.set(pos.expiry, [pos]);
   }
   return [...byExpiry.entries()]
     .sort((a, b) => b[0] - a[0])
     .slice(0, limit)
-    .map(([expiry, addrs]) => ({ expiry, vaultAddresses: [...addrs] }));
+    .map(([expiry, list]) => ({ expiry, positions: list }));
 }
 
 /** A missing or out-of-window print. The minute pass skips it quietly and tries that expiry again later. */
@@ -548,27 +544,36 @@ export async function createOracle(deps: OracleDeps) {
   const port = typeof address === "object" && address ? address.port : 0;
   const publishedExpiries = new Set<number>();
 
-  async function hasLiveVault(vaultAddresses: readonly string[]): Promise<boolean> {
-    if (!deps.indexer) return true;
-    const scripts: string[] = [];
-    for (const addr of vaultAddresses) {
+  async function hasLiveVault(positions: readonly OptionPosition[]): Promise<boolean> {
+    if (!deps.indexer || !deps.wallet) return false;
+    const minByScript = new Map<string, bigint>();
+    for (const pos of positions) {
+      const watched = positionFromAnnouncement(pos);
+      if (!watched || watched.programId !== vaultProgramId(watched.kind)) continue;
+      if (watched.collateral < READ_FEE + DUST_SATS) continue;
+      let bound;
       try {
-        scripts.push(bytesToHex(ArkAddress.decode(addr).pkScript));
+        bound = bindContracts(termsFor(watched, deps.wallet.arkServerPublicKey, deps.emulatorKey, READ_FEE));
       } catch {
-        // skip unparseable vault addresses
+        continue;
       }
+      if (bound.vaultAddress !== pos.vault_address) continue;
+      const scriptHex = bytesToHex(bound.vaultPkScript);
+      const prev = minByScript.get(scriptHex);
+      if (prev == null || watched.collateral < prev) minByScript.set(scriptHex, watched.collateral);
     }
-    const unique = [...new Set(scripts)];
-    if (!unique.length) return false;
-    const found = await deps.indexer.getVtxos({ scripts: unique, spendableOnly: true });
-    return (found.vtxos ?? []).some((coin) => !coin.isSpent);
+    for (const [scriptHex, required] of minByScript) {
+      const found = await deps.indexer.getVtxos({ scripts: [scriptHex], spendableOnly: true });
+      if ((found.vtxos ?? []).some((coin) => !coin.isSpent && BigInt(coin.value) >= required)) return true;
+    }
+    return false;
   }
 
   /** Publish each announced expiry once. No sample skips it. Already a fixing is done. */
   async function publishAnnounced() {
     if ((!deps.announcedPositions && !deps.announcedExpiries) || !store.assetId || !store.deployTxid) return;
     const clock = now();
-    const items: { expiry: number; vaultAddresses?: string[] }[] = deps.announcedPositions
+    const items: { expiry: number; positions?: OptionPosition[] }[] = deps.announcedPositions
       ? duePositionExpiries(deps.announcedPositions(), {
           assetId: store.assetId,
           now: clock,
@@ -578,7 +583,7 @@ export async function createOracle(deps: OracleDeps) {
       : dueExpiries(deps.announcedExpiries!(), clock, publishedExpiries, Number(EXPIRY_LAG)).map((expiry) => ({ expiry }));
     for (const item of items) {
       if (!chooseSample(item.expiry)) continue;
-      if (item.vaultAddresses && !(await hasLiveVault(item.vaultAddresses))) continue;
+      if (item.positions && !(await hasLiveVault(item.positions))) continue;
       try {
         await publish({ expiry: item.expiry });
         publishedExpiries.add(item.expiry);
