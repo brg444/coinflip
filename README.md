@@ -4,17 +4,7 @@ Bet whether Bitcoin closes higher or lower than a line in five minutes. Each bet
 
 Forked from [ArkLabsHQ/arkade-options](https://github.com/ArkLabsHQ/arkade-options), which keeps its cash-settled covered calls and limited puts. The bet is in [Predict](#predict); `pnpm demo` runs it all on one machine ([Demo](#demo)).
 
-The contracts are the engine. OptionVault and AttestationBeacon are what an external developer uses.
-
-A pure order book lists both sides and matches two users. This repo's desk is optional. See [contracts/](contracts/).
-
-This repo's desk, RFQ, Friday list, and sell-side page are one deployment on top of the engine. They are not required to use the contracts.
-
-An order book imports `arkade-options/contracts`. It still needs the artifacts, a filled-vault announcement, and a beacon price for the expiry. See [contracts/README.md](contracts/README.md).
-
-Buying is the same vault with the pubkeys swapped. Selling is the path this page implements.
-
-A standing offer is separate from that desk. The writer funds a leg that names the vault and not the holder. A holder funds the other leg with an ordinary send. `buildStandingMatch` spends the two coins. The holder is named on that spend. The desk can fund either leg, and it can still pay the premium on a lone writer intent.
+The contracts are the engine. `PredictVault`, `OptionVault`, `OptionIntent`, and `AttestationBeacon` live in [contracts/](contracts/) and export through `arkade-options/contracts`.
 
 Day-to-day work is funding the desk. The oracle reads DIA and keeps that history. The settler publishes a fixing after expiry and settles the vault. A new beacon is a new identity. Deploy and bootstrap steps are in [docs/runbook.md](docs/runbook.md).
 
@@ -24,8 +14,7 @@ Traefik serves these domains with its default certificate. `curl` needs `-k`.
 
 | | |
 | --- | --- |
-| Page | <https://arkade.trade/> |
-| Fund flow | <https://arkade.trade/viz/> |
+| Page | <https://coinflip.casino/> |
 | Oracle | <https://app-input-bluetooth-program-he5gtr-bb8d3b-138-199-218-130.traefik.me/> |
 | Desk | <https://app-quantify-cross-platform-bus-bwux4e-31e3a4-138-199-218-130.traefik.me/> |
 | Settler | <https://app-back-up-redundant-system-a7rla7-995a33-138-199-218-130.traefik.me/> |
@@ -47,7 +36,7 @@ Beacon (Mutinynet). `BEACON_TXID` is the oracle's `issueTxid`. `ctrlTxid` is tha
 | Desk nostr pubkey | `eb36be79b231beeecbea9609767139974137d1f5dbaab56f19396bda3f07edc9` |
 | Desk deposit address | `tark1qqcpq7yq3e8hhsx6ml3fud93m7827qggaurtzu3zwsr4a0qs0gf85yqmhrwnt5zuhcr935nk7w7avtt3nf3kvvucn63tmrsx6q7h9x4txm6sw2` |
 
-`ORACLE_KEY`, `ORACLE_ADMIN`, and `DESK_KEY` live in Dokploy, not on the volume. A redeploy keeps the beacon, the wallet, and the quote book. Replacing a volume, or rotating `ORACLE_KEY`, starts a different beacon. The page settles the beacon in this table. `app/src/beacon-status.ts` is a copy of the oracle `GET /api/status`, because the browser does not trust the Traefik certificate. The Attestations tab (`#/attestations`) lists its `fixings`, so copy them again after a new fixing; each row finds its Lasernet `IntentRegistered` tx from `rpc.diadata.org`. Quotes use the desk nostr pubkey in `app/rfq-config.js`. The earlier beacons `71ae6a54…2802` and `c919606a…499d`, and the coin at `76ba2970…da89`, stay on chain. This table is the DIA beacon.
+`ORACLE_KEY`, `ORACLE_ADMIN`, and `DESK_KEY` live in Dokploy, not on the volume. A redeploy keeps the beacon, the wallet, and the quote book. Replacing a volume, or rotating `ORACLE_KEY`, starts a different beacon. The page settles the beacon in this table. `app/src/beacon-status.ts` is a copy of the oracle `GET /api/status`, because the browser does not trust the Traefik certificate. Quotes use the desk nostr pubkey in `app/rfq-config.js`. This table is the DIA beacon.
 
 ## Day to day
 
@@ -162,11 +151,11 @@ pnpm install
 pnpm dev
 ```
 
-Open <http://127.0.0.1:4173/>. Quotes use `wss://nostr.arkade.sh`. The pinned desk is `app/rfq-config.js`. GitHub Pages publishes `dist/` on every push to `master`.
+Open <http://127.0.0.1:4173/>. Quotes use `wss://nostr.arkade.sh`. The pinned desk is `app/rfq-config.js`. GitHub Pages publishes `dist/` on every push to `main`.
 
 ```bash
-docker build -f site.Dockerfile -t arkade-options .
-docker run --rm -p 8080:80 arkade-options
+docker build -f site.Dockerfile -t coinflip-site .
+docker run --rm -p 8080:80 coinflip-site
 ```
 
 ## Check
@@ -181,4 +170,4 @@ Local arkade regtest (Docker, Bitcoin regtest + arkd + emulator):
 pnpm smoke:regtest
 ```
 
-That runs the option the contracts settle. The oracle service issues and deploys the beacon, one intent is finalized, the other is cancelled, the oracle publishes the strike, and the vault settles. It fails unless the beacon is deployed and the strike payout lands. The coins in that run are drawn at [viz/index.html](viz/index.html), also linked from the page as Fund flow. Details are in [docs/runbook.md](docs/runbook.md).
+That runs both a covered call and a Predict bet end to end: the oracle issues and deploys the beacon, intents are finalized and cancelled, the oracle publishes a live DIA print, and the vaults settle. Details are in [docs/runbook.md](docs/runbook.md).

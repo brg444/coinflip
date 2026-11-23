@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <script>if(location.protocol==="http:"&&/(^|\.)arkade\.trade$/.test(location.hostname))location.replace("https://"+location.host+location.pathname+location.search+location.hash)</script>
+  <script>if(location.protocol==="http:"&&/(^|\.)coinflip\.casino$/.test(location.hostname))location.replace("https://"+location.host+location.pathname+location.search+location.hash)</script>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>COINFLIP</title>
@@ -20,7 +20,6 @@
     <a class="brandmark" href="#/"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 19.1A11 11 0 0 1 19.1 3.5Z"/><path d="M20.5 4.9A11 11 0 0 1 4.9 20.5Z"/></svg><span class="wordmark">COINFLIP</span></a>
     <nav class="nav" aria-label="Main">
       <button type="button" data-tab="predict"><svg class="ti" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 17l5-5 3.5 3L20 7"/><path d="M15 7h5v5"/></svg>Predict</button>
-      <button type="button" data-tab="sell"><svg class="ti" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="11" width="14" height="9"/><path d="M8.5 11V8a3.5 3.5 0 0 1 7 0v3"/></svg>Options</button>
       <button type="button" data-tab="home"><svg class="ti" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h10"/></svg>Positions<span class="count" id="count" hidden></span></button>
       <button type="button" data-tab="how"><svg class="ti" viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="16"/><path d="M12 11v6M12 7.5v.5"/></svg>How it works</button>
     </nav>
@@ -43,21 +42,7 @@
         <p id="account-error" class="error" role="status"></p>
         <div><button type="button" class="btn quiet sm" id="account-save">Continue</button></div>
       </div>
-      <p class="foot">No wallet yet? <a href="https://mutinynet.arkade.money" target="_blank" rel="noopener">Get one at mutinynet.arkade.money</a> · <a href="/viz/">How the contracts move sats</a></p>
-    </section>
-
-    <section id="sell" hidden>
-      <div class="opener"><span class="av"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 19.1A11 11 0 0 1 19.1 3.5Z"/><path d="M20.5 4.9A11 11 0 0 1 4.9 20.5Z"/></svg></span><p>Lock BTC until a date and get paid for it now.</p></div>
-      <div class="seg" role="radiogroup" aria-label="What you give up">
-        <button type="button" role="radio" data-kind="0" aria-checked="true"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M2.5 16.5l4.5-4.5 3 2.5 6-7"/><path d="M2.5 4.5h15" stroke-dasharray="2.2 2.4"/></svg>Cap gains</button>
-        <button type="button" role="radio" data-kind="1" aria-checked="false"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M2.5 3.5l4.5 4.5 3-2.5 6 7"/><path d="M2.5 15.5h15" stroke-dasharray="2.2 2.4"/></svg>Take the loss</button>
-      </div>
-      <div class="sentence-wrap">
-        <h1 class="sentence" id="sentence">I’ll lock <button type="button" class="chip" data-chip="size" aria-haspopup="dialog" aria-expanded="false"></button> until&nbsp;<button type="button" class="chip" data-chip="date" aria-haspopup="dialog" aria-expanded="false"></button><br> <span id="verb">and give up gains above</span>&nbsp;<button type="button" class="chip" data-chip="line" aria-haspopup="dialog" aria-expanded="false"></button>.</h1>
-        <div class="pop" id="pop" role="dialog" aria-labelledby="pop-title" hidden></div>
-      </div>
-      <p class="estimate" id="estimate" aria-live="polite"></p>
-      <button type="button" class="btn go cta" id="see" disabled>See what happens</button>
+      <p class="foot">No wallet yet? <a href="https://mutinynet.arkade.money" target="_blank" rel="noopener">Get one at mutinynet.arkade.money</a></p>
     </section>
 
     <section id="predict" class="predict" hidden>
@@ -106,32 +91,6 @@
         <section class="card" aria-labelledby="positions-title">
           <h2 id="positions-title">Your positions</h2>
           <div class="plist" id="blotter"></div>
-          <details class="more">
-            <summary>Missing a position?</summary>
-            <p class="sub">Cleared your browser or switched devices? Bring it back here. Nothing is sent or signed.</p>
-            <form id="restore-form" class="form">
-              <label>Position ID (txid:vout)<input id="restore-outpoint" class="mono-input" autocomplete="off" spellcheck="false" placeholder="txid:vout" required></label>
-              <div class="label">What you did
-                <div class="mini-seg" role="group" aria-label="What you did">
-                  <button type="button" data-restore-kind="0" aria-pressed="true">Cap gains</button>
-                  <button type="button" data-restore-kind="1" aria-pressed="false">Take the loss</button>
-                </div>
-              </div>
-              <div class="two">
-                <label>Your line, US cents<input id="restore-strike" class="mono-input" inputmode="numeric" autocomplete="off" spellcheck="false" required></label>
-                <label>Date, unix time<input id="restore-expiry" class="mono-input" inputmode="numeric" autocomplete="off" spellcheck="false" required></label>
-                <label>Amount locked, sats<input id="restore-collateral" class="mono-input" inputmode="numeric" autocomplete="off" spellcheck="false" required></label>
-                <label>Exit delay, seconds<input id="restore-exit" class="mono-input" inputmode="numeric" autocomplete="off" spellcheck="false" value="2048" required></label>
-                <label>Price feed txid<input id="restore-beacon" class="mono-input" autocomplete="off" spellcheck="false" required></label>
-                <label>Price feed output<input id="restore-gidx" class="mono-input" inputmode="numeric" autocomplete="off" spellcheck="false" value="0" required></label>
-              </div>
-              <label>Price-check fee, sats<input id="restore-fee" class="mono-input" inputmode="numeric" autocomplete="off" spellcheck="false" value="1000" required></label>
-              <label>Your public key<input id="restore-writer" class="mono-input" autocomplete="off" spellcheck="false" placeholder="The key your payment went to" required></label>
-              <label>Desk key<input id="restore-holder" class="mono-input" autocomplete="off" spellcheck="false" required></label>
-              <p id="restore-error" class="error" role="status"></p>
-              <div><button type="submit" class="btn sm" id="restore-submit">Restore</button></div>
-            </form>
-          </details>
         </section>
       </div>
       <div id="position-view" hidden>
@@ -146,17 +105,13 @@
             <h3 id="position-chart-title"></h3>
             <p class="cap" id="position-chart-cap" hidden></p>
             <div class="chart" id="position-chart"></div>
-            <div class="legend" id="position-legend"><span><i class="a"></i>What you end up with</span><span><i class="m"></i>More than you lock</span><span><i class="l"></i>Less than you lock</span><span><i class="d"></i>What you lock</span></div>
+            <div class="legend" id="position-legend"></div>
           </section>
         </div>
       </div>
     </section>
 
     <section id="how" hidden aria-label="How it works">
-      <div class="seg how-pick" role="tablist" aria-label="Which product">
-        <button type="button" role="tab" id="how-tab-predict" data-how="predict" aria-selected="true" aria-controls="how-predict">Predict</button>
-        <button type="button" role="tab" id="how-tab-options" data-how="options" aria-selected="false" aria-controls="how-options">Options</button>
-      </div>
       <article class="card how-card" id="how-predict" aria-labelledby="how-predict-title">
         <div class="how-main">
         <h1 id="how-predict-title">Predict: call where Bitcoin closes</h1>
@@ -216,92 +171,10 @@
         </figure>
         </div>
       </article>
-
-      <article class="card how-card" id="how-options" aria-labelledby="how-title" hidden>
-        <div class="how-main">
-        <h1 id="how-title">Options: get paid to lock BTC</h1>
-        <p>Bitcoin’s price moves. Locking some of it until a date is useful: you get paid now for agreeing to a limit on that move.</p>
-
-        <div class="how-pair">
-          <section class="how-choice" aria-labelledby="how-call">
-            <h2 id="how-call"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M2.5 16.5l4.5-4.5 3 2.5 6-7"/><path d="M2.5 4.5h15" stroke-dasharray="2.2 2.4"/></svg>Cap gains</h2>
-            <p>You lock BTC until a date. You are paid now. If BTC stays under your line, you get the BTC back. If it goes above, you give up the gains above that line.</p>
-          </section>
-          <section class="how-choice" aria-labelledby="how-put">
-            <h2 id="how-put"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M2.5 3.5l4.5 4.5 3-2.5 6 7"/><path d="M2.5 15.5h15" stroke-dasharray="2.2 2.4"/></svg>Take the loss</h2>
-            <p>You lock BTC until a date. You are paid now. If BTC stays above your line, you get the BTC back. If it falls below, that loss comes out of what you locked.</p>
-          </section>
-        </div>
-
-        <p class="how-names">Cap gains is selling a call. Take the loss is selling a put.</p>
-
-        <h2>Why the put is different here</h2>
-        <p>Settlement pays Bitcoin, not dollars. A cash-secured put sets dollars aside to pay the dollar drop. This only locks BTC, and that BTC is worth fewer dollars as the price falls, so it cannot promise an unlimited dollar loss. The instrument is a limited put: you cover the fall down to half your line. At half the line or lower, the desk keeps what you locked, and you keep only the payment you already received.</p>
-        </div>
-        <div class="how-side">
-        <h2>Three steps</h2>
-        <figure class="how-flow">
-          <div class="how-step">
-            <div class="how-pic" aria-hidden="true">
-              <span class="how-tag you">Your BTC</span>
-              <span class="how-arrow"></span>
-              <span class="how-tag vault">Locked</span>
-            </div>
-            <strong>Collateral in</strong>
-            <p>You send in the BTC you are locking.</p>
-          </div>
-          <div class="how-join" aria-hidden="true"></div>
-          <div class="how-step">
-            <div class="how-pic" aria-hidden="true">
-              <span class="how-tag you">Paid to you</span>
-              <span class="how-plus">+</span>
-              <span class="how-tag vault">Vault</span>
-            </div>
-            <strong>Payout and vault funding</strong>
-            <p>You are paid now, and the locked BTC is funded into the vault until the date.</p>
-          </div>
-          <div class="how-join" aria-hidden="true"></div>
-          <div class="how-step">
-            <div class="how-pic" aria-hidden="true">
-              <span class="how-tag vault">Vault</span>
-              <span class="how-arrow"></span>
-              <span class="how-outs">
-                <span class="how-tag you">You</span>
-                <span class="how-tag desk">The desk</span>
-              </span>
-            </div>
-            <strong>Settlement</strong>
-            <p>On the date, the vault is split by where the price finished.</p>
-          </div>
-        </figure>
-        </div>
-      </article>
     </section>
   </main>
 
   <div class="scrim" id="scrim" hidden></div>
-  <aside class="drawer" id="checkout" role="dialog" aria-modal="true" aria-labelledby="checkout-sentence" hidden>
-    <button type="button" class="back" id="checkout-change"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M10 3.5L5.5 8l4.5 4.5"/></svg>Change</button>
-    <div class="scroll">
-      <p class="said" id="checkout-sentence"></p>
-      <h2 id="pay-head"></h2>
-      <p class="sub" id="pay-sub"></p>
-      <p class="fee"><span id="fee-label"></span><b>−1,000 sats</b></p>
-      <div class="rows-head"><span id="rows-when"></span><span>You get back</span></div>
-      <div id="rows"></div>
-      <section class="chartcard">
-        <h3 id="chart-title"></h3>
-        <p class="cap" id="chart-cap"></p>
-        <div class="chart" id="checkout-chart"></div>
-        <div class="legend"><span><i class="a"></i>What you end up with</span><span><i class="m"></i>More than you lock</span><span><i class="l"></i>Less than you lock</span><span><i class="d"></i>What you lock</span></div>
-      </section>
-    </div>
-    <div class="stick">
-      <label class="check"><input type="checkbox" id="agree"><span id="agree-text"></span></label>
-      <div class="sheet-foot"><button type="button" class="btn go" id="confirm">Lock and get paid</button><span class="firm" id="firm"></span></div>
-      <p class="status" id="checkout-status" role="status"></p>
-    </div>
-  </aside>
   <aside class="drawer" id="bet" role="dialog" aria-modal="true" aria-labelledby="bet-said" hidden>
     <button type="button" class="back" id="bet-change"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M10 3.5L5.5 8l4.5 4.5"/></svg>Change</button>
     <div class="scroll">

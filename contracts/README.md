@@ -50,6 +50,4 @@ import {
 
 Programs load the JSON in this directory. The design of the beacon is in [beacon.md](beacon.md).
 
-`option_intent.ark` is the funding coin this deployment fills before a vault exists. The desk spends that coin from its float.
-
-`standing_leg.ark` is the open offer. Side 0 is the writer and does not name a holder. Side 1 is a holder taking that writer's vault. `buildStandingMatch` spends the two coins in one `fill`. Packet 33 on that transaction is the holder's key and payout program. `standing_vault.ark` pays the same amounts as `OptionVault`. The holder is read from that packet. The live sell path does not use these contracts.
+`option_intent.ark` is the funding coin this deployment fills before a vault exists. The desk spends that coin from its float. `predict_vault.ark` is `OptionVault` with an all-or-nothing payoff for higher (kind 2) and lower (kind 3) predictions.

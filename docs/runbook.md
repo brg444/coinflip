@@ -4,7 +4,7 @@ Use this after `pnpm smoke:regtest` has passed. This is a fresh Mutinynet deploy
 
 The public HTTPS origin is the globe Dokploy puts on that new service. This repo does not store those origins. `curl` against a Traefik default certificate needs `-k`, as noted in the [README](../README.md).
 
-The three images clone GitHub `master` ([oracle/Dockerfile](../oracle/Dockerfile), [Dockerfile](../Dockerfile), [settle/Dockerfile](../settle/Dockerfile)). Build them after this change is on `master`, or the oracle dashboard will not have the settlement screen.
+The three images clone GitHub `main` ([oracle/Dockerfile](../oracle/Dockerfile), [Dockerfile](../Dockerfile), [settle/Dockerfile](../settle/Dockerfile)). Build them after this change is on `main`.
 
 Never put `ORACLE_KEY`, `ORACLE_ADMIN`, or `DESK_KEY` in the repo. Generate them locally and paste them into the new services.
 
