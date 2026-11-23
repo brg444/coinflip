@@ -10,6 +10,8 @@ Day-to-day work is funding the desk. The oracle reads DIA and keeps that history
 
 ## Live
 
+> **Status:** The upstream Mutinynet services and pinned DIA beacon below (`58db69a7…`, swept 2026-11-19) are retired. Deploy COINFLIP's own oracle, desk, and settler via [docs/runbook.md](docs/runbook.md), update `app/src/beacon-status.ts` and `app/rfq-config.js`, and publish GitHub Pages manually (`workflow_dispatch`, with `PAGES_CNAME` set once DNS points to the site).
+
 Traefik serves these domains with its default certificate. `curl` needs `-k`.
 
 | | |
@@ -108,7 +110,7 @@ All-or-nothing calls on where BTC closes at the end of a short window: higher (k
 - **Wire.** A predict `rfq_request` names `holder_pubkey` and `holder_pk_script` (the bettor's address) and `amount` is the stake. The quote names the desk as `writer_pubkey` and `writer_pk_script`, and `to_amount` is the payout. A filled position carries `holder_pk_script` so a settler can rebuild the vault.
 - **Windows.** Closes are on the 5-minute grid, at least 2 minutes and at most an hour away. The stake has to arrive within 60 seconds of the quote (`PREDICT_LOCK_S`): the 3-minute options lock would let a bettor watch most of a window before paying.
 - **Price.** The multiplier is `(1 - edge) / p`, where `p` is the lognormal chance of finishing on the bettor's side at the at-the-money Deribit IV of the nearest expiry at least six hours out, priced off the oracle's latest DIA print (validated against the exchange median sanity band and re-checked before fill). `DESK_EDGE` sets the edge (default 0.05, so 1.90× at even odds). `DESK_VOL` overrides the vol for options and predictions alike. Multipliers outside 1.05× to 10× are refused, as is a payout that does not beat the stake after the read fee.
-- **Float.** A prediction ties up the whole payout, not a premium, so open predictions count their payout against the float. Quotes fail closed unless the oracle reports a live `beaconExpiry` outliving the settlement window. On timestamp-expiry networks (Mutinynet), fills require user intent coins and picked desk float coins to outlive the settlement window and stay within 30 minutes of `beaconExpiry` so desk fills do not ratchet the beacon's expiry down; because `AttestationBeacon.read` is permissionless, off-desk reads with short-lived coins can still shorten the beacon's expiry until contract-level renewal or read limits exist.
+- **Float.** A prediction ties up the whole payout, not a premium, so open predictions count their payout against the float. Quotes fail closed unless the oracle reports a live `beaconExpiry` outliving the settlement window. On timestamp-expiry networks (Mutinynet), fills require user intent coins and picked desk float coins to outlive the settlement window and expire no earlier than `beaconExpiry` so desk fills never ratchet the beacon's expiry down; because `AttestationBeacon.read` is permissionless, off-desk reads with short-lived coins can still shorten the beacon's expiry until contract-level renewal or read limits exist.
 - **Unfixed windows (closed beta).** If DIA produces no print inside `[expiry, expiry + 60]`, the vault cannot settle on-chain from the beacon; the desk recovers the vault via `unilateral` on Bitcoin after `EXIT` (2048s) and the beta operator refunds the bettor's stake manually.
 
 `pnpm smoke:regtest` runs a prediction after the option: a fill from the desk float, a refund of an unfilled stake, a fixing above the line and the payout to the bettor.

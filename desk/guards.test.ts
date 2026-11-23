@@ -31,7 +31,10 @@ test("coin expiry guards fail closed on missing or dead beacons and block beacon
   assert.equal(beaconExpiryRefusal(expiry, need), "");
 
   const liveBeacon = expiry + 86_400;
-  assert.equal(minFillCoinExpiry(expiry, liveBeacon), liveBeacon - BEACON_RATCHET_MARGIN_S);
+  assert.equal(BEACON_RATCHET_MARGIN_S, 0);
+  assert.equal(minFillCoinExpiry(expiry, liveBeacon), liveBeacon);
+  assert.equal(coinOutlives({ expiresAt: new Date((liveBeacon - 1) * 1000) }, minFillCoinExpiry(expiry, liveBeacon)), false);
+  assert.equal(coinOutlives({ expiresAt: new Date(liveBeacon * 1000) }, minFillCoinExpiry(expiry, liveBeacon)), true);
   assert.equal(minFillCoinExpiry(expiry, need), need);
   assert.equal(minFillCoinExpiry(expiry, null), need);
   assert.equal(minFillCoinExpiry(expiry, 0), need);

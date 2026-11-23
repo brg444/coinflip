@@ -67,7 +67,7 @@ From [desk/main.ts](../desk/main.ts) and the root [Dockerfile](../Dockerfile).
 | `DESK_KEY` | New 32-byte hex. Nostr pubkey and the option holder key. |
 | `BEACON_TXID` | The new oracle `issueTxid`, 64 hex characters. The process exits if this is missing or not 64 hex. Set it after deploy, then restart. |
 | `BEACON_GIDX` | Leave unset (`0`) unless status shows the identity asset at another vout. |
-| `ORACLE_URL` | Origin of the Oracle service. At startup the desk reads `args.expiryLag` once and refuses a quote unless it is `60`, the window `OptionVault` hardcodes. |
+| `ORACLE_URL` | Origin of the Oracle service. Polled for `args.expiryLag` (must be `60`), live `beaconExpiry`, and the latest DIA spot price. |
 | `ARK_URL` | `https://mutinynet.arkade.sh`. |
 | `EMULATOR_URL` | `https://emulator.mutinynet.arkade.sh`. |
 | `RELAYS` | Leave unset. Default is `wss://nostr.arkade.sh`. |
@@ -153,7 +153,7 @@ Start the Settler after the Oracle origin and `ORACLE_ADMIN` are set. It can boo
 
 `GET /` returns `address` and `balance`. Send Mutinynet sats to `address`. That float pays premiums. Collateral does not come from it. `balance` stays `0` until the coins are indexed. The desk refuses a quote it cannot pay and logs `float short`. A formula premium at or below 330 sats is quoted at 331 (`payablePremium` in [protocol/pricing.ts](../protocol/pricing.ts)). A 10-minute quote at or below the 1,000-sat read fee is quoted at 1,001 (`quotedPremium`). Friday quotes are not. Chain dust stays 330, and `premiumRefusal` in [protocol/messages.ts](../protocol/messages.ts) still rejects a premium that was not lifted. There is no other desk funding amount in the repo.
 
-`GET /` also returns `pubkey`. Put that pubkey in the Mutinynet entry of [app/rfq-config.js](../app/rfq-config.js) and push `master` so the public page asks this desk. Leave the wallet URL alone. Automatic settlement does not read [app/src/beacon-status.ts](../app/src/beacon-status.ts). Leave that file unless you also want the page's own Settle button to spend this beacon.
+`GET /` also returns `pubkey`. Set `DESK_PUBKEY` on the **Oracle service** to that desk `pubkey` (so auto-publishing from Nostr announcements ignores unrelated third-party vaults), put it in the Mutinynet entry of [app/rfq-config.js](../app/rfq-config.js), update [app/src/beacon-status.ts](../app/src/beacon-status.ts) from the new oracle `GET /api/status`, and push `main` before publishing the page. Leave the wallet URL alone.
 
 ## Price screen
 
@@ -170,7 +170,7 @@ curl -k -X POST -H "Authorization: Bearer $ORACLE_ADMIN" -H "content-type: appli
 
 ## Testers
 
-Testers use the public page ([README](../README.md) records <https://arkade.trade/>) and the public desk. Quotes go to `wss://nostr.arkade.sh`. **Open Arkade wallet** goes to `https://mutinynet.arkade.money`. The page talks to Mutinynet arkd at the same default `ARK_URL` and `EMULATOR_URL` ([app/src/fund.ts](../app/src/fund.ts)).
+Testers use the hosted COINFLIP page and the public desk. Quotes go to `wss://nostr.arkade.sh`. **Open Arkade wallet** goes to `https://mutinynet.arkade.money`. The page talks to Mutinynet arkd at the same default `ARK_URL` and `EMULATOR_URL` ([app/src/fund.ts](../app/src/fund.ts)).
 
 Testers fund themselves at <https://faucet.mutinynet.com>. The seller pays collateral from that wallet to the intent address the page shows. The desk pays the premium to the seller's Mutinynet address.
 

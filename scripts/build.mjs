@@ -33,4 +33,5 @@ const html = readFileSync(path.join(root, "app/index.html"), "utf8")
 writeFileSync(path.join(dist, "index.html"), html);
 cpSync(path.join(root, "app/desk.css"), path.join(dist, "desk.css"));
 writeFileSync(path.join(dist, ".nojekyll"), "");
-if (!demo) writeFileSync(path.join(dist, "CNAME"), "coinflip.casino\n");
+const cname = process.env.PAGES_CNAME?.trim();
+if (!demo && cname) writeFileSync(path.join(dist, "CNAME"), `${cname}\n`);
