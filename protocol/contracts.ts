@@ -3,7 +3,7 @@ import { arkade, DefaultVtxo, networks, RestArkProvider } from "@arkade-os/sdk";
 import type { BeaconId } from "./beacon-id.ts";
 import { ARK_URL, EXIT, isPredict, type Kind } from "./constants.ts";
 import { bytesToHex, hexToBytes, xOnly } from "./hex.ts";
-import { exitSequence, intentProgram, swapProgram, vaultProgramFor } from "./programs.ts";
+import { exitSequence, intentProgram, vaultProgramFor } from "./programs.ts";
 
 export type Terms = {
   /** 0 covered call, 1 limited put: the user writes. 2 higher, 3 lower: the user holds. */
@@ -163,50 +163,5 @@ export function bindContracts(terms: Terms): Bound {
     optionProgram: vaultScript.tweakedPublicKey,
     intent: intentArgs,
     vault: vaultArgs,
-  };
-}
-
-/** Witness program the swap's output 0 is checked against. */
-export function swapMakerProgram(makerPk: Uint8Array, serverKey: Uint8Array, exit: bigint = EXIT): Uint8Array {
-  return payoutVtxo(makerPk, serverKey, exit).tweakedPublicKey;
-}
-
-export function bindSwap(input: {
-  makerPk: Uint8Array;
-  serverKey: Uint8Array;
-  emulatorKey: Uint8Array;
-  offerAssetIdTxid: Uint8Array;
-  offerAssetIdGidx: bigint;
-  offerAmount: bigint;
-  wantAssetIdTxid: Uint8Array;
-  wantAssetIdGidx: bigint;
-  wantAmount: bigint;
-  expirationTime: bigint;
-  exit?: bigint;
-  makerProgram: Uint8Array;
-}) {
-  const exit = input.exit ?? EXIT;
-  const serverKey = xOnly(input.serverKey);
-  const args: Record<string, bigint | Uint8Array> = {
-    makerPk: xOnly(input.makerPk),
-    offerAssetIdTxid: input.offerAssetIdTxid,
-    offerAssetIdGidx: input.offerAssetIdGidx,
-    offerAmount: input.offerAmount,
-    wantAssetIdTxid: input.wantAssetIdTxid,
-    wantAssetIdGidx: input.wantAssetIdGidx,
-    wantAmount: input.wantAmount,
-    expirationTime: input.expirationTime,
-    exit: exitSequence(exit),
-    contract_SingleSig_makerPk_exit: input.makerProgram,
-    server: serverKey,
-  };
-  const script = new arkade.ArkadeProgramScript(swapProgram(), args, {
-    serverKey,
-    emulatorKey: input.emulatorKey,
-  });
-  return {
-    address: addressOf(script, serverKey),
-    pkScript: script.pkScript,
-    args,
   };
 }

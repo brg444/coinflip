@@ -113,13 +113,6 @@ export function priceValue(cents: bigint, time = 0n): Uint8Array {
   return out;
 }
 
-/** Operator digest: `sha256(ctrlTxid || nextState)`. `ctrlTxid` is the reversed display txid. */
-export function publishDigest(ctrlTxid: Uint8Array, next: Uint8Array): Uint8Array {
-  if (ctrlTxid.length !== 32) throw new Error("ctrlTxid must be 32 bytes");
-  if (next.length !== STATE_SIZE) throw new Error("next state size");
-  return sha256(ctrlTxid, next);
-}
-
 export type BeaconArgs = {
   id: BeaconId;
   domain: Uint8Array;

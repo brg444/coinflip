@@ -1,18 +1,6 @@
 pragma arkade ^0.1.0;
 
-// 30-second RFQ lock. Same shape as NonInteractiveSwap: the maker locks coins,
-// a taker finalizes by funding the named outputs, and the maker cancels once
-// the emulator clock passes `deadline`. `older(exit)` is the operator-down path.
-//
-// side 0, user is the writer: the coin is the notional Q. Finalize pays the
-// premium plus any sats above Q back to `userScript`, and at least Q to the
-// committed option script.
-// side 1, user is the holder: the coin is the premium. Finalize pays that
-// premium to `solverScript`, at least Q to the option script, and any change
-// above dust back to `userScript`.
-//
-// Finalize and cancel are mutually exclusive: finalize requires the deadline
-// has not been reached, cancel requires `checkTime(deadline)`.
+// side 0: writer locks collateral, solver pays premium; side 1: holder locks stake, solver funds vault.
 
 contract OptionIntent(
   pubkey userPk,

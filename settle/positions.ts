@@ -96,10 +96,8 @@ export function duePositions<T extends { id: string; expiry: number }>(
     .sort((a, b) => a.expiry - b.expiry || a.id.localeCompare(b.id));
 }
 
-/** How often a due vault asks the oracle to publish its own expiry. */
-export const PUBLISH_EVERY_MS = 60_000;
+const PUBLISH_EVERY_MS = 60_000;
 
-/** Publish that expiry again only after a minute. `0` means it has not been asked. */
 export function publishReady(lastAt: number, nowMs: number, every = PUBLISH_EVERY_MS): boolean {
   return nowMs - lastAt >= every;
 }

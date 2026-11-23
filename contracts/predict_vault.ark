@@ -1,27 +1,6 @@
 pragma arkade ^0.1.0;
 
-// All-or-nothing call on where BTC closes: higher (kind 2) or lower (kind 3)
-// than a line. The settlement price comes from the same AttestationBeacon
-// OptionVault reads, spent in the same transaction.
-//
-// The desk is the writer and funds `collateral`, the payout. The holder paid
-// the stake to the desk when the intent filled. Settle spends this coin as
-// input 0 and the beacon as input 1. Output 0 is the beacon's continuation,
-// with readFee sats of this coin added to it. Payouts start at output 1 and
-// sum to the locked value minus readFee.
-//
-// The settlement price is the newest fixing for `expiry` in the beacon state
-// packet, the first 8 bytes of that slot's value, in USD cents. The next 8
-// bytes are the sample time. Settle rejects a time outside
-// [expiry, expiry + 60], the same window attest enforces when expiryLag is 60.
-//   higher: ST >  K -> holder gets the collateral, else 0
-//   lower:  ST <  K -> holder gets the collateral, else 0
-// A close exactly on the line pays the writer for both kinds.
-// A leg of DUST sats or less is folded into the other output.
-//
-// Spend paths: settle (anyone, once the emulator clock reaches expiry), close
-// (writer and holder together), unilateral (writer, after CSV). Same as
-// OptionVault; only the payoff differs.
+// All-or-nothing vault (kind 2 higher, kind 3 lower); exact strike pays the writer.
 
 contract PredictVault(
   int kind,

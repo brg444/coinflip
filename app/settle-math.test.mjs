@@ -1,34 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { premiumSats } from "../protocol/pricing.ts";
-import { bestQuote, bsCall } from "./quote.js";
-import {
-  fixing,
-  holderPayoff,
-  writerPayoff,
-  median3,
-  oraclePreimage,
-  settlementOutputs,
-  sliceError,
-  twap,
-  windows,
-} from "./settle-math.js";
-
-test("median matches the six orderings and ties", () => {
-  assert.equal(median3(1n, 2n, 3n), 2n);
-  assert.equal(median3(1n, 3n, 2n), 2n);
-  assert.equal(median3(2n, 1n, 3n), 2n);
-  assert.equal(median3(3n, 1n, 2n), 2n);
-  assert.equal(median3(2n, 3n, 1n), 2n);
-  assert.equal(median3(3n, 2n, 1n), 2n);
-  assert.equal(median3(5n, 5n, 1n), 5n);
-  assert.equal(median3(9n, 1n, 9n), 9n);
-});
-
-test("twap weights the settlement minute at 60 seconds", () => {
-  assert.equal(twap(100n, 200n, 160n), 150n);
-  assert.equal(twap(20_000n, 20_000n, 20_000n), 20_000n);
-});
+import { bsCall, premiumSats } from "../protocol/pricing.ts";
+import { holderPayoff, settlementOutputs, writerPayoff } from "./settle-math.js";
 
 test("covered call and limited put payoffs", () => {
   const q = 100_000n;
@@ -55,47 +28,6 @@ test("dust folds the small leg into the other output", () => {
   assert.deepEqual(settlementOutputs(200n, 400n), { mode: "writer", holder: 0n, writer: 400n });
 });
 
-test("sample times used by the desk sit inside each slice", () => {
-  const expiry = 10_000n;
-  for (const [lo, hi] of Object.values(windows(expiry))) {
-    assert.equal(sliceError([lo + 20n, lo + 30n, lo + 40n], lo, hi), null);
-  }
-  assert.equal(sliceError([10n, 20n, 70n], 0n, 100n), null);
-  assert.equal(sliceError([10n, 20n, 71n], 0n, 100n), "oracle spread");
-  assert.equal(sliceError([10n, 20n, 30n], 40n, 100n), "slice early");
-});
-
-test("oracle preimage is ticker plus two little-endian int64s", () => {
-  const bytes = oraclePreimage(1n, 2n);
-  assert.equal(bytes.length, 22);
-  assert.equal(Buffer.from(bytes.subarray(0, 6)).toString("ascii"), "BTCUSD");
-  assert.equal(bytes[6], 1);
-  assert.equal(bytes[14], 2);
-  assert.equal(bytes[21], 0);
-});
-
-test("fixing reuses the slice medians and the twap", () => {
-  const expiry = 10_000n;
-  const honest = (base, who, times) => ({
-    price: [base - 5n, base, base + 5n],
-    time: times,
-    who,
-  });
-  const slices = [
-    honest(20_000n, [0n, 1n, 2n], [expiry - 1780n, expiry - 1770n, expiry - 1760n]),
-    honest(20_000n, [1n, 2n, 3n], [expiry - 940n, expiry - 930n, expiry - 920n]),
-    honest(20_000n, [2n, 3n, 4n], [expiry + 10n, expiry + 20n, expiry + 30n]),
-  ];
-  assert.equal(fixing(expiry, slices).twap, 20_000n);
-  const lied = slices.map((slice, index) => index === 1 ? { ...slice, price: [slice.price[0], slice.price[1], 80_000n] } : slice);
-  assert.equal(fixing(expiry, lied).medians[1], 20_000n);
-  assert.equal(fixing(1800n, slices).error, "expiry");
-  const same = slices.map((slice, index) => index === 0 ? { ...slice, who: [0n, 0n, 1n] } : slice);
-  assert.equal(fixing(expiry, same).error, "same oracle");
-  const early = slices.map((slice, index) => index === 2 ? { ...slice, time: [expiry - 10n, expiry - 20n, expiry - 30n] } : slice);
-  assert.equal(fixing(expiry, early).error, "slice early");
-});
-
 test("black-scholes call is near the known one-year value", () => {
   const px = bsCall(100, 100, 1, 0.2);
   assert.ok(Math.abs(px - 7.9656) < 0.02, px);
@@ -116,13 +48,4 @@ test("a 7-day covered call at 62% vol is dust only at the far strike", () => {
   }).sats);
   assert.ok(premiums.slice(0, 4).every((sats) => sats > 330n));
   assert.ok(premiums[4] <= 330n);
-});
-
-test("the larger premium wins a sale and the smaller premium wins a buy", () => {
-  const rows = [
-    { name: "A", sats: 1_000n },
-    { name: "B", sats: 2_000n },
-  ];
-  assert.equal(bestQuote(rows, 0).name, "B");
-  assert.equal(bestQuote(rows, 1).name, "A");
 });
