@@ -1,16 +1,8 @@
-# Oracle service and its dashboard, one port.
-#
-# Local (context = repository root):
-#   docker build -f oracle/Dockerfile -t arkade-options-oracle .
-#
-# Dokploy: Docker File `./Dockerfile` (or `oracle/Dockerfile`), Docker Context
-# Path `/oracle` or `/`. The image clones the repo so a service-folder context
-# still gets package.json, vendor, protocol, and contracts.
 FROM node:22-alpine
 WORKDIR /app
 RUN apk add --no-cache git
-ADD https://api.github.com/repos/ArkLabsHQ/arkade-options/commits/master /tmp/master.json
-RUN git clone --depth 1 https://github.com/ArkLabsHQ/arkade-options.git /tmp/src \
+ADD https://api.github.com/repos/brg444/coinflip/commits/main /tmp/main.json
+RUN git clone --depth 1 --branch main https://github.com/brg444/coinflip.git /tmp/src \
  && cp -a /tmp/src/. /app/ \
  && rm -rf /tmp/src /app/.git \
  && corepack enable \

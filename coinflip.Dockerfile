@@ -16,7 +16,6 @@ FROM node:22-alpine
 WORKDIR /app
 RUN corepack enable
 COPY package.json pnpm-lock.yaml ./
-COPY vendor vendor
 RUN CI=1 COREPACK_ENABLE_DOWNLOAD_PROMPT=0 pnpm install --frozen-lockfile
 COPY . .
 # The host mounts /data. Railway's validator rejects the Dockerfile keyword for it,
