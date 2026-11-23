@@ -11,7 +11,6 @@ const dist = path.join(root, "dist");
 mkdirSync(dist, { recursive: true });
 
 const publish = () => {
-  mkdirSync(path.join(dist, "viz"), { recursive: true });
   const jsPath = path.join(dist, "app.js");
   const hash = existsSync(jsPath)
     ? createHash("sha256").update(readFileSync(jsPath)).digest("hex").slice(0, 10)
@@ -22,8 +21,6 @@ const publish = () => {
     .replace('href="desk.css"', `href="desk.css?${cssHash}"`);
   writeFileSync(path.join(dist, "index.html"), html);
   cpSync(path.join(root, "app/desk.css"), path.join(dist, "desk.css"));
-  cpSync(path.join(root, "viz/index.html"), path.join(dist, "viz/index.html"));
-  cpSync(path.join(root, "app/settle-math.js"), path.join(dist, "viz/settle-math.js"));
   writeFileSync(path.join(dist, ".nojekyll"), "");
 };
 
@@ -62,8 +59,8 @@ http
     let rel = decodeURIComponent(url.pathname);
     if (rel.endsWith("/")) rel += "index.html";
     rel = rel.replace(/^\//, "");
-    const file = path.join(dist, rel);
-    if (!file.startsWith(dist) || !existsSync(file) || !statSync(file).isFile()) {
+    const file = path.resolve(dist, rel);
+    if (!file.startsWith(dist + path.sep) || !existsSync(file) || !statSync(file).isFile()) {
       res.writeHead(404);
       res.end("not found");
       return;

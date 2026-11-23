@@ -21,7 +21,7 @@ import { bytesToHex, hexToBytes, xOnly } from "../../protocol/hex.ts";
 import { networkByName } from "../../protocol/network.ts";
 import { intentProgram, vaultProgram, vaultProgramFor } from "../../protocol/programs.ts";
 
-export const NETWORK_NAME = "Mutinynet";
+const NETWORK_NAME = "Mutinynet";
 export const WALLET_URL = "https://mutinynet.arkade.money";
 
 /**
@@ -95,14 +95,13 @@ function contracts(): Promise<ContractManager> {
 
 let operatorPromise: Promise<Session> | null = null;
 
-/** Mutinynet server and emulator keys. Does not read the desk's saved positions. */
-export function operatorSession(): Promise<Session> {
+function operatorSession(): Promise<Session> {
   if (!operatorPromise) {
     operatorPromise = (async () => {
       const ark = new RestArkProvider(ARK_URL);
       const info = await ark.getInfo();
       if (info.network.trim().toLowerCase() !== "mutinynet") {
-        throw new Error("This page restores Mutinynet vaults.");
+        throw new Error("This page requires Mutinynet.");
       }
       const contractManager = await contracts();
       const client = await arkade.Arkade.connect({
@@ -121,14 +120,8 @@ export function operatorSession(): Promise<Session> {
   return operatorPromise;
 }
 
-export async function readOutpoint(txid: string, vout: number) {
-  const page = await indexer.getVtxos({ outpoints: [{ txid, vout }] });
-  const want = txid.toLowerCase();
-  return (page.vtxos ?? []).find((coin) => (coin.txid || "").toLowerCase() === want && coin.vout === vout) ?? null;
-}
 const ADDRESS_KEY = "arkade-options-address-v1";
 const SESSION_KEY = "arkade-options-session-v1";
-const LEGACY_WRITER_KEY = "arkade-options-writer-v1";
 
 function openSession(identity: SingleKey): Promise<Session> {
   const id = identity.toHex();
@@ -205,8 +198,7 @@ export function clearAddress(): void {
   globalThis.localStorage?.removeItem(ADDRESS_KEY);
 }
 
-/** Browser identity for talking to arkd. It is not the payout address. */
-export function sessionHex(): string {
+function sessionHex(): string {
   const existing = storedHex(SESSION_KEY);
   if (existing) return existing;
   const bytes = new Uint8Array(32);
@@ -217,12 +209,6 @@ export function sessionHex(): string {
   return hex;
 }
 
-/** Key an older page created without asking. Used only to finish those positions. */
-export function legacyWriterHex(): string | null {
-  return storedHex(LEGACY_WRITER_KEY);
-}
-
-/** Address finalize pays, and the script the desk must accept. */
 export async function writerBinding(address: string): Promise<WriterBinding> {
   const decoded = ArkAddress.decode(parseWriterAddress(address));
   const { client } = await openSession(SingleKey.fromHex(sessionHex()));
@@ -242,20 +228,9 @@ export async function writerBinding(address: string): Promise<WriterBinding> {
   };
 }
 
-/** Desk's default VTXO pkScript for a position, used to recognize 0-user-payout settlements. */
 export async function deskPkScript(deskPkHex: string, exit?: bigint | number): Promise<string> {
   const { client } = await operatorSession();
   return bytesToHex(payoutVtxo(hexToBytes(deskPkHex), client.serverKey, exit ? BigInt(exit) : EXIT).pkScript);
-}
-
-/** Address finalize pays the premium to, for an older stored key. */
-export async function writerPayoutAddress(writerHex: string): Promise<string> {
-  const writer = SingleKey.fromHex(writerHex);
-  const { client } = await openSession(writer);
-  await assertServerExit();
-  const pubkey = await writer.xOnlyPublicKey();
-  const script = payoutVtxo(pubkey, client.serverKey, EXIT);
-  return script.address(networks.mutinynet.hrp, xOnly(client.serverKey)).encode();
 }
 
 async function build(req: FundRequest) {

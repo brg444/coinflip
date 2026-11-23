@@ -8,8 +8,7 @@ import { classifyIntent, psbtView, type CoinView, type IntentPhase, type TxOutpu
 import { virtualTxsById } from "../../protocol/virtual-txs.ts";
 import { slotPrice } from "../../settle/vault.ts";
 import { intentCoins, onContractEvent } from "./fund.ts";
-import { splitPayouts } from "./position-status.ts";
-import { settlementTxid } from "./restore.ts";
+import { settlementTxid, splitPayouts } from "./position-status.ts";
 
 export type WatchRow = {
   address: string;

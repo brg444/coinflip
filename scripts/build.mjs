@@ -24,7 +24,7 @@ await esbuild.build({
   define: { __COINFLIP_DEMO__: JSON.stringify(demo) },
 });
 
-mkdirSync(path.join(dist, "viz"), { recursive: true });
+mkdirSync(dist, { recursive: true });
 const hash = createHash("sha256").update(readFileSync(path.join(dist, "app.js"))).digest("hex").slice(0, 10);
 const cssHash = createHash("sha256").update(readFileSync(path.join(root, "app/desk.css"))).digest("hex").slice(0, 10);
 const html = readFileSync(path.join(root, "app/index.html"), "utf8")
@@ -32,7 +32,6 @@ const html = readFileSync(path.join(root, "app/index.html"), "utf8")
   .replace('href="desk.css"', `href="desk.css?${cssHash}"`);
 writeFileSync(path.join(dist, "index.html"), html);
 cpSync(path.join(root, "app/desk.css"), path.join(dist, "desk.css"));
-cpSync(path.join(root, "viz/index.html"), path.join(dist, "viz/index.html"));
-cpSync(path.join(root, "app/settle-math.js"), path.join(dist, "viz/settle-math.js"));
 writeFileSync(path.join(dist, ".nojekyll"), "");
-if (!demo) writeFileSync(path.join(dist, "CNAME"), "arkade.trade\n");
+const cname = process.env.PAGES_CNAME?.trim();
+if (!demo && cname) writeFileSync(path.join(dist, "CNAME"), `${cname}\n`);

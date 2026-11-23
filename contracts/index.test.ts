@@ -9,20 +9,16 @@ import { compile } from "@arkade-os/compiler";
 import { bindBeacon as bindBeaconFromProtocol } from "../protocol/beacon.ts";
 import { bindContracts as bindContractsFromProtocol } from "../protocol/contracts.ts";
 import { buildSettle as buildSettleFromProtocol } from "../protocol/cospend.ts";
-import { beaconProgram as beaconProgramFromProtocol, standingLegProgram as standingLegProgramFromProtocol, standingVaultProgram as standingVaultProgramFromProtocol, vaultProgram as vaultProgramFromProtocol } from "../protocol/programs.ts";
-import { bindWriterLeg as bindWriterLegFromProtocol, buildStandingMatch as buildStandingMatchFromProtocol } from "../protocol/standing.ts";
+import { beaconProgram as beaconProgramFromProtocol, predictVaultProgram as predictVaultProgramFromProtocol, vaultProgram as vaultProgramFromProtocol } from "../protocol/programs.ts";
 import { settlePayouts as settlePayoutsFromSettle, slotFixing as slotFixingFromSettle, slotPrice as slotPriceFromSettle } from "../settle/vault.ts";
 import {
   attestationBeaconArtifact,
   beaconProgram,
   bindBeacon,
   bindContracts,
-  bindWriterLeg,
   buildSettle,
-  buildStandingMatch,
-  standingLegProgram,
-  standingVaultProgram,
   optionVaultArtifact,
+  predictVaultProgram,
   settlePayouts,
   slotFixing,
   slotPrice,
@@ -101,16 +97,14 @@ test("the import surface is the protocol bind and settle helpers", () => {
   assert.equal(bindContracts, bindContractsFromProtocol);
   assert.equal(bindBeacon, bindBeaconFromProtocol);
   assert.equal(buildSettle, buildSettleFromProtocol);
-  assert.equal(bindWriterLeg, bindWriterLegFromProtocol);
-  assert.equal(buildStandingMatch, buildStandingMatchFromProtocol);
-  assert.equal(standingLegProgram, standingLegProgramFromProtocol);
-  assert.equal(standingVaultProgram, standingVaultProgramFromProtocol);
   assert.equal(vaultProgram, vaultProgramFromProtocol);
+  assert.equal(predictVaultProgram, predictVaultProgramFromProtocol);
   assert.equal(beaconProgram, beaconProgramFromProtocol);
   assert.equal(slotPrice, slotPriceFromSettle);
   assert.equal(slotFixing, slotFixingFromSettle);
   assert.equal(settlePayouts, settlePayoutsFromSettle);
   assert.deepEqual(Object.keys(vaultProgram().functions).sort(), ["close", "settle", "unilateral"]);
+  assert.deepEqual(Object.keys(predictVaultProgram().functions).sort(), ["close", "settle", "unilateral"]);
   assert.deepEqual(Object.keys(beaconProgram().functions).sort(), ["attest", "migrate", "read", "unilateral"]);
 });
 
@@ -121,7 +115,7 @@ test("committed contract artifacts match compiled .ark sources", async () => {
     entries.filter((name) => name.endsWith(".ark")).map((name) => [name, readFileSync(path.join(dir, name), "utf8")]),
   );
   const artifactFiles = entries.filter((name) => name.endsWith(".artifact.json"));
-  assert.ok(artifactFiles.length >= 6);
+  assert.ok(artifactFiles.length >= 4);
   for (const artifactFile of artifactFiles) {
     const entry = artifactFile.replace(/\.artifact\.json$/, ".ark");
     const committed = JSON.parse(readFileSync(path.join(dir, artifactFile), "utf8")) as Record<string, unknown>;

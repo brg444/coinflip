@@ -15,7 +15,7 @@ function rotr(x: number, n: number): number {
   return (x >>> n) | (x << (32 - n));
 }
 
-export function sha256Bytes(data: Uint8Array): Uint8Array {
+function sha256Bytes(data: Uint8Array): Uint8Array {
   const padded = new Uint8Array((((data.length + 9 + 63) >> 6) << 6));
   padded.set(data);
   padded[data.length] = 0x80;

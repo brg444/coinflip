@@ -62,7 +62,7 @@ import { spotCents } from "./spot.ts";
  *   DESK_KEY        32-byte hex. Nostr pubkey and the option holder key.
  *   BEACON_TXID     required 64-hex display txid of the oracle's identity asset
  *   BEACON_GIDX     optional vout index of that asset. Default 0
- *   ORACLE_URL      oracle origin. expiryLag is read once at startup. A quote is refused unless it is 60.
+ *   ORACLE_URL      oracle origin. Polled for expiryLag (must be 60), beaconExpiry, and latest DIA spot.
  *   RELAYS          comma-separated websocket URLs
  *   ARK_URL         default Mutinynet arkd
  *   EMULATOR_URL    default Mutinynet emulator
@@ -658,12 +658,10 @@ async function announceFilled() {
 type FloatCoin = { txid: string; vout: number; value: number; expiresAt?: Date };
 
 const deskScriptHex = bytesToHex(deskScript.pkScript);
-// ponytail: script→quote only. Scan for the reverse; add quote→script if the open book gets large.
 const quoteByScript = new Map<string, string>();
 const deskCoins = new Map<string, FloatCoin>();
 const shortLogged = new Set<string>();
 const queued = new Set<string>();
-// ponytail: one fill at a time. Per-quote locks if two quotes must settle together.
 let filling = false;
 
 function recount() {

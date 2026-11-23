@@ -66,8 +66,7 @@ export function openPremium(rows: readonly QuoteRow[], now: number): bigint {
   return sum;
 }
 
-/** Still binding float or vault exposure for this rfqId. */
-export function liveQuote(row: QuoteRow, now: number): boolean {
+function liveQuote(row: QuoteRow, now: number): boolean {
   if (row.status === "open") return row.deadline > now;
   if (row.status === "filled") {
     if (!row.fillTxid) return true;

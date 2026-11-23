@@ -214,7 +214,6 @@ async function deskUp(key, beacon) {
   start("desk", "desk/main.ts", {
     DESK_KEY: key.deskKey,
     BEACON_TXID: beacon.issueTxid,
-    // The desk reads the beacon's expiryLag here once and refuses quotes unless it is 60.
     ORACLE_URL: oracleUrl,
     DATA_DIR: path.join(home, "desk"),
     PORT: String(PORTS.desk),
@@ -286,8 +285,8 @@ function servePage() {
       }
       let rel = decodeURIComponent(url.pathname);
       if (rel.endsWith("/")) rel += "index.html";
-      const file = path.join(site, rel.replace(/^\//, ""));
-      if (!file.startsWith(site) || !existsSync(file) || !statSync(file).isFile()) {
+      const file = path.resolve(site, rel.replace(/^\//, ""));
+      if (!file.startsWith(site + path.sep) || !existsSync(file) || !statSync(file).isFile()) {
         res.writeHead(404);
         res.end("not found");
         return;

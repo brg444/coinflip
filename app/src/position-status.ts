@@ -3,7 +3,14 @@ import { btcAmount } from "./fund.ts";
 
 const TXID = /^[0-9a-f]{64}$/;
 
-/** A settlement transaction the blotter can link, distinct from the fill. */
+export function settlementTxid(coin: { arkTxId?: string; spentBy?: string }): string {
+  for (const raw of [coin.arkTxId, coin.spentBy]) {
+    const id = (raw ?? "").trim().toLowerCase();
+    if (TXID.test(id)) return id;
+  }
+  return "";
+}
+
 export function settlementKnown(position: { settleTxid?: string; closeTxid?: string }): boolean {
   const id = (position.settleTxid ?? "").trim().toLowerCase();
   const close = (position.closeTxid ?? "").trim().toLowerCase();
@@ -51,8 +58,7 @@ export function usdFromCents(cents: bigint): string {
   return `${neg ? "-" : ""}${whole}.${frac}`;
 }
 
-/** Collateral has left the vault. Names the writer, the desk, or both. */
-export function settledSummary(position: {
+function settledSummary(position: {
   writerKeep?: string;
   deskTake?: string;
   settleCents?: string;

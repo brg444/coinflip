@@ -1,12 +1,6 @@
-/**
- * Public constructor the page settles against. The oracle certificate is not
- * trusted by the browser, so this is a copy of GET /api/status on the
- * Mutinynet oracle. Replace it when that beacon changes. `fixings` is what
- * the attestations page lists, so copy it again after each new fixing.
- */
+// Bundled copy of Mutinynet oracle /api/status; pnpm demo injects its own beacon.
 declare const __COINFLIP_DEMO__: { beacon?: typeof PINNED_BEACON_STATUS } | null | undefined;
 
-/** `pnpm demo` swaps in its own oracle's status. Every other build uses the pinned one. */
 const demoBeacon = typeof __COINFLIP_DEMO__ !== "undefined" && __COINFLIP_DEMO__?.beacon ? __COINFLIP_DEMO__.beacon : null;
 
 const PINNED_BEACON_STATUS = {
@@ -16,8 +10,6 @@ const PINNED_BEACON_STATUS = {
   address: "tark1qqcpq7yq3e8hhsx6ml3fud93m7827qggaurtzu3zwsr4a0qs0gf849c8k9fmuplslxvex94jqct8d58l229c0jh2seve4ky0n3xy0rjwr978pd",
   args: {
     ctrlTxid: "c275e906026c210e667a0f8dd81528a6492cba4deca76fb1d14ca6a8a769db58",
-    signersN: 1,
-    threshold: 1,
     domain: "4254435553442d464958",
     expiryLag: 60,
     readFee: 1000,

@@ -6,9 +6,8 @@ import { generateSecretKey } from "nostr-tools/pure";
 
 import { beaconIdOf, bindBeacon } from "./beacon.ts";
 import { BEACON_READ_FEE, EXIT, OPTION_VAULT_PROGRAM_ID, PAIR, POSITION_KIND } from "./constants.ts";
-import { bindContracts, bindSwap, directPayoutKey } from "./contracts.ts";
+import { bindContracts, directPayoutKey } from "./contracts.ts";
 import { bytesToHex, hexToBytes, xOnly } from "./hex.ts";
-import { bindHolderLeg, bindStandingVault, bindWriterLeg } from "./standing.ts";
 import { beaconWindowRefusal, parsePosition, parseWire, premiumRefusal, requestRefusal, type OptionPosition, type RfqRequest } from "./messages.ts";
 import { nostrPubkey, openSealed, positionEvent, quoteRelay, readPosition, seal } from "./nostr.ts";
 import { payablePremium, premiumSats, quotedPremium } from "./pricing.ts";
@@ -75,29 +74,6 @@ test("a pasted address is paid at its taproot key", async () => {
   assert.equal(bytesToHex(direct.writerPkScript), `5120${bytesToHex(terms.writerPk)}`);
   assert.equal(bytesToHex(direct.writerProgram), bytesToHex(terms.writerPk));
   assert.notEqual(direct.intentAddress, bindContracts(terms).intentAddress);
-});
-
-test("the reference swap derives a pinned address", async () => {
-  const terms = await sampleTerms();
-  const bound = bindContracts(terms);
-  const swap = bindSwap({
-    makerPk: terms.writerPk,
-    serverKey: terms.serverKey,
-    emulatorKey: terms.emulatorKey,
-    offerAssetIdTxid: terms.writerPk,
-    offerAssetIdGidx: 0n,
-    offerAmount: 1n,
-    wantAssetIdTxid: terms.holderPk,
-    wantAssetIdGidx: 0n,
-    wantAmount: 1n,
-    expirationTime: terms.expiry,
-    exit: terms.exit,
-    makerProgram: bound.writerProgram,
-  });
-  assert.equal(
-    swap.address,
-    "tark1qqhsre0ptn9r28d07wzrldc08shs5x7aqhj6lzy2vauyaulppg4qzsurf7k592plnhkzjvdsrssl33ws22nwxautl8gsw5cc35p8e2s4vwk2gc",
-  );
 });
 
 test("a premium at or below 330 sats is a refusal", () => {
@@ -290,23 +266,4 @@ test("addresses and unilateral tapscript bytes stay identical at EXIT=2048", asy
     bytesToHex(bcn.script.functionByName("unilateral")!.tapLeafScript[1]),
     "03040040b2752079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798acc0",
   );
-  const sw = bindSwap({
-    makerPk: writerPk,
-    serverKey,
-    emulatorKey,
-    offerAssetIdTxid: writerPk,
-    offerAssetIdGidx: 0n,
-    offerAmount: 1n,
-    wantAssetIdTxid: holderPk,
-    wantAssetIdGidx: 0n,
-    wantAmount: 1n,
-    expirationTime: 1_790_000_100n,
-    exit: EXIT,
-    makerProgram: writerPk,
-  });
-  assert.equal(sw.address, "tark1qqhsre0ptn9r28d07wzrldc08shs5x7aqhj6lzy2vauyaulppg4qr5de3zx48l0d6hag6p5l9lln4mqhxcl2mgf45ze68sy7csjnxydykwtyyc");
-  const st = { ...common, kind: 0 as const };
-  assert.equal(bindStandingVault(st).address, "tark1qqhsre0ptn9r28d07wzrldc08shs5x7aqhj6lzy2vauyaulppg4qzp2v5te603y5d8xjvzjwnnlj57v36fuhgap2eq90c6whwtf7hrssyv7fnn");
-  assert.equal(bindWriterLeg(st).address, "tark1qqhsre0ptn9r28d07wzrldc08shs5x7aqhj6lzy2vauyaulppg4qrt2jfr40524xg9usnctmgt7as648z2q6yu6qzrwy8h2ua05z57weh9chc8");
-  assert.equal(bindHolderLeg(st, holderPk).address, "tark1qqhsre0ptn9r28d07wzrldc08shs5x7aqhj6lzy2vauyaulppg4qrw28mwx844elkw0e8yxu2anlwuhnq947mwaaerh2nmfksqa56j5hmyn7xf");
 });

@@ -40,7 +40,6 @@ export type Coin = { txid: string; vout: number; value: number | bigint; prevTx:
 export type CovenantSpend = {
   script: ProgramScript;
   fn: string;
-  /** Call arguments by their flattened names, e.g. `key`, `value`, `sigs.0`. */
   callArgs?: Record<string, bigint | Uint8Array>;
   coin: Coin;
 };
@@ -121,8 +120,7 @@ export function build(spends: Spend[], outputs: { script: Uint8Array; amount: bi
   return { arkTx, checkpoints, signIndexes };
 }
 
-/** One identity unit moving from input `vin` to output `vout`. */
-export function unitTransfer(id: asset.AssetId, vin: number, vout: number): asset.Packet {
+function unitTransfer(id: asset.AssetId, vin: number, vout: number): asset.Packet {
   return asset.Packet.create([
     asset.AssetGroup.create(id, null, [asset.AssetInput.create(vin, 1n)], [asset.AssetOutput.create(vout, 1n)], []),
   ]);

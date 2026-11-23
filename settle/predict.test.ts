@@ -14,7 +14,7 @@ import { classifyIntent } from "../protocol/intent-state.ts";
 import { parsePosition, parseWire, payoutRefusal, predictRefusal, requestRefusal, type RfqRequest } from "../protocol/messages.ts";
 import { positionEvent, readPosition } from "../protocol/nostr.ts";
 import { payoutMultiplier, predictMultiplier, predictPayout, probAbove } from "../protocol/pricing.ts";
-import { predictVaultProgram, rawPredictVaultProgram, vaultProgram } from "../protocol/programs.ts";
+import { predictVaultProgram, vaultProgram } from "../protocol/programs.ts";
 import { outlay, openPremium, type QuoteRow } from "../desk/book.ts";
 import { parseOracleBeacon } from "./oracle.ts";
 import { positionFromAnnouncement, termsFor } from "./positions.ts";
@@ -71,11 +71,11 @@ test("predict is all or nothing, and a close on the line pays the desk", () => {
 });
 
 test("PredictVault is OptionVault with the payoff swapped and nothing else", () => {
-  const predict = rawPredictVaultProgram();
+  const predict = predictVaultProgram();
   const option = vaultProgram();
   assert.equal(predict.name, "PredictVault");
   assert.deepEqual(Object.keys(predict.functions), Object.keys(option.functions));
-  const asm = predictVaultProgram().functions.settle?.arkadeScript?.asm ?? [];
+  const asm = predict.functions.settle?.arkadeScript?.asm ?? [];
   const count = (name: string) => asm.filter((token) => token === name).length;
   assert.equal(count("MUL"), 0);
   assert.equal(count("DIV"), 0);

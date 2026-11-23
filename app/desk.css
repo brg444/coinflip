@@ -469,8 +469,6 @@ details.more summary { cursor: pointer; padding: 14px 0; font-weight: 500; }
 .foot { margin: 18px 0 0; color: var(--muted); font-size: 13.5px; }
 
 /* how it works */
-/* One product at a time, explanation on the left and the three steps on the right, so it fits one screen. */
-.how-pick { margin-bottom: 16px; }
 .seg button[aria-selected="true"] { background: var(--lav); color: var(--purple); }
 .how-card { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(0, .7fr); gap: 0 40px; align-items: start; }
 .how-card h1 { margin: 0; font-size: 25px; line-height: 1.25; letter-spacing: -.026em; font-weight: 600; }
@@ -826,8 +824,6 @@ button.chip:not(:disabled):hover { transform: translateY(-1px); }
   .predict .sentence { font-size: clamp(34px, 7vh, 48px); }
   .predict .estimate { margin: 18px 0 16px; }
   .predict .windows { margin-top: 12px; }
-  .how-pick { margin-bottom: 10px; }
-  .how-pick button { height: 34px; }
   .how-card { padding: 20px 24px; }
   .how-card h1 { font-size: 23px; }
   .how-card h2 { margin-top: 16px; font-size: 17px; }
