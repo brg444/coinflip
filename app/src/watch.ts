@@ -41,6 +41,12 @@ export function pkScriptOf(address: string): string {
   return bytesToHex(ArkAddress.decode(address).pkScript);
 }
 
+/** Spendable sats at an Arkade address, as the indexer sees them. The wallet itself may also hold coins elsewhere. */
+export async function addressBalance(address: string): Promise<bigint> {
+  const page = await indexer.getVtxos({ scripts: [pkScriptOf(address)], spendableOnly: true });
+  return (page.vtxos ?? []).reduce((sum, coin) => (coin.isSpent || coin.spentBy ? sum : sum + BigInt(coin.value)), 0n);
+}
+
 /**
  * The user's and the desk's sats on a settlement transaction, and the fixing it
  * read. Output 0 is the beacon. `writerScript` is the user's script.

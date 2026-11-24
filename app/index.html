@@ -25,7 +25,7 @@
     </nav>
     <button type="button" class="setup-pill" id="setup-pill" aria-haspopup="dialog" aria-expanded="false" aria-controls="demo-setup" hidden><span class="dot" aria-hidden="true"></span><span id="setup-pill-text"></span></button>
     <button type="button" class="theme" id="theme" aria-label="Switch to dark theme"></button>
-    <button type="button" class="wallet" id="who" hidden><span class="dot" aria-hidden="true"></span><span class="addr-l" id="who-address"></span><span class="addr-s" id="who-tail"></span></button>
+    <button type="button" class="wallet" id="who" hidden><span class="dot" aria-hidden="true"></span><span class="bal" id="who-balance" hidden></span><span class="addr-l" id="who-address"></span><span class="addr-s" id="who-tail"></span></button>
     <button type="button" class="connect" id="top-connect">Connect</button>
   </header>
   </div>
@@ -186,16 +186,18 @@
       <p class="said" id="bet-said"></p>
       <h2 id="bet-head"></h2>
       <p class="sub" id="bet-sub"></p>
+      <button type="button" class="chart-fold" id="bet-chart-fold" aria-expanded="false" aria-controls="bet-details">See the details<svg viewBox="0 0 14 14" aria-hidden="true"><path d="M3 5.5l4 4 4-4"/></svg></button>
+      <div id="bet-details">
       <p class="fee"><span id="bet-fee-label"></span><b>−1,000 sats</b></p>
       <div class="rows-head"><span id="bet-rows-when"></span><span>You get back</span></div>
       <div id="bet-rows"></div>
-      <button type="button" class="chart-fold" id="bet-chart-fold" aria-expanded="false" aria-controls="bet-chartcard">The payout at every price<svg viewBox="0 0 14 14" aria-hidden="true"><path d="M3 5.5l4 4 4-4"/></svg></button>
       <section class="chartcard" id="bet-chartcard">
         <h3 id="bet-chart-title"></h3>
         <p class="cap">One fixing decides it. All or nothing, no partial payouts.</p>
         <div class="chart" id="bet-chart"></div>
         <div class="legend"><span><i class="a"></i>What you get back</span><span><i class="m"></i>More than you put in</span><span><i class="l"></i>Less than you put in</span><span><i class="d"></i>What you put in</span></div>
       </section>
+      </div>
     </div>
     <div class="stick">
       <label class="check"><input type="checkbox" id="bet-agree"><span id="bet-agree-text"></span></label>

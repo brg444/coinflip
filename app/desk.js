@@ -36,7 +36,7 @@ import {
 import { predictPayout } from "../protocol/pricing.ts";
 import { PINNED_DESKS, RELAYS } from "./rfq-config.js";
 import { settlementKnown, usdFromCents } from "./src/position-status.ts";
-import { pkScriptOf, readIntent, readKept, watchIntents } from "./src/watch.ts";
+import { addressBalance, pkScriptOf, readIntent, readKept, watchIntents } from "./src/watch.ts";
 
 const STORE = "arkade-options-desk-v1";
 const REFRESH_MS = 18_000;
@@ -50,6 +50,8 @@ const state = {
   loaded: false,
   address: "",
   pubkey: "",
+  /** Spendable sats at the connected address, from the indexer. */
+  balance: null,
   view: "predict",
   positions: loadPositions(),
   selected: null,
@@ -274,6 +276,11 @@ function renderTop() {
   $("who").hidden = !known;
   $("who-address").textContent = known ? shortAddress(state.address) : "";
   $("who-tail").textContent = known ? `…${state.address.slice(-4)}` : "";
+  const balance = known && state.balance != null;
+  $("who-balance").hidden = !balance;
+  $("who-balance").textContent = balance ? `${int(state.balance)} sats` : "";
+  $("who").classList.toggle("has-balance", balance);
+  $("who").setAttribute("aria-label", known ? `Wallet ${shortAddress(state.address)}${balance ? `, ${int(state.balance)} sats` : ""}` : "Wallet");
   $("top-connect").hidden = known;
   const count = visiblePositions().filter((p) => liveNow(p)).length;
   $("count").hidden = !count;
@@ -586,6 +593,7 @@ function tick() {
   document.querySelectorAll("[data-close]").forEach(closeClock);
   betTick(now);
   fixingTick(now);
+  balanceTick();
   for (const position of state.positions) {
     if (!isPredict(position.kind)) continue;
     if (position.status !== "deposited" || !position.deadline || now < Number(position.deadline)) continue;
@@ -681,7 +689,8 @@ function walletError(position, sentence, detail = "") {
 function openWallet(position) {
   if (position && position.status !== "locking") return;
   const request = position ? (position.uri || paymentUri(position.address, position.premiumSats)) : "";
-  const params = position ? { flow: "send", position: position.id } : { flow: "connect" };
+  const relay = newRelayId();
+  const params = position ? { flow: "send", position: position.id, relay } : { flow: "connect", relay };
   const back = pageCallback(location.href, params);
   if (!callbackAllowed(back)) {
     walletError(position, "The wallet only returns to https, or to localhost.", "callback");
@@ -694,7 +703,10 @@ function openWallet(position) {
     walletError(position, "This browser is not keeping the wallet return. Try again in a moment.", "sessionStorage");
     return;
   }
-  if (!openWalletPopup(popupUrl)) {
+  waitForRelay(relay, position ? position.id : "connect");
+  const opened = openWalletPopup(popupUrl);
+  // A home-screen app hands the link to Safari and gets no window back; the relay brings the reply.
+  if (!opened && !document.documentElement.classList.contains("standalone")) {
     walletError(position, "Allow the popup, then try again.", "popup blocked");
   }
 }
@@ -747,8 +759,10 @@ function onWalletMessage(event) {
   if (!walletWindow || event.source !== walletWindow) return;
   const handoff = readWalletHandoffMessage(event.data);
   if (!handoff) return;
+  stopRelay();
   applyWalletHandoff(handoff, takeWalletAsk());
   showWalletHandoff(handoff);
+  void refreshBalance();
 }
 
 function walletOpener() {
@@ -757,6 +771,103 @@ function walletOpener() {
     return window.opener;
   } catch {
     return null;
+  }
+}
+
+// ----- the wallet's return, wherever it lands -----
+// A home-screen app opens the wallet in Safari, and the wallet's return loads there, not in the app.
+// Each request carries a random relay id; whichever window the return lands in posts it to the page's
+// server under that id, and the window that asked picks it up. A static host has no relay, and the
+// popup and same-window returns work as before.
+
+let relayWait = null;
+
+function newRelayId() {
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  return [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function stopRelay() {
+  if (relayWait) clearInterval(relayWait.timer);
+  relayWait = null;
+}
+
+function waitForRelay(id, pending) {
+  stopRelay();
+  relayWait = { id, pending, until: Date.now() + 10 * 60_000, busy: false, timer: setInterval(() => void pollRelay(), 1500) };
+}
+
+async function pollRelay() {
+  const wait = relayWait;
+  if (!wait || wait.busy) return;
+  if (Date.now() > wait.until) {
+    stopRelay();
+    return;
+  }
+  wait.busy = true;
+  try {
+    const res = await fetch(`handoff/${wait.id}`, { cache: "no-store" });
+    if (!res.headers.get("x-handoff")) {
+      stopRelay();
+      return;
+    }
+    if (res.status !== 200) return;
+    const body = await res.json();
+    if (relayWait !== wait) return;
+    stopRelay();
+    const handoff = readWalletHandoff(typeof body?.search === "string" ? body.search : "");
+    applyWalletHandoff(handoff, wait.pending);
+    showWalletHandoff(handoff);
+    void refreshBalance();
+  } catch {
+    // Try again on the next beat.
+  } finally {
+    wait.busy = false;
+  }
+}
+
+/** This window got a return it did not ask for: hand it to the window that did, and say where to go. */
+async function relayHandoff(id, search) {
+  try {
+    const res = await fetch(`handoff/${id}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ search }),
+    });
+    if (!res.ok) return;
+    const note = el("p", "relay-note", "Done. Switch back to COINFLIP; it has your wallet’s reply.");
+    note.setAttribute("role", "status");
+    document.body.append(note);
+  } catch {
+    // Without a relay the app still sees a stake arrive on its own.
+  }
+}
+
+let balanceAt = 0;
+
+async function refreshBalance() {
+  if (!state.address) {
+    state.balance = null;
+    return;
+  }
+  const address = state.address;
+  try {
+    const sats = await addressBalance(address);
+    if (state.address !== address) return;
+    state.balance = sats;
+    balanceAt = Date.now();
+    renderTop();
+  } catch {
+    // Keep the last balance on a failed read.
+  }
+}
+
+function balanceTick() {
+  if (!state.address || document.visibilityState !== "visible") return;
+  if (Date.now() - balanceAt >= 15_000) {
+    balanceAt = Date.now();
+    void refreshBalance();
   }
 }
 
@@ -778,7 +889,10 @@ function consumeWalletHandoff() {
   }
   const handoff = readWalletHandoff(location.search);
   const pending = takeWalletAsk();
+  const relay = new URLSearchParams(location.search).get("relay") || "";
+  const search = location.search;
   history.replaceState(null, "", stripWalletParams(location.href));
+  if (!pending && /^[0-9a-f]{32}$/.test(relay) && handoff.kind !== "none") void relayHandoff(relay, search);
   applyWalletHandoff(handoff, pending);
   return false;
 }
@@ -1195,7 +1309,9 @@ function renderBetPop(focus = false) {
   syncScrim();
   const chip = document.querySelector(`[data-bchip="${state.bet.open}"]`);
   pop.style.left = `${Math.max(0, Math.min(chip.offsetLeft, pop.parentElement.clientWidth - pop.offsetWidth))}px`;
-  pop.style.top = `${chip.offsetTop + chip.offsetHeight + 12}px`;
+  // Below the whole sentence, so the list never covers another term.
+  const sentence = $("bet-sentence");
+  pop.style.top = `${Math.max(chip.offsetTop + chip.offsetHeight, sentence.offsetTop + sentence.offsetHeight) + 12}px`;
   const target = had || (focus ? pop.querySelector(".on, [data-pick]")?.dataset.pick : "");
   if (target) (pop.querySelector(`[data-pick="${target}"]`) || $(target))?.focus();
 }
@@ -1402,6 +1518,7 @@ function syncLock() {
 function openBet() {
   $("bet").classList.remove("show-chart");
   $("bet-chart-fold").setAttribute("aria-expanded", "false");
+  $("bet-chart-fold").firstChild.textContent = "See the details";
   state.bet.open = "";
   state.bet.checkout = true;
   state.bet.agree = false;
@@ -2346,9 +2463,12 @@ function chartHeight(host, W) {
     const key = `${view.clientWidth}x${view.clientHeight}`;
     if (marketFit.key === key) return marketFit.height;
     const predict = $("predict");
+    const page = $("main");
     const nav = document.querySelector(".nav");
     const floor = nav && getComputedStyle(nav).position === "fixed" ? nav.getBoundingClientRect().top + window.scrollY : view.clientHeight;
-    const end = predict && !predict.hidden ? predict.getBoundingClientRect().bottom + window.scrollY : floor;
+    // The page's own bottom padding counts too; leaving it out made the view taller than the screen.
+    const padding = page ? parseFloat(getComputedStyle(page).paddingBottom) || 0 : 0;
+    const end = predict && !predict.hidden ? predict.getBoundingClientRect().bottom + window.scrollY + padding : floor;
     const spare = Math.min(view.clientHeight, floor) - end - 12;
     const base = host.offsetHeight > 0 ? host.offsetHeight : 120;
     const height = Math.round(Math.min(W < 420 ? 176 : 200, Math.max(120, base + spare)));
@@ -2707,6 +2827,7 @@ function bind() {
   listen("bet-chart-fold", "click", () => {
     const open = $("bet").classList.toggle("show-chart");
     $("bet-chart-fold").setAttribute("aria-expanded", String(open));
+    $("bet-chart-fold").firstChild.textContent = open ? "Hide the details" : "See the details";
     renderBet();
   });
   bindBet();
