@@ -36,7 +36,6 @@ import {
 import { predictPayout } from "../protocol/pricing.ts";
 import { PINNED_DESKS, RELAYS } from "./rfq-config.js";
 import { settlementKnown, usdFromCents } from "./src/position-status.ts";
-import { settleFromPage } from "./src/settle.ts";
 import { pkScriptOf, readIntent, readKept, watchIntents } from "./src/watch.ts";
 
 const STORE = "arkade-options-desk-v1";
@@ -130,6 +129,7 @@ function persist() {
     writerKeep: p.writerKeep || "",
     deskTake: p.deskTake || "",
     settleCents: p.settleCents || "",
+    fixCents: p.fixCents || "",
     deskPkHex: p.deskPkHex || "",
     holderAddress: p.holderAddress || "",
     holderPubkey: p.holderPubkey || "",
@@ -356,61 +356,6 @@ function sendClock(node) {
   node.textContent = left > 0 ? `${mmss(left)} left to send` : "Time ran out. Checking…";
 }
 
-function canSettle(position) {
-  if (position.status !== "filled") return false;
-  if (!position.vaultAddress || !position.deskPkHex || !position.beaconTxid) return false;
-  const expiry = Number(position.expiry) || 0;
-  if (!expiry || expiry > Math.floor(Date.now() / 1000)) return false;
-  if (position.settleTxid && position.settleTxid !== position.closeTxid) return false;
-  return true;
-}
-
-function settleFault(outcome) {
-  const detail = outcome.reason ? `${outcome.result} ${outcome.reason}` : outcome.result;
-  if (outcome.result === "unfixed") return ["The price check isn’t published yet. Try again in a moment.", detail];
-  if (outcome.result === "mismatch") return ["This position reads a different price feed. Try again in a moment.", detail];
-  if (outcome.result === "waiting" && outcome.reason === "early") return ["Wait until the date.", detail];
-  if (outcome.result === "waiting") return ["Try again in a moment.", detail];
-  return ["Couldn’t pay out. Try again in a moment.", detail];
-}
-
-async function settlePosition(position, button) {
-  button.disabled = true;
-  button.textContent = "Settling";
-  try {
-    const outcome = await settleFromPage({
-      ...(await fundRequest(position)),
-      fillTxid: position.closeTxid || undefined,
-    });
-    if (outcome.result !== "settled") {
-      button.disabled = false;
-      button.textContent = "Try again";
-      const [sentence, detail] = settleFault(outcome);
-      renderStatus($("status"), sentence, detail);
-      return;
-    }
-    position.status = "settled";
-    position.settleTxid = outcome.txid;
-    // `writerKeep` holds the page user's payout (holder in Predict) for storage compatibility.
-    if (outcome.holder != null) position.writerKeep = outcome.holder.toString();
-    if (outcome.writer != null) position.deskTake = outcome.writer.toString();
-    if (outcome.price != null) position.settleCents = outcome.price.toString();
-    persist();
-    renderBlotter();
-  } catch (err) {
-    button.disabled = false;
-    button.textContent = "Try again";
-    renderStatus($("status"), "Couldn’t pay out. Try again in a moment.", err instanceof Error ? err.message : "settle failed");
-  }
-}
-
-function settleButton(position) {
-  if (!canSettle(position)) return null;
-  return action("btn sm", "Settle now", (event) => {
-    void settlePosition(position, event.currentTarget);
-  });
-}
-
 function txLink(label, txid) {
   if (!/^[0-9a-f]{64}$/.test(txid || "")) return null;
   const row = el("p", "tx-link");
@@ -605,6 +550,7 @@ function tick() {
   document.querySelectorAll("[data-until]").forEach(sendClock);
   document.querySelectorAll("[data-close]").forEach(closeClock);
   betTick(now);
+  fixingTick(now);
   for (const position of state.positions) {
     if (!isPredict(position.kind)) continue;
     if (position.status !== "deposited" || !position.deadline || now < Number(position.deadline)) continue;
@@ -1649,6 +1595,72 @@ function placeBet() {
 
 // ----- positions -----
 
+/**
+ * The fixing is the last oracle sample within 60 seconds after the close (the vault's EXPIRY_LAG), and the
+ * beacon takes it no sooner. From then on the result is known, so the page reads the same samples the settler
+ * does, through the server that serves it, and shows the result while the payout settles in the background.
+ */
+const FIXING_LAG_S = 60;
+let oracleReadable = true;
+const fixingReads = new Set();
+
+function chooseFixing(samples, expiry) {
+  const inWindow = samples.filter((s) => s.time >= expiry && s.time <= expiry + FIXING_LAG_S);
+  const pool = inWindow.length ? inWindow : samples.filter((s) => s.time >= expiry - FIXING_LAG_S && s.time < expiry);
+  if (!pool.length) return null;
+  return pool.reduce((best, s) => (s.time >= best.time ? s : best));
+}
+
+async function readFixing(position) {
+  const expiry = Number(position.expiry);
+  const res = await fetch(`oracle/prices?from=${expiry - FIXING_LAG_S}&to=${expiry + FIXING_LAG_S}&limit=200`, { cache: "no-store", signal: AbortSignal.timeout(8_000) });
+  if (res.status === 404) {
+    // A static host has no oracle behind it; the result then arrives with the settlement.
+    oracleReadable = false;
+    return;
+  }
+  if (!res.ok) return;
+  const body = await res.json();
+  const samples = (Array.isArray(body?.samples) ? body.samples : [])
+    .filter((s) => typeof s?.price === "string" && /^[0-9]+$/.test(s.price) && Number.isSafeInteger(s.time));
+  const chosen = chooseFixing(samples, expiry);
+  if (!chosen || position.fixCents === chosen.price) return;
+  position.fixCents = chosen.price;
+  persist();
+  if (state.view === "home") renderBlotter();
+}
+
+let shownStage = "";
+
+function fixingTick(now) {
+  // The open position re-renders when it crosses the close or the fixing time, not only when the chain moves.
+  const open = state.view === "home" ? state.positions.find((p) => p.id === state.selected) : null;
+  if (open) {
+    const stage = `${open.id}|${open.status}|${now >= Number(open.expiry)}|${now >= Number(open.expiry) + FIXING_LAG_S}`;
+    if (shownStage && stage !== shownStage) renderBlotter();
+    shownStage = stage;
+  } else {
+    shownStage = "";
+  }
+  if (!oracleReadable) return;
+  for (const p of state.positions) {
+    if (!isPredict(p.kind) || p.status !== "filled" || p.settleCents || p.fixCents) continue;
+    if (now < Number(p.expiry) + FIXING_LAG_S + 2 || fixingReads.has(p.id)) continue;
+    if (now - (p.fixingAt || 0) < 5) continue;
+    p.fixingAt = now;
+    fixingReads.add(p.id);
+    void readFixing(p).catch(() => undefined).finally(() => fixingReads.delete(p.id));
+  }
+}
+
+/** Won or lost by the oracle's fixing, before the settlement lands. */
+function provisionalOutcome(p) {
+  if (p.status !== "filled" || !p.fixCents) return "";
+  const fix = BigInt(p.fixCents);
+  const line = BigInt(p.strike);
+  return (p.kind === 2 ? fix > line : fix < line) ? "won" : "lost";
+}
+
 function betOutcome(p) {
   if (!(p.status === "settled" || settlementKnown(p))) return "";
   if (p.writerKeep === "" || p.writerKeep == null) return "settled";
@@ -1663,7 +1675,14 @@ function betStatusLabel(p) {
   if (outcome === "won") return "Won";
   if (outcome === "lost") return "Lost";
   if (outcome === "settled") return "Settled";
-  if (p.status === "filled") return Number(p.expiry) > now ? "Live" : "Checking the price";
+  const early = provisionalOutcome(p);
+  if (early === "won") return "Won · paying out";
+  if (early === "lost") return "Lost";
+  if (p.status === "filled") {
+    if (Number(p.expiry) > now) return "Live";
+    const fixAt = Number(p.expiry) + FIXING_LAG_S;
+    return now < fixAt ? `Result at ${localTime(fixAt)}` : "Reading the fixing";
+  }
   if (p.status === "expired") return "Time ran out";
   if (p.status === "refunded") return "Refunded";
   return "Open";
@@ -1715,11 +1734,15 @@ function betRow(p) {
   }
   const outcome = betOutcome(p);
   const side = el("span", "r");
-  const pill = live ? clockEl("pill", p.expiry, "left") : el("span", outcome === "won" ? "pill ok" : outcome === "lost" ? "pill lost" : "pill", betStatusLabel(p));
+  const early = provisionalOutcome(p);
+  const shown = outcome || early;
+  const pill = live ? clockEl("pill", p.expiry, "left") : el("span", shown === "won" ? "pill ok" : shown === "lost" ? "pill lost" : "pill", betStatusLabel(p));
   side.append(pill);
   let extra = "";
   if (outcome === "won") extra = `+${int(BigInt(p.writerKeep))} sats paid`;
   else if (outcome === "lost") extra = `−${int(p.premiumSats)} sats`;
+  else if (early === "won") extra = `+${int(won(p.collateral))} sats`;
+  else if (early === "lost") extra = `−${int(p.premiumSats)} sats`;
   else if (["locking", "deposited", "filled"].includes(p.status)) extra = `${int(p.premiumSats)} in → ${int(won(p.collateral))} if right`;
   if (extra) side.append(el("small", "", extra));
   if (live) {
@@ -1795,7 +1818,7 @@ function renderPrediction(p) {
     }
     return box;
   };
-  const fixing = p.settleCents ? Number(p.settleCents) / 100 : null;
+  const fixing = p.settleCents || p.fixCents ? Number(p.settleCents || p.fixCents) / 100 : null;
   const nextClose = closes()[0].unix;
   const again = () => {
     const box = el("div", "acts");
@@ -1898,17 +1921,48 @@ function renderPrediction(p) {
     ]));
     body.push(el("p", "sub", `Nothing for you to do. One price fixing at ${at} decides it and the payout goes to your Arkade wallet. At or ${OTHER[p.kind]} ${lineUsd}, the desk wins.`));
   } else if (p.status === "filled") {
-    head.textContent = "Checking the price.";
-    body.push(el("p", "sub", `The fixing at ${at} decides it, and the payout goes to your Arkade wallet. Nothing for you to do.`));
-    const settle = settleButton(p);
-    if (settle || p.refundable) {
+    // After the close: a countdown to the fixing, then the result straight away while the payout settles.
+    const fixAt = Number(p.expiry) + FIXING_LAG_S;
+    const early = provisionalOutcome(p);
+    if (early === "won") {
+      head.replaceChildren("You won ", el("span", "amt", `${int(won(payout))} sats`), ".");
+      badge = pill("Won · paying out", "pill ok");
+      body.push(el("p", "sub", `The ${at} fixing was ${usd2(fixing)}, ${usd2(Math.abs(fixing - line))} ${DIR[p.kind]} your ${lineUsd} line. The payout is on its way to your Arkade wallet; nothing for you to do.`));
+      body.push(ledger([
+        ["You staked", `${int(stake)} sats`],
+        ["From the desk", `+${int(payout - stake)}`],
+        [`Price-check fee at ${at}`, `−${int(payout - won(payout))}`, "minus"],
+        ["Paid to you", `${int(won(payout))} sats`, "tot"],
+      ]));
+      body.push(...again());
+    } else if (early === "lost") {
+      head.textContent = `BTC closed ${usd2(Math.abs(fixing - line))} ${fixing === line ? "on" : OTHER[p.kind]} your line.`;
+      badge = pill(`Lost · ${at} fixing`, "pill lost");
+      body.push(el("p", "sub", `The ${at} fixing was ${usd2(fixing)}. Your ${int(stake)} sats go to the desk.`));
+      body.push(ledger([
+        ["You staked", `${int(stake)} sats`],
+        [`To the desk, at or ${OTHER[p.kind]} ${lineUsd}`, `−${int(stake)}`, "minus"],
+        ["Paid to you", "0 sats", "tot"],
+      ]));
+      body.push(el("p", "sub", "One fixing decides it. All or nothing, no partial payouts."), ...again());
+    } else if (now < fixAt) {
+      head.append("Result in ", clockEl("", fixAt, "bare"));
+      badge = pill(`Closed at ${at}`);
+      const standing = state.spotCents != null ? (() => {
+        const price = spotUsd();
+        const ahead = p.kind === 2 ? price > line : price < line;
+        return ` BTC is ${usd0(price)} now, ${price === line ? "on your line" : `${usd0(Math.abs(price - line))} ${price > line ? "above" : "below"} your line`}, ${ahead ? "winning so far" : "the desk is ahead so far"}.`;
+      })() : "";
+      body.push(el("p", "sub", `The fixing is the oracle’s last price by ${localTime(fixAt)}, and it decides the result.${standing}`));
+    } else {
+      head.textContent = "Reading the fixing.";
+      body.push(el("p", "sub", `The oracle’s price for ${at} decides it, and the payout goes to your Arkade wallet. Nothing for you to do.`));
+    }
+    if (p.refundable) {
       const acts = el("div", "acts");
-      if (settle) acts.append(settle);
-      if (p.refundable) {
-        acts.append(action("btn sm", "Take it back", (event) => {
-          void refund(p, event.currentTarget);
-        }));
-      }
+      acts.append(action("btn sm", "Take it back", (event) => {
+        void refund(p, event.currentTarget);
+      }));
       body.push(acts);
     }
   } else if (p.status === "expired") {
@@ -1963,7 +2017,7 @@ function renderPrediction(p) {
     const anchor = chartAfter || host.querySelector(":scope > h2 ~ .sub") || head;
     anchor.after(card);
   }
-  const done = Boolean(outcome);
+  const done = Boolean(outcome || provisionalOutcome(p));
   $("position-chart-title").textContent = done ? `How BTC got to ${at}` : "BTC since you placed it";
   const cap = $("position-chart-cap");
   cap.hidden = false;

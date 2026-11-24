@@ -89,11 +89,13 @@ function once(key: string, line: string, error = false) {
 }
 
 const asked = new Map<number, { at: number; result: "published" | "fixed" | "failed" }>();
+const PUBLISH_RETRY_MS = 15_000;
 
 /** Ask once a minute. "no sample" and other failures are logged. 409 still has to match the oracle's sample. */
 async function askPublish(expiry: number, nowMs: number): Promise<"published" | "fixed" | "failed"> {
   const prev = asked.get(expiry);
-  if (prev && !publishReady(prev.at, nowMs)) return prev.result;
+  // Retry every 15s: a result is due the moment the window closes, and a miss used to cost a full minute.
+  if (prev && !publishReady(prev.at, nowMs, PUBLISH_RETRY_MS)) return prev.result;
   if (!oracleAdmin) {
     once("oracle-admin", "ORACLE_ADMIN unset, so a missing fixing is not published", true);
     asked.set(expiry, { at: nowMs, result: "failed" });

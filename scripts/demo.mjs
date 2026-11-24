@@ -285,6 +285,25 @@ function servePage() {
         res.end(JSON.stringify(setup));
         return;
       }
+      // The oracle's samples, read-only, so the page can show a result at the fixing time instead of
+      // waiting for the settlement. The oracle itself stays on loopback.
+      if (url.pathname === "/oracle/prices" && req.method === "GET") {
+        const query = new URLSearchParams();
+        for (const key of ["from", "to", "limit"]) {
+          const value = url.searchParams.get(key);
+          if (value != null && /^[0-9]{1,12}$/.test(value)) query.set(key, value);
+        }
+        fetch(`${oracleUrl}/api/prices?${query}`, { signal: AbortSignal.timeout(8_000) })
+          .then(async (upstream) => {
+            res.writeHead(upstream.ok ? 200 : 502, { "content-type": "application/json", "cache-control": "no-store" });
+            res.end(upstream.ok ? await upstream.text() : JSON.stringify({ error: "oracle" }));
+          })
+          .catch(() => {
+            res.writeHead(502, { "content-type": "application/json", "cache-control": "no-store" });
+            res.end(JSON.stringify({ error: "oracle" }));
+          });
+        return;
+      }
       let rel = decodeURIComponent(url.pathname);
       if (rel.endsWith("/")) rel += "index.html";
       const file = path.resolve(site, rel.replace(/^\//, ""));
