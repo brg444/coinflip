@@ -35,6 +35,7 @@ import {
   STAKE_MIN,
 } from "../protocol/constants.ts";
 import { predictPayout } from "../protocol/pricing.ts";
+import { openingSample, WINDOW_LINE_WITHIN_S } from "../protocol/window-line.ts";
 import { PINNED_BACKUP_PUBKEY, PINNED_DESKS, RELAYS } from "./rfq-config.js";
 import { settlementKnown, usdFromCents } from "./src/position-status.ts";
 import { refundVaultFromPage } from "./src/settle.ts";
@@ -157,6 +158,8 @@ function fmtBtc(sats) {
 const spotUsd = () => Number(state.spotCents) / 100;
 const int = (n) => BigInt(n).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
 const usd0 = (x) => `$${Math.round(x).toLocaleString("en-US")}`;
+/** A line in whole dollars, or to the cent when it has cents, as a window's opening price usually does. */
+const usdLine = (x) => (Math.round(x * 100) % 100 === 0 ? usd0(x) : usd2(x));
 const usd2 = (x) => `$${x.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const worth = (sats, usd) => (Number(sats) * usd) / 1e8;
 const capital = (text) => text[0].toUpperCase() + text.slice(1);
@@ -657,6 +660,7 @@ function tick() {
   document.querySelectorAll("[data-close]").forEach(closeClock);
   betTick(now);
   fixingTick(now);
+  windowTick(now);
   balanceTick();
   for (const position of state.positions) {
     if (!isPredict(position.kind)) continue;
@@ -1067,6 +1071,10 @@ function closes(now = Math.floor(Date.now() / 1000)) {
 }
 
 function betClose() {
+  if (lineMode() === "window") {
+    state.bet.close = currentWindow().close;
+    return state.bet.close;
+  }
   const list = closes();
   if (!list.some((item) => item.unix === state.bet.close)) state.bet.close = list[0].unix;
   return state.bet.close;
@@ -1076,10 +1084,92 @@ function betWindow(expiry) {
   return closes().find((item) => item.unix === Number(expiry))?.min ?? 5;
 }
 
-const priced = () => state.spotCents != null && state.points != null;
+const priced = () => state.spotCents != null && state.points != null && lineReady();
+
+// ----- the window's line -----
+// With the oracle readable, every prediction in a five-minute window is against one line: the DIA
+// oracle's first sample at or after the window opens (protocol/window-line.ts), which the desk checks.
+// Only the window open now is offered; once its entries close, the page waits for the next one.
+// Without the oracle the page falls back to choosing a line around the current price.
+
+const windowLines = new Map();
+const windowAsked = new Map();
+let windowKey = "";
+
+function lineMode() {
+  return oracleReadable && state.spotSource !== "deribit" ? "window" : "pick";
+}
+
+function currentWindow(now = Math.floor(Date.now() / 1000)) {
+  const open = Math.floor(now / PREDICT_GRID_S) * PREDICT_GRID_S;
+  if (open + PREDICT_GRID_S - now >= CLOSE_LEAD_S) return { open, close: open + PREDICT_GRID_S, waiting: false };
+  return { open: open + PREDICT_GRID_S, close: open + 2 * PREDICT_GRID_S, waiting: true };
+}
+
+function windowLine(open) {
+  return windowLines.get(open) ?? null;
+}
+
+/** What the composer says while a window has no line yet, or has stopped taking predictions. */
+function windowNote() {
+  if (lineMode() !== "window" || state.spotCents == null || state.points == null) return "";
+  const w = currentWindow();
+  if (w.waiting) return `This window takes no more predictions. The next one opens at ${localTime(w.open)}, against its opening price.`;
+  if (windowLine(w.open) == null) return `The ${localTime(w.open)} window just opened. Its line is the oracle’s first price, due in a few seconds.`;
+  return "";
+}
+
+function lineReady() {
+  if (lineMode() !== "window") return true;
+  const w = currentWindow();
+  return !w.waiting && windowLine(w.open) != null;
+}
+
+async function readWindowLine(open) {
+  const rows = await oracleSamples(open, open + WINDOW_LINE_WITHIN_S, 200);
+  if (!rows) return;
+  const first = openingSample(rows.map(([time, price]) => ({ time, price })), open);
+  if (!first) return;
+  windowLines.set(open, first.price);
+  for (const key of windowLines.keys()) if (key < open - 3600) windowLines.delete(key);
+  if (state.view === "predict") renderPredict();
+}
+
+function windowTick(now) {
+  if (lineMode() !== "window") return;
+  const w = currentWindow(now);
+  const running = Math.floor(now / PREDICT_GRID_S) * PREDICT_GRID_S;
+  for (const open of new Set([w.open, running])) {
+    if (open > now || windowLines.has(open)) continue;
+    if (now - (windowAsked.get(open) || 0) < 3) continue;
+    windowAsked.set(open, now);
+    void readWindowLine(open).catch(() => undefined);
+  }
+  const key = `${w.open}|${w.waiting}|${windowLine(w.open) != null}`;
+  if (key !== windowKey) {
+    windowKey = key;
+    if (state.view === "predict") {
+      dropBet();
+      renderPredict();
+    }
+  }
+}
 const spotDollars = () => Math.round(Number(state.spotCents) / 100);
 
 function betTerms() {
+  if (lineMode() === "window") {
+    const w = currentWindow();
+    const cents = w.waiting ? null : windowLine(w.open);
+    return {
+      kind: state.bet.kind,
+      line: cents == null ? null : cents / 100,
+      lineCents: cents == null ? null : BigInt(cents),
+      stake: stakeSats(),
+      expiry: BigInt(w.close),
+      step: 0,
+      window: w,
+    };
+  }
   const line = spotDollars() + state.bet.step;
   return {
     kind: state.bet.kind,
@@ -1143,7 +1233,7 @@ function betSentenceInto(node, terms, tense, stakeLabel = `₿${fmtBtc(terms.sta
     `${lead} `,
     el("span", "chip", DIR[terms.kind]),
     " ",
-    el("span", "chip", usd0(Number(terms.lineCents) / 100)),
+    el("span", "chip", usdLine(Number(terms.lineCents) / 100)),
     " at ",
     el("span", "chip", localTime(terms.expiry)),
     " ",
@@ -1168,7 +1258,25 @@ function renderPredict() {
   });
   const chip = (name) => document.querySelector(`[data-bchip="${name}"]`);
   const ok = priced();
+  const windowed = lineMode() === "window";
   for (const name of ["stake", "dir", "line", "close"]) chip(name).disabled = !ok;
+  const foot = document.querySelector(".predict .windows");
+  if (foot) {
+    foot.textContent = windowed
+      ? "A window opens every five minutes, and everyone in it predicts against its opening price."
+      : "A new window closes every 5 minutes. 15-minute windows close on the quarter hour.";
+  }
+  // A window's line and close are the window's, not choices: those chips read as terms and open nothing.
+  for (const name of ["line", "close"]) {
+    chip(name).classList.toggle("fixed", windowed);
+    if (windowed) {
+      chip(name).disabled = true;
+      chip(name).removeAttribute("aria-haspopup");
+      chip(name).removeAttribute("aria-expanded");
+    } else {
+      chip(name).setAttribute("aria-haspopup", "dialog");
+    }
+  }
   document.querySelectorAll("[data-unit]").forEach((btn) => {
     btn.setAttribute("aria-checked", String(btn.dataset.unit === state.bet.unit));
   });
@@ -1195,7 +1303,7 @@ function renderPredict() {
       node.textContent = "";
     });
     renderMarket();
-    note.textContent = state.loaded ? "We can’t get a fair price right now. Try again in a minute." : "Getting the current price…";
+    note.textContent = windowNote() || (state.loaded ? "We can’t get a fair price right now. Try again in a minute." : "Getting the current price…");
     see.disabled = true;
     see.textContent = "Review prediction";
     renderBetPop();
@@ -1203,8 +1311,13 @@ function renderPredict() {
     return;
   }
   const t = betTerms();
-  chip("line").replaceChildren(usd0(t.line), el("span", "delta", lineTag(t.step)));
-  chip("line").setAttribute("aria-label", `Line, ${usd0(t.line)}, ${lineNote(t.step).toLowerCase()}`);
+  if (windowed) {
+    chip("line").replaceChildren(usdLine(t.line), el("span", "delta", "open"));
+    chip("line").setAttribute("aria-label", `Line, ${usd2(t.line)}, the price when the ${localTime(t.window.open)} window opened`);
+  } else {
+    chip("line").replaceChildren(usd0(t.line), el("span", "delta", lineTag(t.step)));
+    chip("line").setAttribute("aria-label", `Line, ${usd0(t.line)}, ${lineNote(t.step).toLowerCase()}`);
+  }
   const m = betMultiplier(t.kind, t.lineCents, t.expiry);
   const payout = betPayout(t.stake, m);
   document.querySelectorAll("[data-mult]").forEach((node) => {
@@ -1613,7 +1726,7 @@ function renderBet() {
   const m = offer ? offer.quote.multiplier : betMultiplier(t.kind, t.lineCents, t.expiry);
   const payout = offer ? offer.quote.payout : betPayout(t.stake, m);
   const at = localTime(t.expiry);
-  const line = usd0(Number(t.lineCents) / 100);
+  const line = usdLine(Number(t.lineCents) / 100);
   // In dollars, the stake reads as asked; the amounts are worth at today's price, and the sats are what is paid.
   const usd = inUsd();
   const put = usd ? `${usdStake(state.bet.usd)} (${int(t.stake)} sats)` : `${int(t.stake)} sats`;
@@ -1661,6 +1774,7 @@ function betFault(note) {
   if (note.includes("float short")) return ["The desk can’t cover this payout right now. Stake less, or try again later.", detail];
   if (/refused: (spot|deribit) unavailable/.test(note)) return ["We can’t get a fair price right now. Try again in a moment.", detail];
   if (note.includes("refused: expiry")) return ["That window is closing too soon. Pick a later close.", detail];
+  if (note.includes("refused: window line")) return ["The window’s opening price has moved on. Review the prediction again.", detail];
   if (note.includes("refused: line")) return ["The desk doesn’t quote this line right now. Pick one nearer the current price.", detail];
   if (note.includes("refused: payout")) return ["This payout doesn’t beat your stake after the fee. Stake more or pick a further line.", detail];
   if (note.includes("refused: stake")) return [`Stake between ${fmtBtc(STAKE_MIN)} and ${fmtBtc(STAKE_MAX)} BTC.`, detail];
@@ -1952,7 +2066,7 @@ function betRow(p) {
   const metaEl = el("span", "m", meta ?? `Prediction · ₿${fmtBtc(p.premiumSats)}`);
   if (meta == null) metaEl.append(el("span", "win", ` · ${p.windowMin || 5}-minute window`));
   what.append(
-    el("b", "", `${capital(DIR[p.kind])} ${usd0(line)} at ${localTime(p.expiry)}`),
+    el("b", "", `${capital(DIR[p.kind])} ${usdLine(line)} at ${localTime(p.expiry)}`),
     metaEl,
   );
   if (live) {
@@ -2022,7 +2136,7 @@ function betSteps(p) {
 function renderPrediction(p) {
   const now = Math.floor(Date.now() / 1000);
   const line = Number(p.strike) / 100;
-  const lineUsd = usd0(line);
+  const lineUsd = usdLine(line);
   const at = localTime(p.expiry);
   const stake = p.premiumSats;
   const payout = p.collateral;
@@ -2311,7 +2425,7 @@ function drawStep(host, { kind, line, stake, payout, now }) {
     height: H,
     viewBox: `0 0 ${W} ${H}`,
     role: "img",
-    "aria-label": `You get back ${int(back)} sats if BTC closes ${DIR[kind]} ${usd0(line)}, and nothing at or ${OTHER[kind]} it.`,
+    "aria-label": `You get back ${int(back)} sats if BTC closes ${DIR[kind]} ${usdLine(line)}, and nothing at or ${OTHER[kind]} it.`,
   });
   const winX = winLeft ? [2, xl] : [xl, W - 2];
   const loseX = winLeft ? [xl, W - 2] : [2, xl];
@@ -2326,7 +2440,7 @@ function drawStep(host, { kind, line, stake, payout, now }) {
     svgEl("path", { d: curve, class: "curve" }),
     svgEl("line", { x1: 2, x2: W - 2, y1: yb, y2: yb, class: "base" }),
     svgEl("line", { x1: xl, x2: xl, y1: 4, y2: yb, class: "mark" }),
-    svgEl("text", { x: winLeft ? xl - 7 : xl + 7, y: 14, "text-anchor": winLeft ? "end" : "start", class: "mark-label" }, `Your line${now ? " = now" : ""} · ${usd0(line)}`),
+    svgEl("text", { x: winLeft ? xl - 7 : xl + 7, y: 14, "text-anchor": winLeft ? "end" : "start", class: "mark-label" }, `Your line${now ? " = now" : ""} · ${usdLine(line)}`),
     svgEl("text", { x: winLeft ? 8 : W - 8, y: yw - 8, "text-anchor": winLeft ? "start" : "end", class: "paid" }, `${int(back)} back`),
     svgEl("text", { x: winLeft ? W - 8 : 8, y: ys - 7, "text-anchor": winLeft ? "end" : "start" }, `You put in ${int(stake)}`),
     svgEl("text", { x: winLeft ? W - 8 : 8, y: yb - 9, "text-anchor": winLeft ? "end" : "start", class: "nothing" }, "Nothing back"),
@@ -2363,14 +2477,14 @@ function drawRace(host, { kind, line, start, expiry, ticks, fixing, now }) {
     viewBox: `0 0 ${W} ${H}`,
     role: "img",
     "aria-label": fixing != null
-      ? `BTC against your ${usd0(line)} line. The fixing was ${usd2(fixing)}.`
-      : `BTC against your ${usd0(line)} line until ${localTime(expiry)}.`,
+      ? `BTC against your ${usdLine(line)} line. The fixing was ${usd2(fixing)}.`
+      : `BTC against your ${usdLine(line)} line until ${localTime(expiry)}.`,
   });
   svg.append(
     svgEl("rect", { x: 2, y: mine[0], width: W - 4, height: Math.max(0, mine[1] - mine[0]), class: "win" }),
     svgEl("rect", { x: 2, y: desk[0], width: W - 4, height: Math.max(0, desk[1] - desk[0]), class: "desk" }),
     svgEl("line", { x1: 2, x2: W - 2, y1: yl, y2: yl, class: "lock" }),
-    svgEl("text", { x: 8, y: kind === 2 ? yl - 7 : yl + 17, class: "halo" }, `Your line ${usd0(line)}`),
+    svgEl("text", { x: 8, y: kind === 2 ? yl - 7 : yl + 17, class: "halo" }, `Your line ${usdLine(line)}`),
     svgEl("line", { x1: xe, x2: xe, y1: top - 14, y2: yb, class: "mark" }),
     svgEl("text", { x: xe - 6, y: top - 4, "text-anchor": "end", class: "mark-label" }, `Closes ${localTime(expiry)}`),
     svgEl("line", { x1: 2, x2: W - 2, y1: yb, y2: yb, class: "base" }),
@@ -2527,16 +2641,39 @@ function renderMarket() {
   if (state.view !== "predict") return;
   const now = Math.floor(Date.now() / 1000);
   const close = betClose();
-  $("mkt-close").textContent = `Closes ${localTime(close)}`;
   marketClock(now);
   if (state.spotCents == null) return;
   const price = Number(state.spotCents) / 100;
   setFigure($("mkt-price"), usd2(price));
   const offer = state.bet.offer?.terms;
   const kind = offer ? offer.kind : state.bet.kind;
+  const sub = $("mkt-sub");
+  const windowed = lineMode() === "window";
+  sub.closest(".market")?.classList.toggle("one-line", windowed);
+  if (windowed && !offer) {
+    // One window at a time: the one open now, or, once its entries close, the one about to open.
+    const w = currentWindow(now);
+    const running = Math.floor(now / PREDICT_GRID_S) * PREDICT_GRID_S;
+    const cents = !w.waiting ? windowLine(w.open) : windowLine(running);
+    const shownClose = w.waiting ? running + PREDICT_GRID_S : w.close;
+    $("mkt-close").textContent = w.waiting ? `Next window ${localTime(w.open)}` : `Closes ${localTime(w.close)}`;
+    if (w.waiting) {
+      sub.textContent = `Next window opens at ${localTime(w.open)}`;
+    } else if (cents == null) {
+      sub.textContent = `Setting the ${localTime(w.open)} opening price…`;
+    } else {
+      const gap = price - cents / 100;
+      const arrow = el("span", gap >= 0 ? "up" : "down");
+      arrow.setAttribute("aria-hidden", "true");
+      const ahead = kind === 2 ? gap > 0 : gap < 0;
+      sub.replaceChildren(arrow, el("b", "", usd2(Math.abs(gap))), ` ${gap >= 0 ? "above" : "below"} the opening price · ${ahead ? "you’re ahead" : "you’re behind"}`);
+    }
+    drawMarket($("mkt-chart"), { points: seen, line: cents == null ? null : cents / 100, kind, close: shownClose, now, showLine: cents != null });
+    return;
+  }
+  $("mkt-close").textContent = `Closes ${localTime(close)}`;
   const line = offer ? Number(offer.lineCents) / 100 : spotDollars() + state.bet.step;
   const gap = price - line;
-  const sub = $("mkt-sub");
   const arrow = el("span", gap >= 0 ? "up" : "down");
   arrow.setAttribute("aria-hidden", "true");
   const ahead = kind === 2 ? gap > 0 : gap < 0;
@@ -2547,7 +2684,9 @@ function renderMarket() {
 function marketClock(now) {
   const node = $("mkt-count");
   if (!node || state.view !== "predict") return;
-  const left = betClose() - now;
+  // Waiting for the next window, the clock counts to its opening instead.
+  const w = lineMode() === "window" ? currentWindow(now) : null;
+  const left = (w?.waiting ? w.open : betClose()) - now;
   node.textContent = left > 0 ? mmss(left) : "0:00";
 }
 
@@ -2564,7 +2703,8 @@ function chartHeight(host, W) {
     // Phones: the market chart takes the room the page leaves above the tab bar, between a floor and a
     // ceiling. It is measured once per screen size, so the card never grows or shrinks as the price moves.
     const view = document.documentElement;
-    const key = `${view.clientWidth}x${view.clientHeight}`;
+    // Measured again once the fonts have loaded, since the text settles to its real height then.
+    const key = `${view.clientWidth}x${view.clientHeight}|${document.fonts?.status ?? "loaded"}`;
     if (marketFit.key === key) return marketFit.height;
     const predict = $("predict");
     const page = $("main");
@@ -2573,9 +2713,9 @@ function chartHeight(host, W) {
     // The page's own bottom padding counts too; leaving it out made the view taller than the screen.
     const padding = page ? parseFloat(getComputedStyle(page).paddingBottom) || 0 : 0;
     const end = predict && !predict.hidden ? predict.getBoundingClientRect().bottom + window.scrollY + padding : floor;
-    const spare = Math.min(view.clientHeight, floor) - end - 12;
+    const spare = Math.min(view.clientHeight, floor) - end - 4;
     const base = host.offsetHeight > 0 ? host.offsetHeight : 120;
-    const height = Math.round(Math.min(W < 420 ? 176 : 200, Math.max(120, base + spare)));
+    const height = Math.round(Math.min(W < 420 ? 260 : 280, Math.max(120, base + spare)));
     // Keep it only once the page is priced, when the sentence has its final length.
     if (priced() && state.view === "predict") marketFit = { key, height };
     return height;
@@ -2595,7 +2735,7 @@ function chartHeight(host, W) {
   return Math.round(Math.max(160, Math.min(W * 0.3, screen * 0.28, 280)));
 }
 
-function drawMarket(host, { points, line, kind, close, now }) {
+function drawMarket(host, { points, line, kind, close, now, showLine = true }) {
   const W = Math.max(280, Math.floor(host.clientWidth));
   const H = chartHeight(host, W);
   const top = 14;
@@ -2609,7 +2749,7 @@ function drawMarket(host, { points, line, kind, close, now }) {
     host.replaceChildren(skel);
     return;
   }
-  const prices = [line, ...pts.map(([, p]) => p)];
+  const prices = showLine ? [line, ...pts.map(([, p]) => p)] : pts.map(([, p]) => p);
   let lo = Math.min(...prices);
   let hi = Math.max(...prices);
   const pad = Math.max((hi - lo) * 0.2, 8);
@@ -2617,7 +2757,7 @@ function drawMarket(host, { points, line, kind, close, now }) {
   hi += pad;
   const X = (t) => ((t - t0) / (t1 - t0)) * W;
   const Y = (p) => top + (1 - (p - lo) / (hi - lo)) * (bottom - top);
-  const yl = Y(line);
+  const yl = showLine ? Y(line) : 0;
   const xn = X(pts.at(-1)[0]);
   const xc = X(close);
   const svg = svgEl("svg", {
@@ -2625,7 +2765,7 @@ function drawMarket(host, { points, line, kind, close, now }) {
     height: H,
     viewBox: `0 0 ${W} ${H}`,
     role: "img",
-    "aria-label": `BTC over the last ${MARKET_SPAN_S / 60} minutes against your ${usd0(line)} line, closing at ${localTime(close)}.`,
+    "aria-label": `BTC over the last ${MARKET_SPAN_S / 60} minutes against your ${usdLine(line)} line, closing at ${localTime(close)}.`,
   });
   const defs = svgEl("defs", {});
   const fade = svgEl("linearGradient", { id: "mkt-fade", x1: 0, y1: 0, x2: 0, y2: 1 });
@@ -2638,7 +2778,7 @@ function drawMarket(host, { points, line, kind, close, now }) {
   const area = `${path}L${xn.toFixed(1)} ${bottom}L${X(pts[0][0]).toFixed(1)} ${bottom}Z`;
   const zone = kind === 2 ? [top - 14, yl] : [yl, bottom];
   // Narrow screens name the line by its price alone, so the tag fits in the time still to come.
-  const tagText = W < 520 ? usd0(line) : `Your line ${usd0(line)}`;
+  const tagText = W < 520 ? usdLine(line) : `${lineMode() === "window" ? "Opening price" : "Your line"} ${usdLine(line)}`;
   const tagW = tagText.length * 7.2 + 14;
   // The tag sits in the time still to come, unless now is too close to the edge.
   const tagX = xn + 12 + tagW <= W - 10 ? W - tagW - 10 : 10;
@@ -2647,13 +2787,12 @@ function drawMarket(host, { points, line, kind, close, now }) {
   tag.append(svgEl("rect", { x: tagX, y: tagY, width: tagW, height: 22 }), svgEl("text", { x: tagX + 7, y: tagY + 15 }, tagText));
   svg.append(
     defs,
-    svgEl("rect", { x: 0, y: zone[0], width: W, height: Math.max(0, zone[1] - zone[0]), class: "mkt-zone" }),
+    ...(showLine ? [svgEl("rect", { x: 0, y: zone[0], width: W, height: Math.max(0, zone[1] - zone[0]), class: "mkt-zone" })] : []),
     svgEl("rect", { x: xn, y: top - 14, width: Math.max(0, W - xn), height: bottom - top + 14, class: "mkt-future" }),
     svgEl("line", { x1: xc, x2: xc, y1: top - 14, y2: bottom, class: "mkt-close" }),
     svgEl("path", { d: area, class: "mkt-area" }),
     svgEl("path", { d: path, class: "mkt-line" }),
-    svgEl("line", { x1: 0, x2: W, y1: yl, y2: yl, class: "mkt-level" }),
-    tag,
+    ...(showLine ? [svgEl("line", { x1: 0, x2: W, y1: yl, y2: yl, class: "mkt-level" }), tag] : []),
     svgEl("circle", { cx: xn, cy: Y(pts.at(-1)[1]), r: 4, class: "mkt-pulse" }),
     svgEl("circle", { cx: xn, cy: Y(pts.at(-1)[1]), r: 4, class: "mkt-now" }),
     svgEl("text", { x: 16, y: H - 6, class: "tick" }, localTime(t0)),
@@ -2940,6 +3079,8 @@ function bind() {
   bindBet();
   bindTheme();
   pullToReload();
+  // The market chart is sized once the fonts are in; redraw it then.
+  document.fonts?.ready.then(() => renderMarket()).catch(() => undefined);
   window.addEventListener("resize", () => {
     if (state.view === "home") renderBlotter();
     renderBet();

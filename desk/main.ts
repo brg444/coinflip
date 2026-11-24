@@ -50,7 +50,8 @@ import { connectTransport, nostrPubkey, type Incoming } from "../protocol/nostr.
 import { deribitMultiplier, deribitPremium, fetchSurface, predictVol, surfaceStatus } from "../protocol/deribit.ts";
 import { predictMultiplier, predictPayout, premiumSats, quotedPremium } from "../protocol/pricing.ts";
 import { openSqliteStorage, revision } from "../protocol/sqlite-storage.ts";
-import { fetchOracleStatus, parseOracleBeacon, parseOracleLatest, serviceOrigin, type OracleLatest } from "../settle/oracle.ts";
+import { fetchOraclePrices, fetchOracleStatus, parseOracleBeacon, parseOracleLatest, serviceOrigin, type OracleLatest } from "../settle/oracle.ts";
+import { openingSample, WINDOW_LINE_WITHIN_S, windowOpen } from "../protocol/window-line.ts";
 import { Book, hasBeacon, openPremium, outlay, pageQuotes, quoteCounts, type QuoteFilter, type QuoteRow } from "./book.ts";
 import { countFill, countQuote, emptyHour, hourLine, msUntilNextHour } from "./digest.ts";
 import { finalizeDeskSpends, pendingOutpoints } from "./finalize.ts";
@@ -76,6 +77,9 @@ import { spotCents } from "./spot.ts";
  *   DESK_VOL        optional vol override. Default is the Deribit mark.
  *   DESK_EDGE       predict: the desk's share of a fair price. Default 0.05 (1.90× at even odds)
  *   DESK_LOG        set to debug to print each quote. Default is one line per hour.
+ *   DESK_LINE_MODE  predict: "window" quotes only the window's line, the oracle's first DIA sample at or
+ *                   after the five-minute window opens, so every prediction in a window shares one line.
+ *                   "any" (default) quotes any line near the price.
  */
 
 function required(name: string): string {
@@ -112,6 +116,27 @@ if (volOverride != null && !(volOverride > 0 && volOverride < 5)) {
 }
 if (!Number.isInteger(port) || port < 1) throw new Error("PORT");
 const edge = process.env.DESK_EDGE?.trim() ? Number(process.env.DESK_EDGE) : PREDICT_EDGE;
+const lineMode = (process.env.DESK_LINE_MODE?.trim() || "any").toLowerCase();
+if (lineMode !== "any" && lineMode !== "window") throw new Error('DESK_LINE_MODE must be "any" or "window"');
+const windowLines = new Map<number, bigint>();
+
+/** The line of the window that closes at `expiry`, from the oracle's samples. Null until the oracle has one. */
+async function windowLineCents(expiry: number): Promise<bigint | null> {
+  const open = windowOpen(expiry);
+  const known = windowLines.get(open);
+  if (known != null) return known;
+  try {
+    const samples = await fetchOraclePrices(oracleUrl, open, open + WINDOW_LINE_WITHIN_S, AbortSignal.timeout(8_000));
+    const first = openingSample(samples, open);
+    if (!first) return null;
+    const cents = BigInt(first.price);
+    windowLines.set(open, cents);
+    for (const key of windowLines.keys()) if (key < open - 3600) windowLines.delete(key);
+    return cents;
+  } catch {
+    return null;
+  }
+}
 if (!(edge >= 0 && edge < 0.5)) throw new Error("DESK_EDGE must be a share between 0 and 0.5");
 
 const identity = SingleKey.fromHex(deskKeyHex);
@@ -373,6 +398,18 @@ async function onPredict(message: RfqRequest & { profile: PredictRequestProfile 
   if (!priced.ok) {
     await refuse(from, message.rfq_id, priced.reason);
     return;
+  }
+  if (lineMode === "window") {
+    // Every prediction in a window is against the window's line, so the desk's exposure per window is one level.
+    const expected = await windowLineCents(message.profile.expiry);
+    if (expected == null) {
+      await refuse(from, message.rfq_id, "window line not set");
+      return;
+    }
+    if (BigInt(message.profile.strike) !== expected) {
+      await refuse(from, message.rfq_id, "window line");
+      return;
+    }
   }
   const kind = message.profile.kind;
   let multiplier: number | null;
