@@ -263,7 +263,9 @@ function show(view, mode = "push") {
   if (view === "connect") {
     $("connect-current").hidden = !state.address;
     $("connect-address").textContent = shortAddress(state.address);
-    $("account-key").focus();
+    // A touch screen would raise its keyboard for the address field; most people tap Open Arkade wallet instead.
+    if (window.matchMedia("(pointer: coarse)").matches) $("wallet-connect").focus({ preventScroll: true });
+    else $("account-key").focus();
   }
 }
 
@@ -1105,6 +1107,7 @@ function renderBetPop(focus = false) {
   });
   if (!state.bet.open || state.view !== "predict" || !priced()) {
     pop.hidden = true;
+    syncScrim();
     return;
   }
   const had = pop.contains(document.activeElement) ? document.activeElement.dataset.pick || document.activeElement.id : "";
@@ -1200,8 +1203,12 @@ function renderBetPop(focus = false) {
   }
   const heading = el("p", "q", title);
   heading.id = "bet-pop-title";
-  pop.replaceChildren(heading, ...parts, el("p", "hint", hint));
+  const shut = action("sheet-x", "", closeBetPop);
+  shut.setAttribute("aria-label", "Close");
+  shut.append(closeGlyph());
+  pop.replaceChildren(shut, heading, ...parts, el("p", "hint", hint));
   pop.hidden = false;
+  syncScrim();
   const chip = document.querySelector(`[data-bchip="${state.bet.open}"]`);
   pop.style.left = `${Math.max(0, Math.min(chip.offsetLeft, pop.parentElement.clientWidth - pop.offsetWidth))}px`;
   pop.style.top = `${chip.offsetTop + chip.offsetHeight + 12}px`;
@@ -1285,9 +1292,56 @@ function dropBet() {
 
 function syncScrim() {
   const open = state.bet.checkout && state.view === "predict";
-  $("scrim").hidden = !open;
+  // On a phone a term's list is a drawer too, so it gets the same scrim to tap away.
+  const picking = Boolean(state.bet.open) && state.view === "predict" && phoneSheets() && !$("bet-pop").hidden;
+  $("scrim").hidden = !(open || picking);
   for (const id of ["top", "main"]) $(id).inert = open;
   syncLock();
+}
+
+function closeBetPop() {
+  if (!state.bet.open) return;
+  const chip = document.querySelector(`[data-bchip="${state.bet.open}"]`);
+  state.bet.open = "";
+  renderBetPop();
+  chip?.focus({ preventScroll: true });
+}
+
+function closeGlyph() {
+  const svg = svgEl("svg", { viewBox: "0 0 14 14", "aria-hidden": "true" });
+  svg.append(svgEl("path", { d: "M2.5 2.5l9 9M11.5 2.5l-9 9" }));
+  return svg;
+}
+
+/** Phones: a drawer follows a finger down and closes past 90px, as the wallet's do. */
+function dragToClose(node, close) {
+  let from = null;
+  let dy = 0;
+  node.addEventListener("touchstart", (event) => {
+    from = null;
+    if (!phoneSheets() || event.touches.length !== 1) return;
+    const scroller = event.target.closest(".scroll, .pv-sheet, .pop");
+    if (scroller && scroller.scrollTop > 0) return;
+    if (event.target.closest("input, .chart")) return;
+    from = event.touches[0].clientY;
+    dy = 0;
+  }, { passive: true });
+  node.addEventListener("touchmove", (event) => {
+    if (from == null) return;
+    dy = Math.max(0, event.touches[0].clientY - from);
+    node.style.transition = "none";
+    node.style.transform = dy ? `translate3d(0, ${dy}px, 0)` : "";
+  }, { passive: true });
+  const end = () => {
+    if (from == null) return;
+    from = null;
+    node.style.transition = "transform 220ms cubic-bezier(.16, 1, .3, 1)";
+    node.style.transform = "";
+    if (dy > 90) close();
+    dy = 0;
+  };
+  node.addEventListener("touchend", end);
+  node.addEventListener("touchcancel", end);
 }
 
 /** The page stops scrolling while a sheet is up: the bet checkout, or a position on a phone. */
@@ -2127,6 +2181,16 @@ function marketClock(now) {
  * Phones keep a short chart so the bet and its button fit.
  */
 function chartHeight(host, W) {
+  if (W < 520 && host.closest(".market")) {
+    // Phones: the market chart takes the room the page leaves above the tab bar, between a floor and a ceiling.
+    const predict = $("predict");
+    const nav = document.querySelector(".nav");
+    const floor = nav && getComputedStyle(nav).position === "fixed" ? nav.getBoundingClientRect().top + window.scrollY : window.innerHeight;
+    const end = predict && !predict.hidden ? predict.getBoundingClientRect().bottom + window.scrollY : floor;
+    const spare = Math.min(window.innerHeight, floor) - end - 12;
+    const base = host.offsetHeight > 0 ? host.offsetHeight : 120;
+    return Math.round(Math.min(W < 420 ? 176 : 200, Math.max(120, base + spare)));
+  }
   if (W < 420) return 104;
   if (W < 520) return 128;
   const card = host.closest(".market");
@@ -2184,7 +2248,8 @@ function drawMarket(host, { points, line, kind, close, now }) {
   const path = pts.map(([t, p], i) => `${i ? "L" : "M"}${X(t).toFixed(1)} ${Y(p).toFixed(1)}`).join("");
   const area = `${path}L${xn.toFixed(1)} ${bottom}L${X(pts[0][0]).toFixed(1)} ${bottom}Z`;
   const zone = kind === 2 ? [top - 14, yl] : [yl, bottom];
-  const tagText = `Your line ${usd0(line)}`;
+  // Narrow screens name the line by its price alone, so the tag fits in the time still to come.
+  const tagText = W < 520 ? usd0(line) : `Your line ${usd0(line)}`;
   const tagW = tagText.length * 7.2 + 14;
   // The tag sits in the time still to come, unless now is too close to the edge.
   const tagX = xn + 12 + tagW <= W - 10 ? W - tagW - 10 : 10;
@@ -2464,7 +2529,15 @@ function bind() {
     }
     if (state.view === "home" && $("home").classList.contains("sheet-open")) location.hash = "#/positions";
   });
-  listen("scrim", "click", closeBet);
+  listen("scrim", "click", () => {
+    if (state.bet.open) closeBetPop();
+    else closeBet();
+  });
+  dragToClose($("bet-pop"), closeBetPop);
+  dragToClose($("bet"), closeBet);
+  dragToClose($("pv-sheet"), () => {
+    if ($("home").classList.contains("sheet-open")) location.hash = "#/positions";
+  });
   // Phones fold the payout chart in the checkout; it is drawn again at its real width when opened.
   listen("bet-chart-fold", "click", () => {
     const open = $("bet").classList.toggle("show-chart");

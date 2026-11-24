@@ -847,7 +847,9 @@ button.chip:not(:disabled):hover { transform: translateY(-1px); }
  * from the screen, 32px corners, a handle, a scrim. Positions are pages.
  * Buttons rest on a 3px ledge, as the wallet's do.
  * ------------------------------------------------------------------------- */
-.pv-scrim, .sheet-close, .chart-fold, .prow .money, #positions-sub { display: none; }
+.pv-scrim, .sheet-close, .sheet-x, .chart-fold, .prow .money, #positions-sub { display: none; }
+/* iOS only sends a tap on a plain element to the page when it looks clickable. */
+.scrim { cursor: pointer; }
 .plist-head { margin: 18px 0 2px; color: var(--muted); font: 500 11.5px/1.4 var(--mono); letter-spacing: .08em; text-transform: uppercase; }
 
 :root { --face: #381993; --face-press: #2f1585; --face-ledge: #23105f; --well: #f4f2f8; --handle: #e4e1ea; }
@@ -879,7 +881,7 @@ button.chip:not(:disabled):hover { transform: translateY(-1px); }
     border-radius: 32px;
     background: var(--card);
     color: var(--ink);
-    animation: sheet-in 380ms var(--ease-out) both;
+    animation: sheet-in 380ms var(--ease-out) backwards;
   }
   .pop::before, .drawer::before, #home.sheet-open .pv-sheet::before {
     content: "";
@@ -893,7 +895,7 @@ button.chip:not(:disabled):hover { transform: translateY(-1px); }
   }
   @keyframes sheet-in { from { transform: translate3d(0, 105%, 0); } }
   .scrim { animation: fade 200ms var(--ease-out); }
-  .drawer .back, #home.sheet-open .sheet-close {
+  .drawer .back, #home.sheet-open .sheet-close, .pop .sheet-x {
     position: absolute;
     top: 14px;
     right: 14px;
@@ -910,11 +912,11 @@ button.chip:not(:disabled):hover { transform: translateY(-1px); }
   .drawer .back { font-size: 0; }
   .drawer .back svg { display: none; }
   .drawer .back::before { content: ""; width: 14px; height: 14px; background: currentColor; -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 14 14'%3E%3Cpath d='M2.5 2.5l9 9M11.5 2.5l-9 9' fill='none' stroke='%23000' stroke-width='1.8'/%3E%3C/svg%3E") center / 14px no-repeat; mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 14 14'%3E%3Cpath d='M2.5 2.5l9 9M11.5 2.5l-9 9' fill='none' stroke='%23000' stroke-width='1.8'/%3E%3C/svg%3E") center / 14px no-repeat; }
-  #home.sheet-open .sheet-close svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.8; }
+  .pop .sheet-x svg, #home.sheet-open .sheet-close svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.8; }
 
   /* A term's list. */
-  .pop { overflow: auto; padding: 22px 20px 20px; box-shadow: 0 0 0 100vmax var(--scrim); }
-  .pop .q { padding-right: 8px; font-size: 19px; }
+  .pop { overflow: auto; overscroll-behavior: contain; padding: 22px 20px 20px; box-shadow: 0 24px 60px rgba(5, 4, 10, .28); }
+  .pop .q { padding-right: 44px; font-size: 19px; }
   .opts button { min-height: 58px; border-radius: 14px; background: var(--well); }
   .opts .on { background: var(--lav); }
   .opts .off { border-radius: 14px; }
