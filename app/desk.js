@@ -1911,7 +1911,7 @@ function betRow(p) {
 }
 
 function betLegend() {
-  $("position-legend").replaceChildren(...[["p", "BTC price, Deribit index"], ["d", "Your line"], ["w", "You win"], ["k", "The desk wins"]].map(([key, text]) => {
+  $("position-legend").replaceChildren(...[["p", state.spotSource === "deribit" ? "BTC price, Deribit index" : "BTC price, DIA oracle"], ["d", "Your line"], ["w", "You win"], ["k", "The desk wins"]].map(([key, text]) => {
     const item = el("span");
     item.append(el("i", key), text);
     return item;
@@ -2156,7 +2156,7 @@ function renderPrediction(p) {
   for (const [name, value] of [
     ["Vault", p.vaultAddress],
     ["Paid to", p.holderAddress || p.payoutAddress],
-    ["Price check", `Deribit BTC index, ${utcTime(p.expiry)} on ${whenDay(p.expiry)}`],
+    ["Price check", `DIA BTC/USD oracle, last price by ${utcTime(Number(p.expiry) + FIXING_LAG_S)} on ${whenDay(p.expiry)}`],
     ["Multiplier", timesX(payoutMultiplierOf(p))],
   ]) {
     if (value) facts.append(el("dt", "", name), el("dd", "", value));
@@ -2383,10 +2383,22 @@ const HISTORY_URL = "https://www.deribit.com/api/v2/public/get_index_chart_data?
 const MARKET_SPAN_S = 8 * 60;
 let historyLoaded = false;
 
-/** Six-second index prices for the last hour, so the chart has a past on first paint. */
+/** The last hour of prices, so the chart has a past on first paint: the oracle's, or the index's. */
 async function loadHistory() {
   if (historyLoaded) return;
   historyLoaded = true;
+  try {
+    const now = Math.floor(Date.now() / 1000);
+    const rows = await oracleSamples(now - 3600, now + 60);
+    if (rows && rows.length >= 2) {
+      const first = seen[0]?.[0] ?? Infinity;
+      seen.unshift(...rows.filter(([time]) => time < first).slice(-(TICKS_KEPT - seen.length)));
+      renderMarket();
+      return;
+    }
+  } catch {
+    // Fall back to the index history.
+  }
   try {
     const res = await fetch(HISTORY_URL, { signal: AbortSignal.timeout(8_000) });
     if (!res.ok) throw new Error(String(res.status));
@@ -2874,12 +2886,72 @@ async function fillKept() {
   if (changed && state.view === "predict") renderPredict();
 }
 
+/**
+ * The price is the DIA oracle's: the feed the desk quotes on and the vault settles on, read through the
+ * page's server. The oracle publishes about every 25 seconds. A host without the oracle route, or an
+ * oracle gone quiet, falls back to the Deribit index and says so.
+ */
+const ORACLE_FRESH_S = 180;
+let oracleSpotAt = 0;
+
+async function oracleSamples(from, to, limit = 200) {
+  if (!oracleReadable) return null;
+  const res = await fetch(`oracle/prices?from=${from}&to=${to}&limit=${limit}`, { cache: "no-store", signal: AbortSignal.timeout(8_000) });
+  if (res.status === 404) {
+    oracleReadable = false;
+    return null;
+  }
+  if (!res.ok) return null;
+  const body = await res.json();
+  return (Array.isArray(body?.samples) ? body.samples : [])
+    .filter((s) => typeof s?.price === "string" && /^[0-9]+$/.test(s.price) && Number.isSafeInteger(s.time))
+    .map((s) => [s.time, Number(s.price)])
+    .sort((a, b) => a[0] - b[0]);
+}
+
+function setSource(source) {
+  if (state.spotSource === source) return;
+  state.spotSource = source;
+  const label = $("mkt-label");
+  if (label) label.textContent = source === "dia" ? "BTC · DIA oracle" : "BTC · Deribit index";
+}
+
+let oracleRead = null;
+
+async function oracleSpot() {
+  const now = Math.floor(Date.now() / 1000);
+  const rows = await oracleSamples(now - ORACLE_FRESH_S, now + 60, 5);
+  const last = rows?.at(-1);
+  return last && now - last[0] <= ORACLE_FRESH_S ? BigInt(last[1]) : null;
+}
+
 async function loadSpot() {
+  const now = Math.floor(Date.now() / 1000);
+  try {
+    if (oracleReadable) {
+      // One read at a time, at most every five seconds; callers in between share it.
+      if (!oracleRead || now - oracleSpotAt >= 5) {
+        oracleSpotAt = now;
+        oracleRead = oracleSpot().catch(() => null);
+      }
+      const cents = await oracleRead;
+      if (cents != null) {
+        state.spotCents = cents;
+        setSource("dia");
+        return;
+      }
+    }
+  } catch {
+    // Fall through to the index.
+  }
   try {
     const cents = await btcUsdCents();
-    if (cents != null && cents > 100_000n && cents < 1_000_000_000n) state.spotCents = cents;
+    if (cents != null && cents > 100_000n && cents < 1_000_000_000n) {
+      state.spotCents = cents;
+      setSource("deribit");
+    }
   } catch {
-    // Keep the last index price on a failed refresh.
+    // Keep the last price on a failed refresh.
   }
 }
 
