@@ -19,6 +19,7 @@ await esbuild.build({
   platform: "browser",
   target: "es2022",
   alias: { "node:crypto": path.join(root, "app/src/browser-crypto.ts") },
+  minify: true,
   sourcemap: true,
   logLevel: "info",
   define: { __COINFLIP_DEMO__: JSON.stringify(demo) },

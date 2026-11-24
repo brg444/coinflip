@@ -21,6 +21,7 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { createGzip } from "node:zlib";
 
 import { getPublicKey } from "nostr-tools/pure";
 
@@ -292,8 +293,17 @@ function servePage() {
         res.end("not found");
         return;
       }
-      res.writeHead(200, { "content-type": types[path.extname(file)] ?? "application/octet-stream", "cache-control": "no-store" });
-      createReadStream(file).pipe(res);
+      const ext = path.extname(file);
+      const hashed = (ext === ".js" || ext === ".css") && url.search.length > 1;
+      const gzip = (ext === ".html" || ext === ".js" || ext === ".css") && /\bgzip\b/i.test(String(req.headers["accept-encoding"] ?? ""));
+      const headers = {
+        "content-type": types[ext] ?? "application/octet-stream",
+        "cache-control": hashed ? "public, max-age=31536000, immutable" : "no-store",
+        ...(gzip ? { "content-encoding": "gzip", vary: "Accept-Encoding" } : {}),
+      };
+      res.writeHead(200, headers);
+      const stream = createReadStream(file);
+      (gzip ? stream.pipe(createGzip()) : stream).pipe(res);
     }).listen(PORTS.page, server ? "0.0.0.0" : "127.0.0.1", resolve);
   });
 }
