@@ -155,6 +155,9 @@ input { font: inherit; color: inherit; caret-color: var(--purple); }
 .wallet .dot { width: 8px; height: 8px; background: var(--purple); }
 .wallet .addr-s { display: none; }
 .wallet .bal { color: var(--ink); }
+/* The wallet page is open: the pill reads as pressed, and a second tap closes it. */
+.wallet[aria-expanded="true"] { box-shadow: inset 0 0 0 1.5px var(--purple); background: var(--lav); }
+.connect[aria-expanded="true"] { background: var(--purple); }
 .wallet.has-balance .addr-l { color: var(--muted); }
 .wallet.has-balance .bal::after { content: "·"; margin-left: 10px; color: var(--muted); }
 /* A wallet return that landed in another window: it has gone back to the app. */

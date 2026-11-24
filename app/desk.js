@@ -236,6 +236,7 @@ function routeFromHash() {
 }
 
 function show(view, mode = "push") {
+  if (view === "connect" && state.view !== "connect") state.backTo = state.view;
   state.view = view;
   if (view !== "home") {
     $("home").classList.remove("sheet-open");
@@ -280,6 +281,8 @@ function renderTop() {
   $("who-balance").hidden = !balance;
   $("who-balance").textContent = balance ? `${int(state.balance)} sats` : "";
   $("who").classList.toggle("has-balance", balance);
+  $("who").setAttribute("aria-expanded", String(state.view === "connect"));
+  $("top-connect").setAttribute("aria-expanded", String(state.view === "connect"));
   $("who").setAttribute("aria-label", known ? `Wallet ${shortAddress(state.address)}${balance ? `, ${int(state.balance)} sats` : ""}` : "Wallet");
   $("top-connect").hidden = known;
   const count = visiblePositions().filter((p) => liveNow(p)).length;
@@ -2793,8 +2796,10 @@ function bind() {
     if (event.key === "Enter") connectAddress();
   });
   listen("account-change", "click", disconnect);
-  listen("top-connect", "click", () => show("connect"));
-  listen("who", "click", () => show("connect"));
+  // The wallet pill and Connect open the wallet page, and a second tap closes it back to where you were.
+  const toggleWallet = () => show(state.view === "connect" ? (state.backTo || "predict") : "connect");
+  listen("top-connect", "click", toggleWallet);
+  listen("who", "click", toggleWallet);
   document.querySelectorAll("[data-unit]").forEach((btn) => {
     btn.addEventListener("click", () => setUnit(btn.dataset.unit));
   });
