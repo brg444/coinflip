@@ -219,6 +219,8 @@ async function deskUp(key, beacon) {
     ORACLE_URL: oracleUrl,
     ...(backupPubkey ? { BACKUP_EMULATOR_PUBKEY: backupPubkey } : {}),
     DESK_RATCHET_MARGIN_S: process.env.DESK_RATCHET_MARGIN_S?.trim() || String(5 * 86_400),
+    // The page serves the oracle's samples, so it predicts against each window's opening price; the desk checks it.
+    DESK_LINE_MODE: process.env.DESK_LINE_MODE?.trim() || "window",
     DATA_DIR: path.join(home, "desk"),
     PORT: String(PORTS.desk),
   });
