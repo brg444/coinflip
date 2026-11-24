@@ -24,6 +24,11 @@ export type WatchPosition = {
   payoutKey?: Uint8Array;
   /** Predict: the bettor's address key, which the payout pays. */
   holderPayoutKey?: Uint8Array;
+  stake?: bigint;
+  backupPk?: Uint8Array;
+  voidAfter?: bigint;
+  fallbackDelay?: bigint;
+  finalExitDelay?: bigint;
   beaconTxid: string;
   beaconGidx: number;
   vaultAddress: string;
@@ -67,6 +72,11 @@ export function positionFromAnnouncement(body: unknown): WatchPosition | null {
     programId: row.program_id,
     payoutKey: directPayoutKey(row.writer_pubkey, row.writer_pk_script),
     holderPayoutKey: row.holder_pk_script ? directPayoutKey(row.holder_pubkey, row.holder_pk_script) : undefined,
+    ...(row.stake ? { stake: BigInt(row.stake) } : {}),
+    ...(row.backup_pubkey ? { backupPk: hexToBytes(row.backup_pubkey) } : {}),
+    ...(row.void_after != null ? { voidAfter: BigInt(row.void_after) } : {}),
+    ...(row.fallback_delay != null ? { fallbackDelay: BigInt(row.fallback_delay) } : {}),
+    ...(row.final_exit_delay != null ? { finalExitDelay: BigInt(row.final_exit_delay) } : {}),
     beaconTxid: row.beacon_txid,
     beaconGidx: row.beacon_gidx,
     vaultAddress: row.vault_address,
@@ -119,7 +129,7 @@ export function termsFor(position: WatchPosition, serverKey: Uint8Array, emulato
     kind: position.kind,
     strike: position.strike,
     collateral: position.collateral,
-    premium: 0n,
+    premium: position.stake ?? 0n,
     expiry: BigInt(position.expiry),
     deadline: BigInt(position.expiry),
     exit: position.exit,
@@ -131,5 +141,9 @@ export function termsFor(position: WatchPosition, serverKey: Uint8Array, emulato
     readFee,
     serverKey,
     emulatorKey,
+    backupPk: position.backupPk,
+    voidAfter: position.voidAfter,
+    fallbackDelay: position.fallbackDelay,
+    finalExitDelay: position.finalExitDelay,
   };
 }

@@ -104,7 +104,7 @@ test("the import surface is the protocol bind and settle helpers", () => {
   assert.equal(slotFixing, slotFixingFromSettle);
   assert.equal(settlePayouts, settlePayoutsFromSettle);
   assert.deepEqual(Object.keys(vaultProgram().functions).sort(), ["close", "settle", "unilateral"]);
-  assert.deepEqual(Object.keys(predictVaultProgram().functions).sort(), ["close", "settle", "unilateral"]);
+  assert.deepEqual(Object.keys(predictVaultProgram().functions).sort(), ["close", "reboard", "refund", "refundBackup", "settle", "unilateral"]);
   assert.deepEqual(Object.keys(beaconProgram().functions).sort(), ["attest", "migrate", "read", "unilateral"]);
 });
 

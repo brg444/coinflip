@@ -1,7 +1,15 @@
 import { arkade, DefaultVtxo, networks, RestArkProvider } from "@arkade-os/sdk";
 
 import type { BeaconId } from "./beacon-id.ts";
-import { ARK_URL, EXIT, isPredict, type Kind } from "./constants.ts";
+import {
+  ARK_URL,
+  EXIT,
+  isPredict,
+  PREDICT_FALLBACK_DELAY,
+  PREDICT_FINAL_EXIT_DELAY,
+  PREDICT_VOID_AFTER,
+  type Kind,
+} from "./constants.ts";
 import { bytesToHex, hexToBytes, xOnly } from "./hex.ts";
 import { exitSequence, intentProgram, vaultProgramFor } from "./programs.ts";
 
@@ -26,6 +34,10 @@ export type Terms = {
   readFee?: bigint;
   serverKey: Uint8Array;
   emulatorKey: Uint8Array;
+  backupPk?: Uint8Array;
+  voidAfter?: bigint;
+  fallbackDelay?: bigint;
+  finalExitDelay?: bigint;
 };
 
 export type Bound = {
@@ -116,21 +128,51 @@ export function bindContracts(terms: Terms): Bound {
   const holder = terms.holderPayoutKey ? directPayout(terms.holderPayoutKey) : payoutVtxo(holderPk, serverKey, terms.exit);
   const keys = { serverKey, emulatorKey: terms.emulatorKey };
 
-  const vaultArgs: Record<string, bigint | Uint8Array> = {
-    kind: BigInt(terms.kind),
-    writerPk,
-    holderPk,
-    ...scriptArg("writerScript", writer.tweakedPublicKey),
-    ...scriptArg("holderScript", holder.tweakedPublicKey),
-    strike: terms.strike,
-    collateral: terms.collateral,
-    expiry: terms.expiry,
-    beaconTxid: terms.beacon.txid,
-    beaconGidx: terms.beacon.gidx,
-    readFee: terms.readFee ?? 0n,
-    exit: exitSequence(terms.exit),
-    server: serverKey,
-  };
+  let vaultArgs: Record<string, bigint | Uint8Array>;
+  if (predict) {
+    const voidAfter = terms.voidAfter ?? PREDICT_VOID_AFTER;
+    const fallbackDelay = terms.fallbackDelay ?? PREDICT_FALLBACK_DELAY;
+    const finalExitDelay = terms.finalExitDelay ?? PREDICT_FINAL_EXIT_DELAY;
+    if (voidAfter <= 0n) throw new Error("voidAfter must be positive");
+    if (fallbackDelay < terms.exit) throw new Error("fallbackDelay must be at least exit");
+    if (finalExitDelay <= fallbackDelay) throw new Error("finalExitDelay must exceed fallbackDelay");
+    const backupPk = xOnly(terms.backupPk ?? terms.emulatorKey);
+    vaultArgs = {
+      kind: BigInt(terms.kind),
+      writerPk,
+      holderPk,
+      ...scriptArg("writerScript", writer.tweakedPublicKey),
+      ...scriptArg("holderScript", holder.tweakedPublicKey),
+      strike: terms.strike,
+      collateral: terms.collateral,
+      stake: terms.premium,
+      expiry: terms.expiry,
+      beaconTxid: terms.beacon.txid,
+      beaconGidx: terms.beacon.gidx,
+      readFee: terms.readFee ?? 0n,
+      backupPk,
+      voidAfter,
+      fallbackDelay: exitSequence(fallbackDelay),
+      finalExitDelay: exitSequence(finalExitDelay),
+      server: serverKey,
+    };
+  } else {
+    vaultArgs = {
+      kind: BigInt(terms.kind),
+      writerPk,
+      holderPk,
+      ...scriptArg("writerScript", writer.tweakedPublicKey),
+      ...scriptArg("holderScript", holder.tweakedPublicKey),
+      strike: terms.strike,
+      collateral: terms.collateral,
+      expiry: terms.expiry,
+      beaconTxid: terms.beacon.txid,
+      beaconGidx: terms.beacon.gidx,
+      readFee: terms.readFee ?? 0n,
+      exit: exitSequence(terms.exit),
+      server: serverKey,
+    };
+  }
   const vaultScript = new arkade.ArkadeProgramScript(vaultProgramFor(terms.kind), vaultArgs, keys);
 
   const user = predict ? { pk: holderPk, program: holder } : { pk: writerPk, program: writer };

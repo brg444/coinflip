@@ -29,14 +29,15 @@ import {
   PREDICT_GRID_S,
   PREDICT_LOCK_S,
   PREDICT_MIN_LEFT_S,
+  PREDICT_VOID_AFTER,
   QUOTE_TTL_S,
   STAKE_MAX,
   STAKE_MIN,
 } from "../protocol/constants.ts";
 import { predictPayout } from "../protocol/pricing.ts";
-import { PINNED_DESKS, RELAYS } from "./rfq-config.js";
+import { PINNED_BACKUP_PUBKEY, PINNED_DESKS, RELAYS } from "./rfq-config.js";
 import { settlementKnown, usdFromCents } from "./src/position-status.ts";
-import { settleFromPage } from "./src/settle.ts";
+import { refundVaultFromPage, settleFromPage } from "./src/settle.ts";
 import { pkScriptOf, readIntent, readKept, watchIntents } from "./src/watch.ts";
 
 const STORE = "arkade-options-desk-v1";
@@ -131,6 +132,10 @@ function persist() {
     deskTake: p.deskTake || "",
     settleCents: p.settleCents || "",
     deskPkHex: p.deskPkHex || "",
+    backupPkHex: p.backupPkHex || "",
+    voidAfter: p.voidAfter || 0,
+    fallbackDelay: p.fallbackDelay || 0,
+    finalExitDelay: p.finalExitDelay || 0,
     holderAddress: p.holderAddress || "",
     holderPubkey: p.holderPubkey || "",
     placedCents: p.placedCents || "",
@@ -365,6 +370,48 @@ function settleButton(position) {
   });
 }
 
+function canVoidRefund(position) {
+  if (!canSettle(position) || !position.backupPkHex) return false;
+  const after = Number(position.expiry) + Number(position.voidAfter || PREDICT_VOID_AFTER);
+  return Math.floor(Date.now() / 1000) >= after;
+}
+
+async function voidRefundPosition(position, button) {
+  button.disabled = true;
+  button.textContent = "Refunding";
+  try {
+    const outcome = await refundVaultFromPage({
+      ...(await fundRequest(position)),
+      fillTxid: position.closeTxid || undefined,
+    });
+    if (outcome.result !== "refunded" && outcome.result !== "spent") {
+      button.disabled = false;
+      button.textContent = "Try again";
+      renderStatus($("status"), "Couldn’t refund yet. Try again in a moment.", outcome.result);
+      return;
+    }
+    position.status = "settled";
+    position.settleTxid = outcome.txid;
+    if (outcome.result === "refunded") {
+      position.writerKeep = outcome.holder.toString();
+      position.deskTake = outcome.writer.toString();
+    }
+    persist();
+    renderBlotter();
+  } catch (err) {
+    button.disabled = false;
+    button.textContent = "Try again";
+    renderStatus($("status"), "Couldn’t refund yet. Try again in a moment.", err instanceof Error ? err.message : "refund failed");
+  }
+}
+
+function voidRefundButton(position) {
+  if (!canVoidRefund(position)) return null;
+  return action("btn sm quiet", "Void & refund stake", (event) => {
+    void voidRefundPosition(position, event.currentTarget);
+  });
+}
+
 function txLink(label, txid) {
   if (!/^[0-9a-f]{64}$/.test(txid || "")) return null;
   const row = el("p", "tx-link");
@@ -433,6 +480,10 @@ async function fundRequest(position) {
     expiry: position.expiry,
     deadline: BigInt(position.deadline),
     writerPkHex: position.deskPkHex,
+    backupPkHex: position.backupPkHex || undefined,
+    voidAfter: position.voidAfter ? BigInt(position.voidAfter) : undefined,
+    fallbackDelay: position.fallbackDelay ? BigInt(position.fallbackDelay) : undefined,
+    finalExitDelay: position.finalExitDelay ? BigInt(position.finalExitDelay) : undefined,
     holderAddress: position.holderAddress || position.payoutAddress,
     holderPubkey: position.holderPubkey || undefined,
     beaconTxidHex: position.beaconTxid,
@@ -1393,6 +1444,7 @@ async function askBet() {
       expiry: asked.expiry,
       holderAddress: state.address,
       holderPubkey: state.pubkey || undefined,
+      backupPubkey: PINNED_BACKUP_PUBKEY,
     });
     if (gen !== betGen) return;
     const quote = live.quotes[0];
@@ -1407,6 +1459,10 @@ async function askBet() {
       holderAddress: state.address,
       holderPubkey: state.pubkey || undefined,
       writerPkHex: quote.deskPkHex,
+      backupPkHex: quote.backupPkHex,
+      voidAfter: BigInt(quote.voidAfter),
+      fallbackDelay: BigInt(quote.fallbackDelay),
+      finalExitDelay: BigInt(quote.finalExitDelay),
       beaconTxidHex: quote.beaconTxid,
       beaconGidx: quote.beaconGidx,
       exit: BigInt(quote.exit),
@@ -1453,6 +1509,10 @@ function placeBet() {
       deadline: quote.deadline,
       address: deposit.address,
       deskPkHex: quote.deskPkHex,
+      backupPkHex: quote.backupPkHex,
+      voidAfter: quote.voidAfter,
+      fallbackDelay: quote.fallbackDelay,
+      finalExitDelay: quote.finalExitDelay,
       beaconTxid: deposit.beaconTxidHex,
       beaconGidx: deposit.beaconGidx,
       exit: deposit.exit,
@@ -1481,7 +1541,10 @@ function placeBet() {
 function betOutcome(p) {
   if (!(p.status === "settled" || settlementKnown(p))) return "";
   if (p.writerKeep === "" || p.writerKeep == null) return "settled";
-  return BigInt(p.writerKeep) > 0n ? "won" : "lost";
+  const keep = BigInt(p.writerKeep);
+  const desk = p.deskTake ? BigInt(p.deskTake) : 0n;
+  if (keep > 0n && desk > 0n) return "voided";
+  return keep > 0n ? "won" : "lost";
 }
 
 function betStatusLabel(p) {
@@ -1491,6 +1554,7 @@ function betStatusLabel(p) {
   const outcome = betOutcome(p);
   if (outcome === "won") return "Won";
   if (outcome === "lost") return "Lost";
+  if (outcome === "voided") return "Voided";
   if (outcome === "settled") return "Settled";
   if (p.status === "filled") return Number(p.expiry) > now ? "Live" : "Checking the price";
   if (p.status === "expired") return "Time ran out";
@@ -1539,6 +1603,7 @@ function betRow(p) {
   let extra = "";
   if (outcome === "won") extra = `+${int(BigInt(p.writerKeep))} sats paid`;
   else if (outcome === "lost") extra = `−${int(p.premiumSats)} sats`;
+  else if (outcome === "voided") extra = `${int(BigInt(p.writerKeep))} sats returned`;
   else if (["locking", "deposited", "filled"].includes(p.status)) extra = `${int(p.premiumSats)} in → ${int(won(p.collateral))} if right`;
   if (extra) side.append(el("small", "", extra));
   row.append(icon, what, side);
@@ -1661,6 +1726,15 @@ function renderPrediction(p) {
       ["Paid to you", "0 sats", "tot"],
     ]));
     body.push(el("p", "sub", "One fixing decides it. All or nothing, no partial payouts."), ...again());
+  } else if (outcome === "voided") {
+    const back = BigInt(p.writerKeep);
+    head.replaceChildren("Bet voided · ", el("span", "amt", `${int(back)} sats`), " returned.");
+    badge = pill("Voided · stake returned", "pill");
+    body.push(el("p", "sub", "No price fixing settled this window in time, so the vault returned your stake and sent the rest back to the desk."));
+    body.push(ledger([
+      ["Your stake returned", `${int(back)} sats`, "tot"],
+    ]));
+    body.push(...again());
   } else if (outcome === "settled") {
     head.textContent = "Settled.";
     body.push(el("p", "sub", "The vault paid out. Reading what came back…"));
@@ -1685,9 +1759,11 @@ function renderPrediction(p) {
     head.textContent = "Checking the price.";
     body.push(el("p", "sub", `The fixing at ${at} decides it, and the payout goes to your Arkade wallet. Nothing for you to do.`));
     const settle = settleButton(p);
-    if (settle || p.refundable) {
+    const voidRefund = voidRefundButton(p);
+    if (settle || voidRefund || p.refundable) {
       const acts = el("div", "acts");
       if (settle) acts.append(settle);
+      if (voidRefund) acts.append(voidRefund);
       if (p.refundable) {
         acts.append(action("btn sm", "Take it back", (event) => {
           void refund(p, event.currentTarget);
