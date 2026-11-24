@@ -1,5 +1,5 @@
 import { parseOracleBeacon } from "../../settle/oracle.ts";
-import { settleQuote, type SettleOutcome } from "../../settle/vault.ts";
+import { refundQuote, settleQuote, type RefundOutcome, type SettleOutcome } from "../../settle/vault.ts";
 import { LIVE_BEACON_STATUS } from "./beacon-status.ts";
 import { openContract, type FundRequest } from "./fund.ts";
 
@@ -18,6 +18,20 @@ export async function settleFromPage(req: FundRequest & { fillTxid?: string }): 
     fillTxid: req.fillTxid,
     terms,
     beacon: parsed.beacon,
+    now: Math.floor(Date.now() / 1000),
+  });
+}
+
+export async function refundVaultFromPage(req: FundRequest & { fillTxid?: string }): Promise<RefundOutcome> {
+  const { client, terms } = await openContract(req);
+  return refundQuote({
+    chain: client.indexer!,
+    serverKey: client.serverKey,
+    emulatorKey: client.emulatorKey!,
+    emulator: client.emulator!,
+    checkpoint: client.checkpoint,
+    fillTxid: req.fillTxid,
+    terms,
     now: Math.floor(Date.now() / 1000),
   });
 }

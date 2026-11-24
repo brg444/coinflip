@@ -32,8 +32,11 @@ export function splitPayouts(
   let writer = 0n;
   let desk = 0n;
   let matched = false;
+  // Settle puts the beacon continuation at output 0; refund and close pay parties starting at output 0.
+  const firstScript = outputs[0]?.script.toLowerCase() ?? "";
+  const startIndex = firstScript === want || (wantDesk !== "" && firstScript === wantDesk) ? 0 : 1;
   outputs.forEach((output, index) => {
-    if (index === 0 || output.amount <= 0n) return;
+    if (index < startIndex || output.amount <= 0n) return;
     const script = output.script.toLowerCase();
     if (script === "51024e73" || script.startsWith("6a")) return;
     if (script === want) {

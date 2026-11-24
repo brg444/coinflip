@@ -29,13 +29,15 @@ import {
   PREDICT_GRID_S,
   PREDICT_LOCK_S,
   PREDICT_MIN_LEFT_S,
+  PREDICT_VOID_AFTER,
   QUOTE_TTL_S,
   STAKE_MAX,
   STAKE_MIN,
 } from "../protocol/constants.ts";
 import { predictPayout } from "../protocol/pricing.ts";
-import { PINNED_DESKS, RELAYS } from "./rfq-config.js";
+import { PINNED_BACKUP_PUBKEY, PINNED_DESKS, RELAYS } from "./rfq-config.js";
 import { settlementKnown, usdFromCents } from "./src/position-status.ts";
+import { refundVaultFromPage } from "./src/settle.ts";
 import { addressBalance, pkScriptOf, readIntent, readKept, watchIntents } from "./src/watch.ts";
 
 const STORE = "arkade-options-desk-v1";
@@ -133,6 +135,10 @@ function persist() {
     settleCents: p.settleCents || "",
     fixCents: p.fixCents || "",
     deskPkHex: p.deskPkHex || "",
+    backupPkHex: p.backupPkHex || "",
+    voidAfter: p.voidAfter || 0,
+    fallbackDelay: p.fallbackDelay || 0,
+    finalExitDelay: p.finalExitDelay || 0,
     holderAddress: p.holderAddress || "",
     holderPubkey: p.holderPubkey || "",
     placedCents: p.placedCents || "",
@@ -366,6 +372,57 @@ function sendClock(node) {
   node.textContent = left > 0 ? `${mmss(left)} left to send` : "Time ran out. Checking…";
 }
 
+function canSettle(position) {
+  if (position.status !== "filled") return false;
+  if (!position.vaultAddress || !position.deskPkHex || !position.beaconTxid) return false;
+  const expiry = Number(position.expiry) || 0;
+  if (!expiry || expiry > Math.floor(Date.now() / 1000)) return false;
+  if (position.settleTxid && position.settleTxid !== position.closeTxid) return false;
+  return true;
+}
+
+function canVoidRefund(position) {
+  if (!canSettle(position) || !position.backupPkHex) return false;
+  const after = Number(position.expiry) + Number(position.voidAfter || PREDICT_VOID_AFTER);
+  return Math.floor(Date.now() / 1000) >= after;
+}
+
+async function voidRefundPosition(position, button) {
+  button.disabled = true;
+  button.textContent = "Refunding";
+  try {
+    const outcome = await refundVaultFromPage({
+      ...(await fundRequest(position)),
+      fillTxid: position.closeTxid || undefined,
+    });
+    if (outcome.result !== "refunded" && outcome.result !== "spent") {
+      button.disabled = false;
+      button.textContent = "Try again";
+      renderStatus($("status"), "Couldn’t refund yet. Try again in a moment.", outcome.result);
+      return;
+    }
+    position.status = "settled";
+    position.settleTxid = outcome.txid;
+    if (outcome.result === "refunded") {
+      position.writerKeep = outcome.holder.toString();
+      position.deskTake = outcome.writer.toString();
+    }
+    persist();
+    renderBlotter();
+  } catch (err) {
+    button.disabled = false;
+    button.textContent = "Try again";
+    renderStatus($("status"), "Couldn’t refund yet. Try again in a moment.", err instanceof Error ? err.message : "refund failed");
+  }
+}
+
+function voidRefundButton(position) {
+  if (!canVoidRefund(position)) return null;
+  return action("btn sm quiet", "Void & refund stake", (event) => {
+    void voidRefundPosition(position, event.currentTarget);
+  });
+}
+
 function txLink(label, txid) {
   if (!/^[0-9a-f]{64}$/.test(txid || "")) return null;
   const row = el("p", "tx-link");
@@ -434,6 +491,10 @@ async function fundRequest(position) {
     expiry: position.expiry,
     deadline: BigInt(position.deadline),
     writerPkHex: position.deskPkHex,
+    backupPkHex: position.backupPkHex || undefined,
+    voidAfter: position.voidAfter ? BigInt(position.voidAfter) : undefined,
+    fallbackDelay: position.fallbackDelay ? BigInt(position.fallbackDelay) : undefined,
+    finalExitDelay: position.finalExitDelay ? BigInt(position.finalExitDelay) : undefined,
     holderAddress: position.holderAddress || position.payoutAddress,
     holderPubkey: position.holderPubkey || undefined,
     beaconTxidHex: position.beaconTxid,
@@ -1669,6 +1730,7 @@ async function askBet() {
       expiry: asked.expiry,
       holderAddress: state.address,
       holderPubkey: state.pubkey || undefined,
+      backupPubkey: PINNED_BACKUP_PUBKEY,
     });
     if (gen !== betGen) return;
     const quote = live.quotes[0];
@@ -1683,6 +1745,10 @@ async function askBet() {
       holderAddress: state.address,
       holderPubkey: state.pubkey || undefined,
       writerPkHex: quote.deskPkHex,
+      backupPkHex: quote.backupPkHex,
+      voidAfter: BigInt(quote.voidAfter),
+      fallbackDelay: BigInt(quote.fallbackDelay),
+      finalExitDelay: BigInt(quote.finalExitDelay),
       beaconTxidHex: quote.beaconTxid,
       beaconGidx: quote.beaconGidx,
       exit: BigInt(quote.exit),
@@ -1729,6 +1795,10 @@ function placeBet() {
       deadline: quote.deadline,
       address: deposit.address,
       deskPkHex: quote.deskPkHex,
+      backupPkHex: quote.backupPkHex,
+      voidAfter: quote.voidAfter,
+      fallbackDelay: quote.fallbackDelay,
+      finalExitDelay: quote.finalExitDelay,
       beaconTxid: deposit.beaconTxidHex,
       beaconGidx: deposit.beaconGidx,
       exit: deposit.exit,
@@ -1823,7 +1893,10 @@ function provisionalOutcome(p) {
 function betOutcome(p) {
   if (!(p.status === "settled" || settlementKnown(p))) return "";
   if (p.writerKeep === "" || p.writerKeep == null) return "settled";
-  return BigInt(p.writerKeep) > 0n ? "won" : "lost";
+  const keep = BigInt(p.writerKeep);
+  const desk = p.deskTake ? BigInt(p.deskTake) : 0n;
+  if (keep > 0n && desk > 0n) return "voided";
+  return keep > 0n ? "won" : "lost";
 }
 
 function betStatusLabel(p) {
@@ -1833,6 +1906,7 @@ function betStatusLabel(p) {
   const outcome = betOutcome(p);
   if (outcome === "won") return "Won";
   if (outcome === "lost") return "Lost";
+  if (outcome === "voided") return "Voided";
   if (outcome === "settled") return "Settled";
   const early = provisionalOutcome(p);
   if (early === "won") return "Won · paying out";
@@ -1900,6 +1974,7 @@ function betRow(p) {
   let extra = "";
   if (outcome === "won") extra = `+${int(BigInt(p.writerKeep))} sats paid`;
   else if (outcome === "lost") extra = `−${int(p.premiumSats)} sats`;
+  else if (outcome === "voided") extra = `${int(BigInt(p.writerKeep))} sats returned`;
   else if (early === "won") extra = `+${int(won(p.collateral))} sats`;
   else if (early === "lost") extra = `−${int(p.premiumSats)} sats`;
   else if (["locking", "deposited", "filled"].includes(p.status)) extra = `${int(p.premiumSats)} in → ${int(won(p.collateral))} if right`;
@@ -2035,6 +2110,15 @@ function renderPrediction(p) {
       ["Paid to you", "0 sats", "tot"],
     ]));
     body.push(el("p", "sub", "One fixing decides it. All or nothing, no partial payouts."), ...again());
+  } else if (outcome === "voided") {
+    const back = BigInt(p.writerKeep);
+    head.replaceChildren("Bet voided · ", el("span", "amt", `${int(back)} sats`), " returned.");
+    badge = pill("Voided · stake returned", "pill");
+    body.push(el("p", "sub", "No price fixing settled this window in time, so the vault returned your stake and sent the rest back to the desk."));
+    body.push(ledger([
+      ["Your stake returned", `${int(back)} sats`, "tot"],
+    ]));
+    body.push(...again());
   } else if (outcome === "settled") {
     head.textContent = "Settled.";
     body.push(el("p", "sub", "The vault paid out. Reading what came back…"));
@@ -2117,11 +2201,16 @@ function renderPrediction(p) {
       head.textContent = "Reading the fixing.";
       body.push(el("p", "sub", `The oracle’s price for ${at} decides it, and the payout goes to your Arkade wallet. Nothing for you to do.`));
     }
-    if (p.refundable) {
+    // A window the oracle never fixed: after its void delay anyone may return the stake (the settler does it too).
+    const voidRefund = voidRefundButton(p);
+    if (voidRefund || p.refundable) {
       const acts = el("div", "acts");
-      acts.append(action("btn sm", "Take it back", (event) => {
-        void refund(p, event.currentTarget);
-      }));
+      if (voidRefund) acts.append(voidRefund);
+      if (p.refundable) {
+        acts.append(action("btn sm", "Take it back", (event) => {
+          void refund(p, event.currentTarget);
+        }));
+      }
       body.push(acts);
     }
   } else if (p.status === "expired") {

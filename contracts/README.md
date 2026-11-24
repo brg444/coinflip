@@ -6,21 +6,25 @@ Cash-settled options and short-window binary predictions on Arkade. The compiler
 
 `predict_vault.ark`. All-or-nothing call on where Bitcoin closes: higher (kind 2: `ST > strike`) or lower (kind 3: `ST < strike`). Exact strike pays the writer for both kinds.
 
-- **Inputs & outputs.** The desk is the writer and funds `collateral` (the full payout); the bettor is the holder and paid the stake to the desk when `OptionIntent` filled. `settle()` spends the vault as input 0 and `AttestationBeacon` as input 1. Output 0 is the beacon continuation with `readFee` sats added; payouts start at output 1 and sum to `collateral - readFee`.
+- **Inputs & outputs.** The desk is the writer and funds `collateral` (the full payout); the bettor is the holder and paid `stake` to the desk when `OptionIntent` filled. `settle()` spends the vault as input 0 and `AttestationBeacon` as input 1. Output 0 is the beacon continuation with `readFee` sats added; payouts start at output 1 and sum to `collateral - readFee`.
 - **Beacon read & window.** Reads the newest matching fixing for `expiry` from the beacon state packet (first 8 bytes = price in USD cents, next 8 bytes = sample time). Rejects any sample time outside `[expiry, expiry + 60]`.
 - **Dust folding.** Any payout leg at or below `DUST` (`330` sats) is folded into the other party's output.
+- **Three-tier exit & void model.** Replaces single-party writer unilateral exit so the House cannot unroll and walk away from a payout:
 
-| Function | |
-| --- | --- |
-| `settle()` | Anyone, once the clock has reached `expiry`. Spends input 0 (vault) and input 1 (beacon). |
-| `close(writerSig, holderSig)` | Writer and holder together. |
-| `unilateral(writerSig)` | Writer, after `exit`. |
+| Tier | Function | Who | When | Outcome |
+| --- | --- | --- | --- | --- |
+| 1 | `settle()` | Anyone, with operator | After `expiry`, with beacon fixing | Winner paid (`collateral - readFee`) |
+| 1 | `reboard()` | Anyone, with operator | After an unroll (v2 intent proof) | Vault returns off-chain unchanged via `this.tunnel(activeInputIndex - 1)` |
+| 1 | `refund()` | Anyone, with operator | After `expiry + voidAfter` (24h) | Bet is void: `stake` back to holder, remainder to writer (dust folded) |
+| 1 | `close(writerSig, holderSig)` | House and player | Any time | Cooperative split |
+| 2 | `refundBackup(backupSig)` | Backup emulator via `tweak(backupPk, refund)` | After `older(fallbackDelay)` (~6.1h) | Same void outcome on L1 without primary operator |
+| 3 | `unilateral(writerSig, holderSig)` | House and player (2-of-2) | After `older(finalExitDelay)` (~7.1h) | Mutual last-resort L1 exit |
 
-Constructor: `kind`, `writerPk`, `holderPk`, `writerScript`, `holderScript`, `strike`, `collateral`, `expiry`, `beaconTxid`, `beaconGidx`, `readFee`, `exit`.
+Constructor: `kind`, `writerPk`, `holderPk`, `writerScript`, `holderScript`, `strike`, `collateral`, `stake`, `expiry`, `beaconTxid`, `beaconGidx`, `readFee`, `backupPk`, `voidAfter`, `fallbackDelay`, `finalExitDelay`.
 
 ## OptionVault
 
-`option_vault.ark`. The writer locks BTC. Kind 0 is a covered call. Kind 1 is a limited put. Settlement pays the holder in BTC from that lock using the same beacon read, `[expiry, expiry + 60]` window, `330`-sat dust folding, and spend paths as `PredictVault`.
+`option_vault.ark`. The writer locks BTC. Kind 0 is a covered call. Kind 1 is a limited put. Settlement pays the holder in BTC from that lock using the same beacon read, `[expiry, expiry + 60]` window, and `330`-sat dust folding as `PredictVault`.
 
 | Function | |
 | --- | --- |

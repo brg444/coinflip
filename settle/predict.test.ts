@@ -2,23 +2,31 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { base64 } from "@scure/base";
-import { asset, CSVMultisigTapscript, Extension, SingleKey, Transaction } from "@arkade-os/sdk";
+import { arkade, asset, CSVMultisigTapscript, Extension, SingleKey, Transaction } from "@arkade-os/sdk";
 
 import { holderPayoff, settlementOutputs } from "../app/settle-math.js";
 import { beaconIdOf, bindBeacon, genesisState, nextState, priceValue } from "../protocol/beacon.ts";
-import { BEACON_READ_FEE, EXIT, PAIR, STAKE_MIN } from "../protocol/constants.ts";
+import {
+  BEACON_READ_FEE,
+  EXIT,
+  PAIR,
+  PREDICT_FALLBACK_DELAY,
+  PREDICT_FINAL_EXIT_DELAY,
+  PREDICT_VOID_AFTER,
+  STAKE_MIN,
+} from "../protocol/constants.ts";
 import { bindContracts, type Terms } from "../protocol/contracts.ts";
-import { statePacket } from "../protocol/cospend.ts";
+import { refundOutputs, statePacket } from "../protocol/cospend.ts";
 import { bytesToHex, hexToBytes } from "../protocol/hex.ts";
 import { classifyIntent } from "../protocol/intent-state.ts";
 import { parsePosition, parseWire, payoutRefusal, predictRefusal, requestRefusal, type RfqRequest } from "../protocol/messages.ts";
 import { positionEvent, readPosition } from "../protocol/nostr.ts";
 import { payoutMultiplier, predictMultiplier, predictPayout, probAbove } from "../protocol/pricing.ts";
-import { predictVaultProgram, vaultProgram } from "../protocol/programs.ts";
+import { predictVaultProgram } from "../protocol/programs.ts";
 import { outlay, openPremium, type QuoteRow } from "../desk/book.ts";
 import { parseOracleBeacon } from "./oracle.ts";
 import { positionFromAnnouncement, termsFor } from "./positions.ts";
-import { settleQuote, settlePayouts, type ChainCoin } from "./vault.ts";
+import { refundQuote, settleQuote, settlePayouts, type ChainCoin } from "./vault.ts";
 
 const CHECKPOINT = "03080040b27520dfcaec558c7e78cf3e38b898ba8a43cfb5727266bae32c5c5b3aeb32c558aa0bac";
 const DISPLAY = "00".repeat(31) + "07";
@@ -70,11 +78,13 @@ test("predict is all or nothing, and a close on the line pays the desk", () => {
   assert.deepEqual(settlementOutputs(0n, PAYOUT, BEACON_READ_FEE), { mode: "writer", holder: 0n, writer: 94_000n });
 });
 
-test("PredictVault is OptionVault with the payoff swapped and nothing else", () => {
+test("PredictVault exposes three-tier exit leaves and expected opcodes", async () => {
   const predict = predictVaultProgram();
-  const option = vaultProgram();
   assert.equal(predict.name, "PredictVault");
-  assert.deepEqual(Object.keys(predict.functions), Object.keys(option.functions));
+  assert.deepEqual(
+    Object.keys(predict.functions).sort(),
+    ["close", "reboard", "refund", "refundBackup", "settle", "unilateral"],
+  );
   const asm = predict.functions.settle?.arkadeScript?.asm ?? [];
   const count = (name: string) => asm.filter((token) => token === name).length;
   assert.equal(count("MUL"), 0);
@@ -83,6 +93,29 @@ test("PredictVault is OptionVault with the payoff swapped and nothing else", () 
   assert.equal(count("INSPECTINASSETLOOKUP"), 1);
   assert.equal(count("INSPECTINPUTPACKET"), 1);
   assert.equal(count("CHECKSIGFROMSTACK"), 0);
+
+  assert.ok((predict.functions.refund?.arkadeScript?.asm ?? []).includes("CHECKTIME"));
+  assert.ok((predict.functions.reboard?.arkadeScript?.asm ?? []).includes("TUNNEL"));
+
+  const terms = await predictTerms(2);
+  const backupA = await key(30).xOnlyPublicKey();
+  const backupB = await key(31).xOnlyPublicKey();
+  const boundA = bindContracts({ ...terms, backupPk: backupA });
+  const boundB = bindContracts({ ...terms, backupPk: backupB });
+  assert.notEqual(boundA.vaultAddress, boundB.vaultAddress);
+
+  const scriptA = new arkade.ArkadeProgramScript(predict, boundA.vault, { serverKey: terms.serverKey, emulatorKey: terms.emulatorKey });
+  const refundLeaf = scriptA.functionByName("refund");
+  const refundBackupLeaf = scriptA.functionByName("refundBackup");
+  const unilateralLeaf = scriptA.functionByName("unilateral");
+  assert.ok(refundLeaf?.arkadeScript);
+  assert.ok(refundBackupLeaf);
+  assert.ok(unilateralLeaf);
+  const tweakedBackup = arkade.computeArkadeScriptPublicKey(backupA, refundLeaf.arkadeScript);
+  assert.ok(bytesToHex(refundBackupLeaf.tapLeafScript[1]).includes(bytesToHex(tweakedBackup)));
+  assert.equal(unilateralLeaf.def.tapscript.signatures?.length, 2);
+  assert.ok(bytesToHex(unilateralLeaf.tapLeafScript[1]).includes(bytesToHex(terms.writerPk)));
+  assert.ok(bytesToHex(unilateralLeaf.tapLeafScript[1]).includes(bytesToHex(terms.holderPk)));
 });
 
 test("a prediction binds intent side 1: the bettor holds, the desk writes", async () => {
@@ -138,6 +171,12 @@ test("predict requests and quotes round-trip, and each side names the desk once"
     intent_address: "tark1intent0000",
     vault_address: "tark1vault00000",
   };
+  const predictExtras = {
+    backup_pubkey: "33".repeat(32),
+    void_after: Number(PREDICT_VOID_AFTER),
+    fallback_delay: Number(PREDICT_FALLBACK_DELAY),
+    final_exit_delay: Number(PREDICT_FINAL_EXIT_DELAY),
+  };
   const quote = {
     v: 1,
     type: "rfq_quote",
@@ -147,9 +186,12 @@ test("predict requests and quotes round-trip, and each side names the desk once"
     to_amount: PAYOUT.toString(),
     solver_pubkey: "21".repeat(32),
     valid_until: EXPIRY - 150,
-    profile: { writer_pubkey: "21".repeat(32), writer_pk_script: `5120${"21".repeat(32)}`, ...binding },
+    profile: { writer_pubkey: "21".repeat(32), writer_pk_script: `5120${"21".repeat(32)}`, ...predictExtras, ...binding },
   };
   assert.deepEqual(parseWire(quote), quote);
+  assert.equal(parseWire({ ...quote, profile: { ...quote.profile, backup_pubkey: "21".repeat(32) } }), null);
+  assert.equal(parseWire({ ...quote, profile: { ...quote.profile, final_exit_delay: Number(PREDICT_FALLBACK_DELAY) } }), null);
+  assert.equal(parseWire({ ...quote, profile: { ...quote.profile, fallback_delay: 2049 } }), null);
   const both = { ...quote, profile: { ...quote.profile, holder_pubkey: "21".repeat(32), holder_pk_script: `5120${"21".repeat(32)}` } };
   assert.equal(parseWire(both), null);
   const neither = { ...quote, profile: binding };
@@ -308,6 +350,11 @@ test("a filled prediction settles to the bettor above the line and to the desk a
     writer_pk_script: bytesToHex(bound.writerPkScript),
     holder_pubkey: bytesToHex(terms.holderPk),
     holder_pk_script: bytesToHex(bound.holderPkScript),
+    stake: STAKE.toString(),
+    backup_pubkey: bytesToHex(terms.emulatorKey.subarray(1)),
+    void_after: Number(PREDICT_VOID_AFTER),
+    fallback_delay: Number(PREDICT_FALLBACK_DELAY),
+    final_exit_delay: Number(PREDICT_FINAL_EXIT_DELAY),
     beacon_txid: DISPLAY,
     beacon_gidx: 0,
     vault_address: bound.vaultAddress,
@@ -376,4 +423,21 @@ test("a filled prediction settles to the bettor above the line and to the desk a
   });
   assert.ok("payouts" in lower);
   if ("payouts" in lower) assert.deepEqual(lower.payouts, [{ script: bound.holderPkScript, amount: 94_000n }]);
+
+  const earlyRefund = await refundQuote({ ...env, now: EXPIRY + Number(PREDICT_VOID_AFTER) - 1 });
+  assert.deepEqual(earlyRefund, { result: "waiting", reason: "early" });
+  const voided = await refundQuote({ ...env, now: EXPIRY + Number(PREDICT_VOID_AFTER) });
+  assert.equal(voided.result, "refunded");
+  if (voided.result !== "refunded") return;
+  assert.equal(voided.holder, STAKE);
+  assert.equal(voided.writer, PAYOUT - STAKE);
+  const voidTx = Transaction.fromPSBT(base64.decode(submitted.at(-1)!));
+  assert.equal(voidTx.getOutput(0)?.amount, STAKE);
+  assert.equal(bytesToHex(voidTx.getOutput(0)!.script!), bytesToHex(bound.holderPkScript));
+  assert.equal(voidTx.getOutput(1)?.amount, PAYOUT - STAKE);
+  assert.equal(bytesToHex(voidTx.getOutput(1)!.script!), bytesToHex(bound.writerPkScript));
+
+  const folded = refundOutputs(STAKE + 330n, STAKE, bound.holderPkScript, bound.writerPkScript);
+  assert.deepEqual(folded, [{ script: bound.holderPkScript, amount: STAKE + 330n }]);
+  assert.throws(() => refundOutputs(STAKE, 330n, bound.holderPkScript, bound.writerPkScript), /dust/);
 });

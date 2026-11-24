@@ -3,9 +3,17 @@ import { generateSecretKey } from "nostr-tools/pure";
 import { asset } from "@arkade-os/sdk";
 
 import { beaconIdOf } from "../../protocol/beacon-id.ts";
-import { BEACON_READ_FEE, EXIT, PAIR, type PredictKind } from "../../protocol/constants.ts";
+import {
+  BEACON_READ_FEE,
+  EXIT,
+  PAIR,
+  PREDICT_FALLBACK_DELAY,
+  PREDICT_FINAL_EXIT_DELAY,
+  PREDICT_VOID_AFTER,
+  type PredictKind,
+} from "../../protocol/constants.ts";
 import { bindContracts } from "../../protocol/contracts.ts";
-import { bytesToHex, hexToBytes } from "../../protocol/hex.ts";
+import { bytesToHex, hexToBytes, xOnly } from "../../protocol/hex.ts";
 import { isPredictQuote, payoutRefusal, type RfqQuote, type RfqRefusal, type RfqRequest } from "../../protocol/messages.ts";
 import { payoutMultiplier } from "../../protocol/pricing.ts";
 import { collectReplies } from "../../protocol/nostr.ts";
@@ -15,6 +23,19 @@ import { writerBinding } from "./fund.ts";
 
 export function quoteMatchesBeacon(beaconTxid: string, beaconGidx: number, status: unknown = LIVE_BEACON_STATUS): boolean {
   return parseOracleBeacon(status, beaconTxid, beaconGidx).ok;
+}
+
+export function backupKeyMatches(
+  quoteBackupPk: string,
+  deskPk: string,
+  emulatorKey: Uint8Array,
+  pinned: string | null = null,
+): boolean {
+  const candidate = quoteBackupPk.trim().toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(candidate)) return false;
+  if (candidate === deskPk.trim().toLowerCase()) return false;
+  const expected = pinned?.trim().toLowerCase() || bytesToHex(xOnly(emulatorKey));
+  return candidate === expected;
 }
 
 function randomId(): string {
@@ -40,6 +61,10 @@ export type PredictQuote = {
   deadline: number;
   exit: number;
   deskPkHex: string;
+  backupPkHex: string;
+  voidAfter: number;
+  fallbackDelay: number;
+  finalExitDelay: number;
   beaconTxid: string;
   beaconGidx: number;
   intentAddress: string;
@@ -55,6 +80,7 @@ export async function requestPredictQuotes(input: {
   expiry: bigint;
   holderAddress: string;
   holderPubkey?: string;
+  backupPubkey?: string | null;
 }): Promise<{ quotes: PredictQuote[]; note: string }> {
   const names = new Map(input.desks.map((desk) => [desk.pubkey, desk.name]));
   const profile = await writerBinding(input.holderAddress, input.holderPubkey);
@@ -102,6 +128,10 @@ export async function requestPredictQuotes(input: {
     if (quote.valid_until <= now || quote.profile.deadline < now + 15) continue;
     if (quote.profile.deadline > Number(input.expiry) - 30) continue;
     if (quote.profile.exit !== Number(EXIT)) continue;
+    if (quote.profile.void_after !== Number(PREDICT_VOID_AFTER)) continue;
+    if (quote.profile.fallback_delay !== Number(PREDICT_FALLBACK_DELAY)) continue;
+    if (quote.profile.final_exit_delay !== Number(PREDICT_FINAL_EXIT_DELAY)) continue;
+    if (!backupKeyMatches(quote.profile.backup_pubkey, quote.profile.writer_pubkey, profile.emulatorKey, input.backupPubkey ?? null)) continue;
     if (!quoteMatchesBeacon(quote.profile.beacon_txid, quote.profile.beacon_gidx)) continue;
     const payout = BigInt(quote.to_amount);
     if (payoutRefusal(payout, input.stake, BEACON_READ_FEE)) continue;
@@ -118,6 +148,10 @@ export async function requestPredictQuotes(input: {
         writerPk: hexToBytes(quote.profile.writer_pubkey),
         holderPk: profile.signerKey ?? profile.payoutKey,
         holderPayoutKey: profile.signerKey ? undefined : profile.payoutKey,
+        backupPk: hexToBytes(quote.profile.backup_pubkey),
+        voidAfter: BigInt(quote.profile.void_after),
+        fallbackDelay: BigInt(quote.profile.fallback_delay),
+        finalExitDelay: BigInt(quote.profile.final_exit_delay),
         beacon: beaconIdOf(asset.AssetId.create(quote.profile.beacon_txid, quote.profile.beacon_gidx)),
         readFee: BEACON_READ_FEE,
         serverKey: profile.serverKey,
@@ -138,6 +172,10 @@ export async function requestPredictQuotes(input: {
       deadline: quote.profile.deadline,
       exit: quote.profile.exit,
       deskPkHex: quote.profile.writer_pubkey,
+      backupPkHex: quote.profile.backup_pubkey,
+      voidAfter: quote.profile.void_after,
+      fallbackDelay: quote.profile.fallback_delay,
+      finalExitDelay: quote.profile.final_exit_delay,
       beaconTxid: quote.profile.beacon_txid,
       beaconGidx: quote.profile.beacon_gidx,
       intentAddress: quote.profile.intent_address,

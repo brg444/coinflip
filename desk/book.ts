@@ -27,6 +27,10 @@ export type QuoteRow = {
   holderPubkey: string;
   /** Predict: the bettor's Arkade address script, which the payout pays. */
   holderPkScript?: string;
+  backupPubkey?: string;
+  voidAfter?: number;
+  fallbackDelay?: number;
+  finalExitDelay?: number;
   /** Display txid of the beacon identity asset. */
   beaconTxid: string;
   beaconGidx: number;

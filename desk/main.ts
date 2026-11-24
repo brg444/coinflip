@@ -22,12 +22,15 @@ import {
   LOCK_S,
   PAIR,
   PREDICT_EDGE,
+  PREDICT_FALLBACK_DELAY,
+  PREDICT_FINAL_EXIT_DELAY,
   PREDICT_LOCK_S,
+  PREDICT_VOID_AFTER,
   QUOTE_TTL_S,
   vaultProgramId,
 } from "../protocol/constants.ts";
 import { assertServerExit, bindContracts, directPayoutKey, payoutVtxo, type Terms } from "../protocol/contracts.ts";
-import { bytesToHex, hexToBytes } from "../protocol/hex.ts";
+import { bytesToHex, hexToBytes, xOnly } from "../protocol/hex.ts";
 import { networkByName } from "../protocol/network.ts";
 import { intentProgram } from "../protocol/programs.ts";
 import {
@@ -224,6 +227,15 @@ if (address !== await wallet.getAddress()) {
 }
 const pubkey = nostrPubkey(secret);
 
+function backupPubkeyFromEnv(defaultKey: Uint8Array, deskKey: Uint8Array): string {
+  const raw = process.env.BACKUP_EMULATOR_PUBKEY?.trim().toLowerCase();
+  const hex = raw || bytesToHex(xOnly(defaultKey));
+  if (!/^[0-9a-f]{64}$/.test(hex)) throw new Error("BACKUP_EMULATOR_PUBKEY must be 64-hex x-only");
+  if (hex === bytesToHex(xOnly(deskKey))) throw new Error("BACKUP_EMULATOR_PUBKEY must not match DESK_KEY");
+  return hex;
+}
+const backupPubkeyHex = backupPubkeyFromEnv(client.emulatorKey, holderPk);
+
 let balance = 0n;
 let spot: { cents: bigint; sources: string[] } | null = null;
 let polling = false;
@@ -255,6 +267,12 @@ function termsFor(row: QuoteRow): Terms {
     readFee: BEACON_READ_FEE,
     serverKey: client.serverKey,
     emulatorKey: client.emulatorKey!,
+    ...(isPredict(row.kind) ? {
+      backupPk: hexToBytes(row.backupPubkey ?? backupPubkeyHex),
+      voidAfter: BigInt(row.voidAfter ?? Number(PREDICT_VOID_AFTER)),
+      fallbackDelay: BigInt(row.fallbackDelay ?? Number(PREDICT_FALLBACK_DELAY)),
+      finalExitDelay: BigInt(row.finalExitDelay ?? Number(PREDICT_FINAL_EXIT_DELAY)),
+    } : {}),
   };
 }
 
@@ -274,6 +292,10 @@ function quoteMessage(row: QuoteRow): RfqQuote {
       profile: {
         writer_pubkey: row.writerPubkey,
         writer_pk_script: bytesToHex(bound.writerPkScript),
+        backup_pubkey: row.backupPubkey ?? backupPubkeyHex,
+        void_after: row.voidAfter ?? Number(PREDICT_VOID_AFTER),
+        fallback_delay: row.fallbackDelay ?? Number(PREDICT_FALLBACK_DELAY),
+        final_exit_delay: row.finalExitDelay ?? Number(PREDICT_FINAL_EXIT_DELAY),
         beacon_txid: row.beaconTxid,
         beacon_gidx: row.beaconGidx,
         deadline: row.deadline,
@@ -412,6 +434,10 @@ async function onPredict(message: RfqRequest & { profile: PredictRequestProfile 
     writerPkScript: bytesToHex(deskScript.pkScript),
     holderPubkey: message.profile.holder_pubkey,
     holderPkScript: message.profile.holder_pk_script,
+    backupPubkey: backupPubkeyHex,
+    voidAfter: Number(PREDICT_VOID_AFTER),
+    fallbackDelay: Number(PREDICT_FALLBACK_DELAY),
+    finalExitDelay: Number(PREDICT_FINAL_EXIT_DELAY),
     beaconTxid: beaconDisplay.txid,
     beaconGidx: beaconDisplay.gidx,
     intentAddress: "",
@@ -621,7 +647,14 @@ function filledPosition(row: QuoteRow): OptionPosition | null {
     writer_pubkey: row.writerPubkey,
     writer_pk_script: row.writerPkScript,
     holder_pubkey: row.holderPubkey,
-    ...(isPredict(row.kind) ? { holder_pk_script: row.holderPkScript } : {}),
+    ...(isPredict(row.kind) ? {
+      holder_pk_script: row.holderPkScript,
+      stake: row.premium,
+      backup_pubkey: row.backupPubkey ?? backupPubkeyHex,
+      void_after: row.voidAfter ?? Number(PREDICT_VOID_AFTER),
+      fallback_delay: row.fallbackDelay ?? Number(PREDICT_FALLBACK_DELAY),
+      final_exit_delay: row.finalExitDelay ?? Number(PREDICT_FINAL_EXIT_DELAY),
+    } : {}),
     beacon_txid: row.beaconTxid,
     beacon_gidx: row.beaconGidx,
     vault_address: row.vaultAddress,

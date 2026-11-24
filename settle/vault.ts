@@ -3,11 +3,10 @@ import { base64 } from "@scure/base";
 
 import { holderPayoff, settlementOutputs } from "../app/settle-math.js";
 import { beaconIdOf, bin2num, bindBeacon, decodeState, statePacketOf, type BeaconState } from "../protocol/beacon.ts";
-import { PRICE_MAX } from "../protocol/constants.ts";
+import { isPredict, PREDICT_VOID_AFTER, PRICE_MAX, type Kind } from "../protocol/constants.ts";
 import { bindContracts, type Terms } from "../protocol/contracts.ts";
-import { buildSettle, submit } from "../protocol/cospend.ts";
+import { buildRefund, buildSettle, refundOutputs, submit } from "../protocol/cospend.ts";
 import { bytesToHex } from "../protocol/hex.ts";
-import type { Kind } from "../protocol/constants.ts";
 import { vaultProgramFor } from "../protocol/programs.ts";
 import type { BeaconSpec } from "./oracle.ts";
 
@@ -272,4 +271,68 @@ export async function settleQuote(env: {
     holder,
     writer,
   };
+}
+
+export type RefundOutcome =
+  | { result: "waiting"; reason: "early" | "vault" }
+  | { result: "spent"; txid: string }
+  | { result: "refunded"; txid: string; holder: bigint; writer: bigint };
+
+export async function refundQuote(env: {
+  chain: Chain;
+  serverKey: Uint8Array;
+  emulatorKey: Uint8Array;
+  emulator: Pick<EmulatorProvider, "submitTx">;
+  checkpoint: CSVMultisigTapscript.Type;
+  terms: Terms;
+  fillTxid?: string;
+  now: number;
+}): Promise<RefundOutcome> {
+  if (!isPredict(env.terms.kind)) throw new Error("refund is only supported for PredictVault");
+  const voidAfter = env.terms.voidAfter ?? PREDICT_VOID_AFTER;
+  if (env.now < Number(env.terms.expiry + voidAfter)) return { result: "waiting", reason: "early" };
+  const bound = bindContracts(env.terms);
+  const vaultScriptHex = bytesToHex(bound.vaultPkScript);
+  const live = await env.chain.getVtxos({ scripts: [vaultScriptHex], spendableOnly: true });
+  const page = live.vtxos ?? [];
+  const liveVault = page.filter((coin) => !spent(coin) && BigInt(coin.value) >= env.terms.premium);
+  if (!liveVault.length) {
+    const unrolled = spendTxid(page.find((coin) => coin.isUnrolled));
+    if (unrolled) return { result: "spent", txid: unrolled };
+    const history = await env.chain.getVtxos({ scripts: [vaultScriptHex], spentOnly: true });
+    const gone = spendTxid((history.vtxos ?? []).find((coin) => coin.txid === env.fillTxid) ?? (history.vtxos ?? []).find((coin) => spent(coin)));
+    if (gone) return { result: "spent", txid: gone };
+    return { result: "waiting", reason: "vault" };
+  }
+  const vaultCoin = (env.fillTxid ? liveVault.find((coin) => coin.txid === env.fillTxid) : undefined) ?? liveVault[0]!;
+  const raws = await env.chain.getVirtualTxs([vaultCoin.txid]);
+  const vaultPrev = txById(raws.txs ?? [], vaultCoin.txid);
+  if (!vaultPrev) return { result: "waiting", reason: "vault" };
+
+  const script = new arkade.ArkadeProgramScript(vaultProgramFor(env.terms.kind), bound.vault, {
+    serverKey: env.serverKey,
+    emulatorKey: env.emulatorKey,
+  });
+  const outs = refundOutputs(BigInt(vaultCoin.value), env.terms.premium, bound.holderPkScript, bound.writerPkScript);
+  const built = buildRefund({
+    vault: {
+      script,
+      coin: { txid: vaultCoin.txid, vout: vaultCoin.vout, value: vaultCoin.value, prevTx: vaultPrev.toBytes(true, true) },
+    },
+    stake: env.terms.premium,
+    holderScript: bound.holderPkScript,
+    writerScript: bound.writerPkScript,
+    checkpoint: env.checkpoint,
+  });
+  const submitted = await submit(built, env.emulator as EmulatorProvider);
+  const holderHex = bytesToHex(bound.holderPkScript);
+  const writerHex = bytesToHex(bound.writerPkScript);
+  let holder = 0n;
+  let writer = 0n;
+  for (const output of outs) {
+    const hex = bytesToHex(output.script);
+    if (hex === holderHex) holder = output.amount;
+    if (hex === writerHex) writer = output.amount;
+  }
+  return { result: "refunded", txid: submitted.txid, holder, writer };
 }

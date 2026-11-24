@@ -19,6 +19,7 @@ import {
 import { base64 } from "@scure/base";
 
 import { STATE_TYPE } from "./beacon.ts";
+import { DUST_SATS } from "./constants.ts";
 import { bytesToHex } from "./hex.ts";
 
 /**
@@ -159,6 +160,35 @@ export function buildSettle(input: {
     ...input.payouts,
   ];
   return build(spends, outputs, [unitTransfer(input.beacon.id, 1, 0), statePacket(input.beacon.state)], input.checkpoint);
+}
+
+export function refundOutputs(
+  locked: bigint,
+  stake: bigint,
+  holderScript: Uint8Array,
+  writerScript: Uint8Array,
+): { script: Uint8Array; amount: bigint }[] {
+  if (stake <= DUST_SATS) throw new Error("stake must exceed dust");
+  if (locked < stake) throw new Error("vault underfunded for stake refund");
+  const house = locked - stake;
+  if (house > DUST_SATS) {
+    return [
+      { script: holderScript, amount: stake },
+      { script: writerScript, amount: house },
+    ];
+  }
+  return [{ script: holderScript, amount: locked }];
+}
+
+export function buildRefund(input: {
+  vault: { script: ProgramScript; coin: Coin };
+  stake: bigint;
+  holderScript: Uint8Array;
+  writerScript: Uint8Array;
+  checkpoint: CSVMultisigTapscript.Type;
+}): Built {
+  const outputs = refundOutputs(BigInt(input.vault.coin.value), input.stake, input.holderScript, input.writerScript);
+  return build([{ script: input.vault.script, fn: "refund", coin: input.vault.coin }], outputs, [], input.checkpoint);
 }
 
 /** Publish a fixing: the beacon at input 0, continued at output 0 with the next state. */
