@@ -1,8 +1,8 @@
 # COINFLIP
 
-Bet whether Bitcoin closes higher or lower than a line in five minutes. Each bet is an all-or-nothing contract on Arkade: the stake goes to the desk, and the desk locks the payout in a vault that only the oracle's fixing can settle. Closed beta on Mutinynet. Domain: coinflip.casino.
+Predict whether Bitcoin closes higher or lower than a line in five minutes. Each prediction is an all-or-nothing contract on Arkade: the stake goes to the desk, and the desk locks the payout in a vault that only the oracle's fixing can settle. Closed beta on Mutinynet. Domain: coinflip.casino.
 
-Forked from [ArkLabsHQ/arkade-options](https://github.com/ArkLabsHQ/arkade-options), which keeps its cash-settled covered calls and limited puts. The bet is in [Predict](#predict); `pnpm demo` runs it all on one machine ([Demo](#demo)).
+Forked from [ArkLabsHQ/arkade-options](https://github.com/ArkLabsHQ/arkade-options), which keeps its cash-settled covered calls and limited puts. Predictions are in [Predict](#predict); `pnpm demo` runs it all on one machine ([Demo](#demo)).
 
 The contracts are the engine. `PredictVault`, `OptionVault`, `OptionIntent`, and `AttestationBeacon` live in [contracts/](contracts/) and export through `arkade-options/contracts`.
 
@@ -63,7 +63,7 @@ curl -k -X POST -H "Authorization: Bearer $ORACLE_ADMIN" -H "content-type: appli
 
 The beacon keeps the eight newest fixings. Settle a vault before eight later expiries are published, or publish that expiry again.
 
-The oracle watches the same filled-vault events. On its sample minute, once `expiry + 60` seconds have passed and a sample exists, it publishes that expiry. It does not settle. The settler still spends the vault. Once `expiry + 60` seconds have passed, about once a minute, it asks the oracle to publish that expiry and then spends the vault and the beacon together. A failed publish does not stop the other vaults. `409 already a fixing` is settled only when the slot's price and time are the sample the oracle would have chosen for that expiry. The 1,000-sat read fee comes out of the vault collateral. The settler does not keep a fee wallet and does not call the desk. Set `ORACLE_ADMIN` on the settler so it can publish. Anyone else can run the same process. The first valid spend wins.
+The oracle watches the same filled-vault events. On its sample minute, once `expiry + 60` seconds have passed and a sample exists, it publishes that expiry. It does not settle. The settler still spends the vault. Once `expiry + 60` seconds have passed, it asks the oracle to publish that expiry, every 15 seconds until it has, and then spends the vault and the beacon together. A failed publish does not stop the other vaults. `409 already a fixing` is settled only when the slot's price and time are the sample the oracle would have chosen for that expiry. The 1,000-sat read fee comes out of the vault collateral. The settler does not keep a fee wallet and does not call the desk. Set `ORACLE_ADMIN` on the settler so it can publish. Anyone else can run the same process. The first valid spend wins.
 
 A vault txid alone is not enough. The event (or a `POSITIONS` file of the same JSON) also has to carry the contract parameters: kind, strike, expiry, beacon, and the writer and holder keys. The price comes from the beacon coin. Deploy steps, the event fields, and the file are in [docs/runbook.md](docs/runbook.md).
 
@@ -111,6 +111,8 @@ All-or-nothing calls on where BTC closes at the end of a short window: higher (k
 - **Windows.** Closes are on the 5-minute grid, at least 2 minutes and at most an hour away. The stake has to arrive within 60 seconds of the quote (`PREDICT_LOCK_S`): the 3-minute options lock would let a bettor watch most of a window before paying.
 - **Price.** The multiplier is `(1 - edge) / p`, where `p` is the lognormal chance of finishing on the bettor's side at the at-the-money Deribit IV of the nearest expiry at least six hours out, priced off the oracle's latest DIA print (validated against the exchange median sanity band and re-checked before fill). `DESK_EDGE` sets the edge (default 0.05, so 1.90× at even odds). `DESK_VOL` overrides the vol for options and predictions alike. Multipliers outside 1.05× to 10× are refused, as is a payout that does not beat the stake after the read fee.
 - **Float.** A prediction ties up the whole payout, not a premium, so open predictions count their payout against the float. Quotes fail closed unless the oracle reports a live `beaconExpiry` outliving the settlement window. On timestamp-expiry networks (Mutinynet), fills require user intent coins and picked desk float coins to outlive the settlement window and expire no earlier than `beaconExpiry` so desk fills never ratchet the beacon's expiry down; because `AttestationBeacon.read` is permissionless, off-desk reads with short-lived coins can still shorten the beacon's expiry until contract-level renewal or read limits exist.
+- **Page.** The page prices from the oracle's DIA samples, the same feed the desk quotes on and the vault settles on; Deribit's option surface only sets the volatility. A fixing is the last sample inside `[expiry, expiry + 60]`, so a result exists a minute after the close. From then the page reads the same samples, picks the fixing by the settler's rule, and shows the win or loss while the settler pays out in the background. There is no manual settle. A stake that arrived waits 45 seconds past the deadline before the page calls it missed and offers it back, since a fill sent just before the deadline can take a few seconds to reach the indexer. The wallet pill shows the spendable sats at the connected address, read from the indexer.
+- **Phones.** Below 700px the page is laid out for a phone: a term's list, review and place, and sending the stake rise as the Arkade wallet's floating drawers, positions open as pages with the live countdown first, and How it works is a short page of its own. Opened from the home screen, it fits the tab bar to the home indicator and pulls down to reload.
 - **Unfixed windows (closed beta).** If DIA produces no print inside `[expiry, expiry + 60]`, the vault cannot settle on-chain from the beacon; the desk recovers the vault via `unilateral` on Bitcoin after `EXIT` (2048s) and the beta operator refunds the bettor's stake manually.
 
 `pnpm smoke:regtest` runs a prediction after the option: a fill from the desk float, a refund of an unfilled stake, a fixing above the line and the payout to the bettor.
@@ -122,6 +124,8 @@ All-or-nothing calls on where BTC closes at the end of a short window: higher (k
 The page comes up first. Until the demo is funded, a pill in the header reads "Fund demo 1/2" and opens the two steps: send 10,000 Mutinynet sats to the oracle wallet, which issues and deploys the beacon, then about 1,000,000 sats to the desk, since the desk funds whole payouts. Each step ticks off when the sats arrive and the pill goes away once the desk is quoting.
 
 The page is served on <http://127.0.0.1:4173/>. With [`cloudflared`](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/) installed it also opens a quick tunnel and prints a public `trycloudflare.com` URL, which needs no Cloudflare account and changes on every start. `pnpm demo -- --pages` also publishes the page to Cloudflare Pages as the `coinflip` project after `npx wrangler login`. Either URL works only while the demo is running, because the desk, oracle and settler run on this machine. `--no-tunnel` serves locally only.
+
+The page server adds two routes for the page itself. `GET /oracle/prices?from=&to=&limit=` passes the oracle's samples through read-only, so the page can show the DIA price and a result at the fixing time while the oracle stays on loopback. `GET` and `POST /handoff/<id>` relay a wallet's return: the Arkade wallet answers through app links only, and a page opened from the home screen hands those links to the browser, so the return can land in another window. That window posts it under the request's random id, held in memory for ten minutes and read once, and the window that asked picks it up. On iPhone a home-screen app cannot open another one, so the wallet loads in a sheet inside COINFLIP rather than as the installed wallet app.
 
 Keys, data and logs live in `~/.coinflip-demo`; delete it to start over with a new beacon and desk. The demo listens on the same nostr relay as the hosted services, so its oracle and settler also see their positions and skip any vault bound to another beacon.
 
@@ -153,7 +157,7 @@ pnpm install
 pnpm dev
 ```
 
-Open <http://127.0.0.1:4173/>. Quotes use `wss://nostr.arkade.sh`. The pinned desk is `app/rfq-config.js`. GitHub Pages publishes `dist/` on every push to `main`.
+Open <http://127.0.0.1:4173/>. Quotes use `wss://nostr.arkade.sh`. The pinned desk is `app/rfq-config.js`. GitHub Pages publishes `dist/` when the workflow is run by hand. A static host has neither page-server route, so the page there falls back to the Deribit index for its price, shows a result when the settlement lands, and relies on popup and same-window wallet returns.
 
 ```bash
 docker build -f site.Dockerfile -t coinflip-site .
@@ -172,4 +176,4 @@ Local arkade regtest (Docker, Bitcoin regtest + arkd + emulator):
 pnpm smoke:regtest
 ```
 
-That runs both a covered call and a Predict bet end to end: the oracle issues and deploys the beacon, intents are finalized and cancelled, the oracle publishes a live DIA print, and the vaults settle. Details are in [docs/runbook.md](docs/runbook.md).
+That runs both a covered call and a prediction end to end: the oracle issues and deploys the beacon, intents are finalized and cancelled, the oracle publishes a live DIA print, and the vaults settle. Details are in [docs/runbook.md](docs/runbook.md).
