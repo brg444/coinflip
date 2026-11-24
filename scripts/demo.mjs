@@ -278,12 +278,52 @@ function servePage() {
     ".map": "application/json",
   };
   return new Promise((resolve) => {
+    const handoffs = new Map();
     http.createServer((req, res) => {
       const url = new URL(req.url ?? "/", "http://localhost");
       if (url.pathname === "/demo.json") {
         res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
         res.end(JSON.stringify(setup));
         return;
+      }
+      // The wallet's return, relayed: a home-screen app opens the wallet in Safari and the return lands
+      // there. That window posts it under the request's random id; the app that asked reads it once.
+      const relay = /^\/handoff\/([0-9a-f]{32})$/.exec(url.pathname);
+      if (relay) {
+        const id = relay[1];
+        const now = Date.now();
+        for (const [key, entry] of handoffs) if (now - entry.at > 10 * 60_000) handoffs.delete(key);
+        const reply = (status, body) => {
+          res.writeHead(status, { "content-type": "application/json", "cache-control": "no-store", "x-handoff": "1" });
+          res.end(body == null ? "" : JSON.stringify(body));
+        };
+        if (req.method === "GET") {
+          const entry = handoffs.get(id);
+          if (!entry) return reply(204);
+          handoffs.delete(id);
+          return reply(200, { search: entry.search });
+        }
+        if (req.method === "POST") {
+          let raw = "";
+          req.setEncoding("utf8");
+          req.on("data", (chunk) => {
+            raw += chunk;
+            if (raw.length > 8_000) req.destroy();
+          });
+          req.on("end", () => {
+            let search = "";
+            try {
+              search = String(JSON.parse(raw)?.search ?? "");
+            } catch {
+              return reply(400, { error: "body" });
+            }
+            if (!search.startsWith("?") || search.length > 6_000 || handoffs.size > 500) return reply(400, { error: "search" });
+            handoffs.set(id, { search, at: now });
+            reply(200, { ok: true });
+          });
+          return;
+        }
+        return reply(405, { error: "method" });
       }
       // The oracle's samples, read-only, so the page can show a result at the fixing time instead of
       // waiting for the settlement. The oracle itself stays on loopback.

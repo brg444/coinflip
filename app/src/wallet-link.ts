@@ -4,7 +4,7 @@
 // so that window can hand the return to its opener and close.
 
 const LOCAL = new Set(["localhost", "127.0.0.1", "[::1]", "::1"]);
-const RETURN = ["address", "pubkey", "error", "status", "txid", "flow", "position", "popup"];
+const RETURN = ["address", "pubkey", "error", "status", "txid", "flow", "position", "popup", "relay"];
 const OUTCOME = ["address", "pubkey", "error", "status", "txid"];
 
 export const WALLET_HANDOFF_TYPE = "arkade-wallet-handoff";

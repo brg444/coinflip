@@ -154,6 +154,11 @@ input { font: inherit; color: inherit; caret-color: var(--purple); }
 .wallet { display: flex; align-items: center; gap: 10px; height: 40px; padding: 0 14px; background: var(--card); box-shadow: inset 0 0 0 1px var(--rule); font: 500 14px/1 var(--mono); white-space: nowrap; color: var(--ink); }
 .wallet .dot { width: 8px; height: 8px; background: var(--purple); }
 .wallet .addr-s { display: none; }
+.wallet .bal { color: var(--ink); }
+.wallet.has-balance .addr-l { color: var(--muted); }
+.wallet.has-balance .bal::after { content: "·"; margin-left: 10px; color: var(--muted); }
+/* A wallet return that landed in another window: it has gone back to the app. */
+.relay-note { position: fixed; z-index: 70; left: 50%; top: calc(16px + env(safe-area-inset-top)); transform: translateX(-50%); width: max-content; max-width: calc(100vw - 32px); margin: 0; padding: 12px 16px; border-radius: 14px; background: var(--btn); color: var(--btn-ink); font-size: 14.5px; box-shadow: var(--pop-shadow); animation: pop-in 220ms var(--ease-out); }
 .connect { height: 40px; padding: 0 16px; background: var(--btn); color: var(--btn-ink); font: 500 13px/1 var(--mono); letter-spacing: .06em; text-transform: uppercase; white-space: nowrap; transition: background 180ms var(--ease-out); }
 .connect:hover { background: var(--btn-hover); }
 .theme { display: grid; place-items: center; width: 40px; height: 40px; flex: none; color: var(--ink2); box-shadow: inset 0 0 0 1px var(--rule); background: var(--card); }
@@ -738,6 +743,8 @@ button.chip:not(:disabled):hover { transform: translateY(-1px); }
   .wallet { height: 36px; padding: 0 10px; font-size: 12.5px; gap: 7px; }
   .wallet .addr-l { display: none; }
   .wallet .addr-s { display: inline; }
+  .wallet.has-balance .addr-s { display: none; }
+  .wallet.has-balance .bal::after { content: none; }
   .connect { height: 36px; padding: 0 14px; }
   .page { padding-top: 10px; padding-bottom: 48px; }
   .note { padding-bottom: 32px; font-size: 12px; }
@@ -799,7 +806,7 @@ button.chip:not(:disabled):hover { transform: translateY(-1px); }
   .wallet, .connect { height: 34px; }
   .connect { padding: 0 12px; font-size: 12px; letter-spacing: .05em; }
   /* tabs move to an app-style bar at the bottom, all four of them */
-  .nav { position: fixed; left: 0; right: 0; bottom: 0; z-index: 28; display: grid; grid-template-columns: repeat(4, 1fr); gap: 0; margin: 0; padding: 4px 4px env(safe-area-inset-bottom); background: color-mix(in srgb, var(--card) 86%, transparent); -webkit-backdrop-filter: saturate(1.6) blur(14px); backdrop-filter: saturate(1.6) blur(14px); box-shadow: 0 -1px 0 var(--hairline); }
+  .nav { position: fixed; left: 0; right: 0; bottom: 0; z-index: 28; display: grid; grid-template-columns: none; grid-auto-flow: column; grid-auto-columns: 1fr; gap: 0; margin: 0; padding: 4px 4px env(safe-area-inset-bottom); background: color-mix(in srgb, var(--card) 86%, transparent); -webkit-backdrop-filter: saturate(1.6) blur(14px); backdrop-filter: saturate(1.6) blur(14px); box-shadow: 0 -1px 0 var(--hairline); }
   .nav [data-tab="sell"] { display: flex; }
   .nav button { flex-direction: column; justify-content: center; gap: 4px; height: 54px; padding: 0 2px; font-size: 11px; letter-spacing: .01em; white-space: nowrap; }
   .nav button[aria-current="page"] { background: transparent; color: var(--purple); }
@@ -859,12 +866,48 @@ body { padding-left: env(safe-area-inset-left); padding-right: env(safe-area-ins
    system's own tab bars, and the page and the bet button clear it. */
 @media (max-width: 560px) {
   html.standalone { --tabbar: calc(54px + max(8px, env(safe-area-inset-bottom))); }
+  /* An app screen, not a web page: no rubber band past either end (pull to reload is its own gesture). */
+  html.standalone, html.standalone body { overscroll-behavior-y: none; }
+  /* The Predict view fills the screen without the trailing page padding a browser tab keeps. */
+  html.standalone .page:has(> #predict:not([hidden])) { padding-bottom: 12px; }
   .nav { padding-left: max(4px, env(safe-area-inset-left)); padding-right: max(4px, env(safe-area-inset-right)); }
   html.standalone .nav { padding: 2px max(8px, env(safe-area-inset-right)) max(8px, calc(env(safe-area-inset-bottom) - 2px)) max(8px, env(safe-area-inset-left)); }
   html.standalone .nav button { height: 50px; gap: 3px; font-size: 10.5px; }
   html.standalone .nav button[aria-current="page"]::before { top: -2px; }
   html.standalone .nav .count { top: 1px; }
   html.standalone .strip { padding-top: env(safe-area-inset-top); height: calc(28px + env(safe-area-inset-top)); }
+}
+/* How it works, phones: its own short page. Desktop keeps the two-column card. */
+.how-phone { display: none; }
+@media (max-width: 700px) {
+  #how-predict { display: none; }
+  .how-phone { display: block; padding: 6px 0 8px; }
+  .how-phone h1 { margin: 0; font-size: 26px; line-height: 1.2; letter-spacing: -.026em; font-weight: 600; }
+  .how-lede { margin: 8px 0 0; color: var(--ink2); font-size: 16px; line-height: 1.5; }
+  .how-calls { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 20px; }
+  .how-call { padding: 14px 14px 15px; border-radius: 16px; background: var(--well); }
+  .how-call svg { display: block; width: 22px; height: 22px; padding: 7px; box-sizing: content-box; background: var(--lav); stroke: var(--purple); fill: none; stroke-width: 1.75; stroke-linecap: square; }
+  .how-call h2 { margin: 12px 0 0; font-size: 17px; font-weight: 600; letter-spacing: -.015em; }
+  .how-call p { margin: 4px 0 0; color: var(--ink2); font-size: 14px; line-height: 1.4; }
+  .how-aside { margin: 10px 2px 0; color: var(--muted); font-size: 13.5px; }
+  .how-head { margin: 28px 0 0; font-size: 19px; font-weight: 600; letter-spacing: -.015em; }
+  .how-steps { list-style: none; margin: 12px 0 0; padding: 0; counter-reset: how; }
+  .how-steps li { position: relative; display: grid; gap: 3px; padding: 0 0 18px 44px; counter-increment: how; }
+  .how-steps li::before { content: counter(how); position: absolute; left: 0; top: 0; display: grid; place-items: center; width: 28px; height: 28px; background: var(--lav); color: var(--purple); font: 500 13px/1 var(--mono); }
+  .how-steps li::after { content: ""; position: absolute; left: 13.5px; top: 34px; bottom: 6px; width: 1px; background: var(--lav-strong); }
+  .how-steps li:last-child { padding-bottom: 0; }
+  .how-steps li:last-child::after { display: none; }
+  .how-steps b { font-size: 15.5px; font-weight: 600; letter-spacing: -.01em; line-height: 1.75; }
+  .how-steps span { color: var(--ink2); font-size: 14.5px; line-height: 1.45; }
+  .how-example { margin-top: 12px; padding: 16px; border-radius: 16px; background: var(--well); }
+  .how-sum { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 12px; margin: 0 0 10px; padding-bottom: 12px; border-bottom: 1px solid var(--hairline); }
+  .how-sum span { color: var(--ink2); font: 400 14px/1.3 var(--mono); }
+  .how-sum b { color: var(--purple); font: 500 17px/1.3 var(--mono); letter-spacing: -.02em; }
+  .how-example > p:last-child { margin: 0; color: var(--ink2); font-size: 14.5px; line-height: 1.45; }
+  .how-more { margin-top: 22px; border-top: 1px solid var(--hairline); border-bottom: 1px solid var(--hairline); }
+  .how-more summary { padding: 14px 0; font-weight: 500; font-size: 15px; cursor: pointer; }
+  .how-more p { margin: 0 0 14px; color: var(--ink2); font-size: 14.5px; line-height: 1.45; }
+  #how-start { width: 100%; margin-top: 24px; }
 }
 /* iOS only sends a tap on a plain element to the page when it looks clickable. */
 .scrim { cursor: pointer; }
@@ -948,11 +991,14 @@ body { padding-left: env(safe-area-inset-left); padding-right: env(safe-area-ins
   .drawer h2 { font-size: 24px; }
   .fee { border-radius: 12px; background: var(--well); }
   .check { border-radius: 14px; background: var(--well); box-shadow: none; }
-  .chart-fold { display: flex; align-items: center; justify-content: space-between; width: 100%; margin-top: 10px; padding: 13px 0; border-top: 1px solid var(--hairline); font-weight: 500; font-size: 15px; text-align: left; }
+  .chart-fold { display: flex; align-items: center; justify-content: space-between; width: 100%; margin-top: 14px; padding: 13px 0; border-top: 1px solid var(--hairline); border-bottom: 1px solid var(--hairline); font-weight: 500; font-size: 15px; text-align: left; }
+  .drawer.show-chart .chart-fold { border-bottom: 0; }
+  /* The review leads with the call and the win; the fee, the outcomes and the chart wait behind one toggle. */
+  .drawer:not(.show-chart) #bet-details { display: none; }
+  .drawer .fee { margin-top: 4px; }
   .chart-fold svg { width: 14px; height: 14px; fill: none; stroke: var(--muted); stroke-width: 1.8; transition: transform 180ms var(--ease-out); }
   .chart-fold[aria-expanded="true"] svg { transform: rotate(180deg); }
-  .drawer .chartcard { display: none; }
-  .drawer.show-chart .chartcard { display: block; margin-top: 4px; }
+  .drawer .chartcard { margin-top: 18px; }
 
   /* Predict: the composer ends at its button. */
   .predict .windows { display: none; }
