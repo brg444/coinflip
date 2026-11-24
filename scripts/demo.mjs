@@ -215,6 +215,7 @@ async function deskUp(key, beacon) {
     DESK_KEY: key.deskKey,
     BEACON_TXID: beacon.issueTxid,
     ORACLE_URL: oracleUrl,
+    DESK_RATCHET_MARGIN_S: process.env.DESK_RATCHET_MARGIN_S?.trim() || String(5 * 86_400),
     DATA_DIR: path.join(home, "desk"),
     PORT: String(PORTS.desk),
   });

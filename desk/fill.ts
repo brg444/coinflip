@@ -68,6 +68,7 @@ export async function fillQuote(opts: {
    */
   ark?: PendingArk;
   beaconExpiry?: number | null;
+  ratchetMargin?: number;
   checkPredict?: (row: QuoteRow, now: number) => Promise<PredictFillVerdict>;
 }): Promise<{ result: FillResult; txid?: string; spent?: Coin[] }> {
   const bound = bindContracts(opts.termsFor(opts.row));
@@ -78,7 +79,7 @@ export async function fillQuote(opts: {
   const predict = isPredict(opts.row.kind);
   // The user's coin: the collateral they lock, or the stake they bet.
   const locks = predict ? premium : collateral;
-  const minExpiry = minFillCoinExpiry(opts.row.expiry, opts.beaconExpiry ?? null);
+  const minExpiry = minFillCoinExpiry(opts.row.expiry, opts.beaconExpiry ?? null, undefined, opts.ratchetMargin);
   const funding = coins.filter((item) => BigInt(item.value) >= locks);
   const coin = funding.find((item) => coinOutlives(item, minExpiry));
   if (!coin) {

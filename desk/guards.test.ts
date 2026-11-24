@@ -10,6 +10,7 @@ import {
   minCoinExpiry,
   minFillCoinExpiry,
   ORACLE_SPOT_MAX_AGE_S,
+  parseRatchetMargin,
   predictFillAllowed,
   predictSpot,
 } from "./guards.ts";
@@ -33,6 +34,11 @@ test("coin expiry guards fail closed on missing or dead beacons and block beacon
   const liveBeacon = expiry + 86_400;
   assert.equal(BEACON_RATCHET_MARGIN_S, 0);
   assert.equal(minFillCoinExpiry(expiry, liveBeacon), liveBeacon);
+  assert.equal(minFillCoinExpiry(expiry, liveBeacon, COIN_EXPIRY_MARGIN_S, 3_600), liveBeacon - 3_600);
+  assert.equal(parseRatchetMargin(undefined), 0);
+  assert.equal(parseRatchetMargin("432000"), 432_000);
+  assert.throws(() => parseRatchetMargin("-1"));
+  assert.throws(() => parseRatchetMargin("abc"));
   assert.equal(coinOutlives({ expiresAt: new Date((liveBeacon - 1) * 1000) }, minFillCoinExpiry(expiry, liveBeacon)), false);
   assert.equal(coinOutlives({ expiresAt: new Date(liveBeacon * 1000) }, minFillCoinExpiry(expiry, liveBeacon)), true);
   assert.equal(minFillCoinExpiry(expiry, need), need);

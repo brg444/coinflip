@@ -9,6 +9,13 @@ export const BEACON_RATCHET_MARGIN_S = 0;
 export const ORACLE_SPOT_MAX_AGE_S = 180;
 export const BASIS_MAX_BPS = 100;
 
+export function parseRatchetMargin(raw?: string): number {
+  const trimmed = raw?.trim();
+  if (!trimmed) return BEACON_RATCHET_MARGIN_S;
+  if (!/^(0|[1-9][0-9]*)$/.test(trimmed)) throw new Error("DESK_RATCHET_MARGIN_S must be a non-negative integer");
+  return Number(trimmed);
+}
+
 export function minCoinExpiry(expiry: number, margin = COIN_EXPIRY_MARGIN_S): number {
   return expiry + Number(VAULT_EXPIRY_LAG) + margin;
 }

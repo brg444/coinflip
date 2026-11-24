@@ -53,7 +53,7 @@ import { countFill, countQuote, emptyHour, hourLine, msUntilNextHour } from "./d
 import { finalizeDeskSpends, pendingOutpoints } from "./finalize.ts";
 import { maintainDeskCoins } from "./maintain.ts";
 import { fillQuote, type PredictFillVerdict } from "./fill.ts";
-import { beaconExpiryRefusal, coinOutlives, minFillCoinExpiry, predictFillAllowed, predictSpot } from "./guards.ts";
+import { beaconExpiryRefusal, coinOutlives, minFillCoinExpiry, parseRatchetMargin, predictFillAllowed, predictSpot } from "./guards.ts";
 import { spotCents } from "./spot.ts";
 
 /**
@@ -98,6 +98,7 @@ const port = Number(process.env.PORT ?? "8788");
 const arkUrl = process.env.ARK_URL?.trim() || ARK_URL;
 const emulatorUrl = process.env.EMULATOR_URL?.trim() || EMULATOR_URL;
 const relays = (process.env.RELAYS ?? DEFAULT_RELAYS.join(",")).split(",").map((item) => item.trim()).filter(Boolean);
+const ratchetMargin = parseRatchetMargin(process.env.DESK_RATCHET_MARGIN_S);
 const caps = {
   perStrike: bigintEnv("DESK_STRIKE_CAP", 100_000_000n),
   total: bigintEnv("DESK_TOTAL_CAP", 500_000_000n),
@@ -391,7 +392,7 @@ async function onPredict(message: RfqRequest & { profile: PredictRequestProfile 
     await refuse(from, message.rfq_id, bad);
     return;
   }
-  const minExpiry = minFillCoinExpiry(message.profile.expiry, beaconExpiry);
+  const minExpiry = minFillCoinExpiry(message.profile.expiry, beaconExpiry, undefined, ratchetMargin);
   if (eligibleFloatBalance(minExpiry) < openPremium(book.list(), now) + payout) await refreshFloat();
   if (eligibleFloatBalance(minExpiry) < openPremium(book.list(), now) + payout) {
     await refuse(from, message.rfq_id, "float short");
@@ -510,7 +511,7 @@ async function onRequest(message: RfqRequest, from: string) {
     await refuse(from, message.rfq_id, dust);
     return;
   }
-  const minExpiry = minFillCoinExpiry(profile.expiry, beaconExpiry);
+  const minExpiry = minFillCoinExpiry(profile.expiry, beaconExpiry, undefined, ratchetMargin);
   if (eligibleFloatBalance(minExpiry) < openPremium(book.list(), now) + sats) await refreshFloat();
   if (eligibleFloatBalance(minExpiry) < openPremium(book.list(), now) + sats) {
     await refuse(from, message.rfq_id, "float short");
@@ -840,6 +841,7 @@ async function pump() {
           float: [...deskCoins.values()],
           ark,
           beaconExpiry,
+          ratchetMargin,
           checkPredict: checkPredictFill,
         });
         if (outcome.result === "filled") {
