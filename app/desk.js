@@ -235,6 +235,10 @@ function routeFromHash() {
 
 function show(view, mode = "push") {
   state.view = view;
+  if (view !== "home") {
+    $("home").classList.remove("sheet-open");
+    $("list-view").inert = false;
+  }
   $("connect").hidden = view !== "connect";
   $("home").hidden = view !== "home";
   $("predict").hidden = view !== "predict";
@@ -249,6 +253,7 @@ function show(view, mode = "push") {
     else history.pushState(null, "", next);
   }
   renderTop();
+  syncLock();
   if (view === "home") renderBlotter();
   if (view === "predict") {
     renderPredict();
@@ -268,7 +273,7 @@ function renderTop() {
   $("who-address").textContent = known ? shortAddress(state.address) : "";
   $("who-tail").textContent = known ? `…${state.address.slice(-4)}` : "";
   $("top-connect").hidden = known;
-  const count = visiblePositions().length;
+  const count = visiblePositions().filter((p) => liveNow(p)).length;
   $("count").hidden = !count;
   $("count").textContent = String(count);
   document.querySelectorAll("[data-tab]").forEach((btn) => {
@@ -279,30 +284,69 @@ function renderTop() {
 
 let shownId = "";
 
+/** On a phone a position opens as a drawer over the list; on wider screens it replaces the list. */
+const phoneSheets = () => window.matchMedia("(max-width: 700px)").matches;
+
+function liveNow(p, now = Math.floor(Date.now() / 1000)) {
+  return ["locking", "deposited"].includes(p.status) || (p.status === "filled" && Number(p.expiry) > now);
+}
+
 function renderBlotter() {
   const rows = visiblePositions();
   const selected = rows.find((position) => position.id === state.selected) || null;
   if (!selected) state.selected = null;
   if (state.view === "home" && location.hash !== pageHash("home")) history.replaceState(null, "", pageHash("home"));
   renderTop();
-  $("list-view").hidden = Boolean(selected);
+  // On a phone the send step rises as a drawer over the list; every other position is its own page.
+  const sheet = Boolean(selected) && phoneSheets() && ["locking", "deposited"].includes(selected.status);
+  $("list-view").hidden = Boolean(selected) && !sheet;
   $("position-view").hidden = !selected;
+  $("home").classList.toggle("sheet-open", sheet);
+  $("list-view").inert = sheet;
+  const panel = $("pv-sheet");
+  if (sheet) {
+    panel.setAttribute("role", "dialog");
+    panel.setAttribute("aria-modal", "true");
+  } else {
+    panel.removeAttribute("role");
+    panel.removeAttribute("aria-modal");
+  }
+  syncLock();
   if (selected) {
-    if (shownId !== selected.id) $("status").textContent = "";
+    const fresh = shownId !== selected.id;
+    if (fresh) $("status").textContent = "";
     shownId = selected.id;
     renderPrediction(selected);
-    return;
+    if (fresh && sheet) {
+      panel.scrollTop = 0;
+      panel.querySelector(".sheet-close")?.focus({ preventScroll: true });
+    }
+    if (!sheet) return;
+  } else {
+    shownId = "";
   }
-  shownId = "";
   const host = $("blotter");
   host.replaceChildren();
+  const now = Math.floor(Date.now() / 1000);
+  const live = rows.filter((p) => liveNow(p, now));
+  $("positions-title").textContent = live.length
+    ? `${live.length} ${live.length === 1 ? "prediction" : "predictions"} in play`
+    : "Your positions";
+  const staked = live.reduce((sum, p) => sum + p.premiumSats, 0n);
+  $("positions-sub").hidden = !live.length;
+  $("positions-sub").textContent = live.length
+    ? `${int(staked)} sats in${state.spotCents != null ? ` · BTC is ${usd0(spotUsd())} now` : ""}`
+    : "";
   if (!rows.length) {
     host.append(el("p", "empty", state.address
       ? "No positions yet. Make a prediction and it shows up here."
       : "Connect your wallet to see your positions."));
     return;
   }
-  for (const position of rows) host.append(betRow(position));
+  const earlier = rows.filter((p) => !liveNow(p, now));
+  for (const position of live) host.append(betRow(position));
+  if (live.length && earlier.length) host.append(el("h3", "plist-head", "Earlier"));
+  for (const position of earlier) host.append(betRow(position));
 }
 
 function sendClock(node) {
@@ -813,7 +857,7 @@ function setUnit(unit) {
 function unitPick() {
   const seg = el("div", "seg units");
   seg.setAttribute("role", "radiogroup");
-  seg.setAttribute("aria-label", "Bet in");
+  seg.setAttribute("aria-label", "Stake in");
   for (const [unit, label] of [["btc", "BTC"], ["usd", "USD"]]) {
     const btn = el("button", "", label);
     btn.type = "button";
@@ -916,7 +960,7 @@ function lineTag(step) {
 function closeClock(node) {
   const left = Number(node.dataset.close) - Math.floor(Date.now() / 1000);
   const text = left > 0 ? mmss(left) : "0:00";
-  node.textContent = node.dataset.form === "left" ? `${text} left` : `in ${text}`;
+  node.textContent = node.dataset.form === "left" ? `${text} left` : node.dataset.form === "bare" ? text : `in ${text}`;
 }
 
 function clockEl(className, unix, form = "in") {
@@ -928,17 +972,18 @@ function clockEl(className, unix, form = "in") {
 }
 
 function betSentenceInto(node, terms, tense, stakeLabel = `₿${fmtBtc(terms.stake)}`) {
-  const lead = { now: "I bet", past: "You bet", none: "You were going to bet" }[tense];
+  const lead = { now: "I predict BTC closes", past: "You predicted BTC would close", none: "You were going to predict BTC would close" }[tense];
+  const last = el("span", "nb");
+  last.append("with\u00a0", el("span", "chip", stakeLabel), ".");
   node.replaceChildren(
     `${lead} `,
-    el("span", "chip", stakeLabel),
-    " that BTC closes ",
     el("span", "chip", DIR[terms.kind]),
     " ",
     el("span", "chip", usd0(Number(terms.lineCents) / 100)),
     " at ",
     el("span", "chip", localTime(terms.expiry)),
-    ".",
+    " ",
+    last,
   );
 }
 
@@ -988,7 +1033,7 @@ function renderPredict() {
     renderMarket();
     note.textContent = state.loaded ? "We can’t get a fair price right now. Try again in a minute." : "Getting the current price…";
     see.disabled = true;
-    see.textContent = "See what happens";
+    see.textContent = "Review prediction";
     renderBetPop();
     renderBet();
     return;
@@ -1005,7 +1050,7 @@ function renderPredict() {
   renderMarket();
   const outOfRange = t.stake < STAKE_MIN || t.stake > STAKE_MAX;
   if (outOfRange) {
-    note.textContent = `Bet between ${inUnit(STAKE_MIN)} and ${inUnit(STAKE_MAX)}.`;
+    note.textContent = `Stake between ${inUnit(STAKE_MIN)} and ${inUnit(STAKE_MAX)}.`;
   } else if (beats(payout, t.stake)) {
     // Phones show the short form; the fee is spelled out in the drawer either way.
     note.replaceChildren(
@@ -1017,10 +1062,10 @@ function renderPredict() {
   } else if (m == null) {
     note.textContent = "The desk doesn’t quote this line for this close. Pick one nearer the current price.";
   } else {
-    note.textContent = `This wins about ${int(won(payout))} sats, which doesn’t beat your stake after the 1,000-sat fee. Bet more or pick a further line.`;
+    note.textContent = `This wins about ${int(won(payout))} sats, which doesn’t beat your stake after the 1,000-sat fee. Stake more or pick a further line.`;
   }
   see.disabled = outOfRange || !beats(payout, t.stake);
-  see.textContent = `See what happens at ${localTime(t.expiry)}`;
+  see.textContent = "Review prediction";
   renderBetPop();
   renderBet();
 }
@@ -1070,9 +1115,9 @@ function renderBetPop(focus = false) {
   let title;
   let hint;
   if (state.bet.open === "stake") {
-    title = "How much to bet?";
+    title = "How much to stake?";
     hint = inUsd()
-      ? `Dollars become sats at the current ${usd0(spotUsd())}; the bet is in sats from the moment the desk quotes it. The 1,000-sat price-check fee comes out of the payout at ${at}.`
+      ? `Dollars become sats at the current ${usd0(spotUsd())}; the stake is in sats from the moment the desk quotes it. The 1,000-sat price-check fee comes out of the payout at ${at}.`
       : `The 1,000-sat price-check fee comes out of the payout at ${at}.`;
     const m = betMultiplier(t.kind, t.lineCents, t.expiry);
     const list = el("div", "opts");
@@ -1088,7 +1133,7 @@ function renderBetPop(focus = false) {
         note: `${int(stake)} sats`,
         side: ok ? `Win about ${inUnit(won(payout))}` : "",
         off: ok ? "" : !inRange
-          ? `Bet between ${inUnit(STAKE_MIN)} and ${inUnit(STAKE_MAX)}.`
+          ? `Stake between ${inUnit(STAKE_MIN)} and ${inUnit(STAKE_MAX)}.`
           : m == null
             ? "The desk doesn’t quote this line."
             : `Wins ${inUnit(won(payout))} after the fee, not more than you put in.`,
@@ -1209,7 +1254,7 @@ function onTypedStake(event) {
     const usd = parseUsd(raw);
     const sats = usd == null ? null : usdToSats(usd);
     if (sats == null || sats < STAKE_MIN || sats > STAKE_MAX) {
-      if (error) error.textContent = `Bet between ${usdFig(Math.ceil(worth(STAKE_MIN, spotUsd()) * 100) / 100)} and ${usdFig(Math.floor(worth(STAKE_MAX, spotUsd())))}.`;
+      if (error) error.textContent = `Stake between ${usdFig(Math.ceil(worth(STAKE_MIN, spotUsd()) * 100) / 100)} and ${usdFig(Math.floor(worth(STAKE_MAX, spotUsd())))}.`;
       return;
     }
     state.bet.usd = usd;
@@ -1221,7 +1266,7 @@ function onTypedStake(event) {
   }
   const sats = parseStake(raw);
   if (sats == null || sats < STAKE_MIN || sats > STAKE_MAX) {
-    if (error) error.textContent = `Bet between ${fmtBtc(STAKE_MIN)} and ${fmtBtc(STAKE_MAX)} BTC.`;
+    if (error) error.textContent = `Stake between ${fmtBtc(STAKE_MIN)} and ${fmtBtc(STAKE_MAX)} BTC.`;
     return;
   }
   state.bet.stake = sats;
@@ -1241,11 +1286,20 @@ function dropBet() {
 function syncScrim() {
   const open = state.bet.checkout && state.view === "predict";
   $("scrim").hidden = !open;
-  document.body.classList.toggle("locked", open);
   for (const id of ["top", "main"]) $(id).inert = open;
+  syncLock();
+}
+
+/** The page stops scrolling while a sheet is up: the bet checkout, or a position on a phone. */
+function syncLock() {
+  const checkout = state.bet.checkout && state.view === "predict";
+  const position = state.view === "home" && $("home").classList.contains("sheet-open");
+  document.body.classList.toggle("locked", checkout || position);
 }
 
 function openBet() {
+  $("bet").classList.remove("show-chart");
+  $("bet-chart-fold").setAttribute("aria-expanded", "false");
   state.bet.open = "";
   state.bet.checkout = true;
   state.bet.agree = false;
@@ -1321,13 +1375,13 @@ function renderBet() {
 
 function betFault(note) {
   const detail = clipDetail(note);
-  if (note.includes("float short")) return ["The desk can’t cover this payout right now. Bet less, or try again later.", detail];
+  if (note.includes("float short")) return ["The desk can’t cover this payout right now. Stake less, or try again later.", detail];
   if (/refused: (spot|deribit) unavailable/.test(note)) return ["We can’t get a fair price right now. Try again in a moment.", detail];
   if (note.includes("refused: expiry")) return ["That window is closing too soon. Pick a later close.", detail];
   if (note.includes("refused: line")) return ["The desk doesn’t quote this line right now. Pick one nearer the current price.", detail];
-  if (note.includes("refused: payout")) return ["This payout doesn’t beat your stake after the fee. Bet more or pick a further line.", detail];
-  if (note.includes("refused: stake")) return [`Bet between ${fmtBtc(STAKE_MIN)} and ${fmtBtc(STAKE_MAX)} BTC.`, detail];
-  if (note.includes("exposure")) return ["The desk has taken all it can for now. Try a smaller bet or a later close.", detail];
+  if (note.includes("refused: payout")) return ["This payout doesn’t beat your stake after the fee. Stake more or pick a further line.", detail];
+  if (note.includes("refused: stake")) return [`Stake between ${fmtBtc(STAKE_MIN)} and ${fmtBtc(STAKE_MAX)} BTC.`, detail];
+  if (note.includes("exposure")) return ["The desk has taken all it can for now. Try a smaller stake or a later close.", detail];
   if (note.includes("did not answer")) return ["The desk didn’t answer. Try again in a moment.", detail];
   return ["Try again in a moment.", detail];
 }
@@ -1339,7 +1393,7 @@ function renderBetFoot() {
   const quote = state.bet.offer?.quote;
   const left = quote ? Math.min(quote.validUntil, quote.deadline) - now : 0;
   const firm = $("bet-firm");
-  let label = "Place bet";
+  let label = "Place prediction";
   let off = false;
   let sentence = state.bet.fault?.sentence || "";
   let detail = state.bet.fault?.detail || "";
@@ -1487,7 +1541,7 @@ function betOutcome(p) {
 function betStatusLabel(p) {
   const now = Math.floor(Date.now() / 1000);
   if (p.status === "locking") return p.walletTxid ? "Waiting for your BTC" : "Send your BTC";
-  if (p.status === "deposited") return "Placing your bet";
+  if (p.status === "deposited") return "Placing your prediction";
   const outcome = betOutcome(p);
   if (outcome === "won") return "Won";
   if (outcome === "lost") return "Lost";
@@ -1515,12 +1569,22 @@ function betRow(p) {
   const what = el("span");
   const now = Math.floor(Date.now() / 1000);
   const live = p.status === "filled" && Number(p.expiry) > now;
-  const meta = live && state.spotCents != null
-    ? `Prediction · ₿${fmtBtc(p.premiumSats)} · BTC is ${usd0(spotUsd())} now`
-    : `Prediction · ₿${fmtBtc(p.premiumSats)} · ${p.windowMin || 5}-minute window`;
+  const line = Number(p.strike) / 100;
+  let meta = null;
+  let ahead = null;
+  if (live && state.spotCents != null) {
+    const price = spotUsd();
+    ahead = p.kind === 2 ? price > line : price < line;
+    meta = price === line
+      ? "On your line · the desk is ahead"
+      : `${usd0(Math.abs(price - line))} ${price > line ? "above" : "below"} your line · ${ahead ? "winning so far" : "the desk is ahead"}`;
+  }
+  if (live) row.classList.add("live", ahead === false ? "behind" : "ahead");
+  const metaEl = el("span", "m", meta ?? `Prediction · ₿${fmtBtc(p.premiumSats)}`);
+  if (meta == null) metaEl.append(el("span", "win", ` · ${p.windowMin || 5}-minute window`));
   what.append(
-    el("b", "", `${capital(DIR[p.kind])} ${usd0(Number(p.strike) / 100)} at ${localTime(p.expiry)}`),
-    el("span", "m", meta),
+    el("b", "", `${capital(DIR[p.kind])} ${usd0(line)} at ${localTime(p.expiry)}`),
+    metaEl,
   );
   if (live) {
     const bar = el("span", "left-bar");
@@ -1541,6 +1605,11 @@ function betRow(p) {
   else if (outcome === "lost") extra = `−${int(p.premiumSats)} sats`;
   else if (["locking", "deposited", "filled"].includes(p.status)) extra = `${int(p.premiumSats)} in → ${int(won(p.collateral))} if right`;
   if (extra) side.append(el("small", "", extra));
+  if (live) {
+    const money = el("span", "money");
+    money.append(el("span", "", `${int(p.premiumSats)} in`), el("span", "", `${int(won(p.collateral))} if right`));
+    side.append(money);
+  }
   row.append(icon, what, side);
   return row;
 }
@@ -1562,7 +1631,7 @@ function betSteps(p) {
     labels = ["Waiting for your BTC", p.status === "refunded" ? "Refunded" : "Time ran out"];
     at = 1;
   } else {
-    labels = ["Waiting for your BTC", "Bet placed", "Window closes", "Settled"];
+    labels = ["Waiting for your BTC", "Prediction placed", "Window closes", "Settled"];
     const now = Math.floor(Date.now() / 1000);
     at = { locking: 0, deposited: 1, filled: Number(p.expiry) > now ? 2 : 3, settled: 4 }[p.status] ?? 0;
     if (betOutcome(p)) at = 4;
@@ -1586,9 +1655,15 @@ function renderPrediction(p) {
   const outcome = betOutcome(p);
   const unlocked = p.status === "expired" || p.status === "refunded";
   betSentenceInto($("position-sentence"), { kind: p.kind, stake, lineCents: p.strike, expiry: p.expiry }, unlocked ? "none" : "past");
-  const head = el("h2");
+  const phone = phoneSheets();
+  const card = $("position-chart").parentElement;
+  const grid = card.parentElement === $("position-body") ? $("pv-sheet").querySelector(".grid") : card.parentElement;
+  if (card.parentElement !== grid) grid.append(card);
+  let head = el("h2");
   const body = [];
   let badge = null;
+  let chartAfter = null;
+  let tucked = null;
   const pill = (text, className = "pill") => {
     const box = el("p", "badge");
     box.append(el("span", className, text));
@@ -1614,7 +1689,7 @@ function renderPrediction(p) {
     return [box, el("p", "sub", `The next window closes at ${localTime(nextClose)}.`)];
   };
   if (p.status === "locking") {
-    head.textContent = p.walletTxid ? "Your wallet sent it." : "Send your stake to place the bet.";
+    head.textContent = p.walletTxid ? "Your wallet sent it." : "Send your stake to place the prediction.";
     body.push(el("p", "sub", p.walletTxid
       ? `Waiting for ₿${fmtBtc(stake)} to arrive. As soon as it lands, the desk locks ${int(payout)} sats in the vault.`
       : `Send ₿${fmtBtc(stake)} from your wallet. As soon as it lands, the desk locks ${int(payout)} sats in the vault.`));
@@ -1643,7 +1718,7 @@ function renderPrediction(p) {
       ? `The ${at} fixing was ${usd2(fixing)}, ${usd2(Math.abs(fixing - line))} ${DIR[p.kind]} your ${lineUsd} line. That’s your ${int(stake)} back plus ${int(back - stake)}.`
       : `BTC closed ${DIR[p.kind]} your ${lineUsd} line. That’s your ${int(stake)} back plus ${int(back - stake)}.`));
     body.push(ledger([
-      ["You bet", `${int(stake)} sats`],
+      ["You staked", `${int(stake)} sats`],
       ["From the desk", `+${int(payout - stake)}`],
       [`Price-check fee at ${at}`, `−${int(payout - back)}`, "minus"],
       ["Paid to you", `${int(back)} sats`, "tot"],
@@ -1656,7 +1731,7 @@ function renderPrediction(p) {
     badge = pill(`Lost · settled at ${at}`, "pill lost");
     body.push(el("p", "sub", `${fixing != null ? `The ${at} fixing was ${usd2(fixing)}. ` : ""}Your ${int(stake)} sats went to the desk.`));
     body.push(ledger([
-      ["You bet", `${int(stake)} sats`],
+      ["You staked", `${int(stake)} sats`],
       [`To the desk, at or ${OTHER[p.kind]} ${lineUsd}`, `−${int(stake)}`, "minus"],
       ["Paid to you", "0 sats", "tot"],
     ]));
@@ -1664,7 +1739,31 @@ function renderPrediction(p) {
   } else if (outcome === "settled") {
     head.textContent = "Settled.";
     body.push(el("p", "sub", "The vault paid out. Reading what came back…"));
+  } else if (p.status === "filled" && Number(p.expiry) > now && phone) {
+    // Phones: the countdown leads, then where BTC stands, then the chart.
+    head = el("div", "clock-row");
+    const fig = el("p", "clock-fig");
+    fig.append(clockEl("big", p.expiry, "bare"), el("span", "cap", `left until the ${at} fixing`));
+    head.append(fig, el("span", "pill live", "Live"));
+    if (state.spotCents != null) {
+      const price = spotUsd();
+      const ahead = p.kind === 2 ? price > line : price < line;
+      const where = price === line ? "on your line" : `${usd0(Math.abs(price - line))} ${price > line ? "above" : "below"} your line`;
+      const well = el("div", "state-well");
+      well.append(el("p", "", `BTC is ${usd0(price)} now, ${where}.`), el("p", ahead ? "ahead" : "behind", ahead ? "Winning so far" : "The desk is ahead so far"));
+      body.push(well);
+      chartAfter = well;
+    } else {
+      chartAfter = head;
+    }
+    body.push(ledger([
+      ["Your stake", `${int(stake)} sats`],
+      ["In the vault", `${int(payout)} sats`],
+      ["If you’re right", `${int(won(payout))} sats`],
+    ]));
+    tucked = el("p", "sub", `Nothing for you to do. One price fixing at ${at} (${utcTime(p.expiry)}) decides it and the payout goes to your Arkade wallet. At or ${OTHER[p.kind]} ${lineUsd}, the desk wins.`);
   } else if (p.status === "filled" && Number(p.expiry) > now) {
+    head.classList.add("live-clock");
     head.append(clockEl("", p.expiry, "left"));
     badge = pill(`Live · ${p.windowMin || 5}-minute window`);
     if (state.spotCents != null) {
@@ -1697,7 +1796,7 @@ function renderPrediction(p) {
     }
   } else if (p.status === "expired") {
     head.textContent = p.refundable ? "The desk didn’t take it in time." : "Time ran out before your BTC arrived.";
-    body.push(el("p", "sub", p.refundable ? `Your ₿${fmtBtc(stake)} is still yours. Take it back.` : "Nothing was bet."));
+    body.push(el("p", "sub", p.refundable ? `Your ₿${fmtBtc(stake)} is still yours. Take it back.` : "Nothing was staked."));
     if (p.refundable) {
       const acts = el("div", "acts");
       acts.append(action("btn sm", "Take it back", (event) => {
@@ -1707,7 +1806,7 @@ function renderPrediction(p) {
     }
   } else if (p.status === "refunded") {
     head.textContent = "Your stake is back in your wallet.";
-    body.push(el("p", "sub", "The desk didn’t take it, so nothing was bet."));
+    body.push(el("p", "sub", "The desk didn’t take it, so nothing was staked."));
   }
   const host = $("position-body");
   const opened = Boolean(host.querySelector("details")?.open);
@@ -1723,8 +1822,8 @@ function renderPrediction(p) {
     const link = txLink(label, txid);
     if (link) txs.append(link);
   }
-  if (txs.childNodes.length) host.append(txs);
   const more = el("details", "more");
+  if (txs.childNodes.length && !phone) host.append(txs);
   more.open = opened;
   const facts = el("dl", "kv");
   for (const [name, value] of [
@@ -1735,11 +1834,18 @@ function renderPrediction(p) {
   ]) {
     if (value) facts.append(el("dt", "", name), el("dd", "", value));
   }
-  more.append(el("summary", "", "Details"), facts);
+  more.append(el("summary", "", phone ? "Details and transactions" : "Details"));
+  if (phone && tucked) more.append(tucked);
+  if (phone && txs.childNodes.length) more.append(txs);
+  more.append(facts);
   host.append(more);
-  const card = $("position-chart").parentElement;
   card.hidden = unlocked || p.status === "locking";
   if (card.hidden) return;
+  if (phone) {
+    // On a phone the chart sits in the story, under what it shows, not in a second card.
+    const anchor = chartAfter || host.querySelector(":scope > h2 ~ .sub") || head;
+    anchor.after(card);
+  }
   const done = Boolean(outcome);
   $("position-chart-title").textContent = done ? `How BTC got to ${at}` : "BTC since you placed it";
   const cap = $("position-chart-cap");
@@ -2236,8 +2342,8 @@ function renderSetup(next) {
     setupStep(1, {
       title: "Price oracle",
       note: oracleDone
-        ? next.stage === "deploying" ? "Setting up the price feed." : "Signs the price that settles every bet."
-        : `Send ${int(BigInt(next.oracle.need))} sats. It signs the price that settles every bet.`,
+        ? next.stage === "deploying" ? "Setting up the price feed." : "Signs the price that settles every prediction."
+        : `Send ${int(BigInt(next.oracle.need))} sats. It signs the price that settles every prediction.`,
       address: next.oracle.wallet,
       balance: next.oracle.balance,
       need: next.oracle.need,
@@ -2247,7 +2353,7 @@ function renderSetup(next) {
     setupStep(2, {
       title: "Desk",
       note: next.desk.address
-        ? `Send about ${int(BigInt(next.desk.need))} sats. It pays winning bets.`
+        ? `Send about ${int(BigInt(next.desk.need))} sats. It pays winning predictions.`
         : "Its address appears once the price feed is set up.",
       address: next.desk.address,
       balance: next.desk.balance,
@@ -2259,7 +2365,7 @@ function renderSetup(next) {
   open.href = next.wallet || WALLET_URL;
   open.target = "_blank";
   open.rel = "noopener";
-  const title = el("p", "setup-title", "Two deposits before the first bet");
+  const title = el("p", "setup-title", "Two deposits before the first prediction");
   title.id = "setup-title";
   const foot = el("p", "setup-foot");
   foot.append(open, " · updates as they land");
@@ -2352,9 +2458,19 @@ function bind() {
       chip?.focus();
       return;
     }
-    if (state.bet.checkout) closeBet();
+    if (state.bet.checkout) {
+      closeBet();
+      return;
+    }
+    if (state.view === "home" && $("home").classList.contains("sheet-open")) location.hash = "#/positions";
   });
   listen("scrim", "click", closeBet);
+  // Phones fold the payout chart in the checkout; it is drawn again at its real width when opened.
+  listen("bet-chart-fold", "click", () => {
+    const open = $("bet").classList.toggle("show-chart");
+    $("bet-chart-fold").setAttribute("aria-expanded", String(open));
+    renderBet();
+  });
   bindBet();
   bindTheme();
   window.addEventListener("resize", () => {

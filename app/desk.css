@@ -176,7 +176,7 @@ input { font: inherit; color: inherit; caret-color: var(--purple); }
 .seg button:active { transform: scale(.97); }
 .sentence-wrap { position: relative; }
 /* The last chip keeps its full stop. */
-.sentence .nb { white-space: nowrap; }
+.sentence .nb, .said .nb { white-space: nowrap; }
 .sentence { margin: 0; font-weight: 500; font-size: 57.3px; line-height: 1.3; letter-spacing: -.032em; max-width: 1200px; color: var(--ink); }
 .sentence.past { font-size: 39.8px; line-height: 1.34; max-width: 1100px; }
 /* A term the contract enforces. Square, always. */
@@ -839,4 +839,172 @@ button.chip:not(:disabled):hover { transform: translateY(-1px); }
 }
 @media (min-width: 701px) and (max-height: 640px) {
   .predict .opener { display: none; }
+}
+
+/* ---------------------------------------------------------------------------
+ * Phones. Choices and the checkout rise as the Arkade wallet's floating
+ * drawers: a term's list, review and place, and sending the stake. Inset 8px
+ * from the screen, 32px corners, a handle, a scrim. Positions are pages.
+ * Buttons rest on a 3px ledge, as the wallet's do.
+ * ------------------------------------------------------------------------- */
+.pv-scrim, .sheet-close, .chart-fold, .prow .money, #positions-sub { display: none; }
+.plist-head { margin: 18px 0 2px; color: var(--muted); font: 500 11.5px/1.4 var(--mono); letter-spacing: .08em; text-transform: uppercase; }
+
+:root { --face: #381993; --face-press: #2f1585; --face-ledge: #23105f; --well: #f4f2f8; --handle: #e4e1ea; }
+:root[data-theme="dark"] { --face: #5a36d6; --face-press: #4c2bbd; --face-ledge: #331a8f; --well: #24202f; --handle: #3d3853; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) { --face: #5a36d6; --face-press: #4c2bbd; --face-ledge: #331a8f; --well: #24202f; --handle: #3d3853; }
+}
+
+@media (max-width: 700px) {
+  /* Buttons: a face on a ledge that drops onto it when pressed. */
+  .btn { border-radius: 14px; background: var(--face); color: #fffdf8; box-shadow: 0 3px 0 0 var(--face-ledge); transition: transform 180ms var(--ease-out), box-shadow 180ms var(--ease-out), background 180ms var(--ease-out); }
+  .btn:not(:disabled):hover { transform: none; background: var(--face); box-shadow: 0 3px 0 0 var(--face-ledge); }
+  .btn:not(:disabled):active { transform: translateY(2px); background: var(--face-press); box-shadow: 0 1px 0 0 var(--face-ledge); transition-duration: 90ms; }
+  .btn.light, .btn.light:hover { background: var(--face); color: #fffdf8; }
+  .btn.quiet, .btn.quiet:not(:disabled):hover { background: transparent; color: var(--ink); box-shadow: inset 0 0 0 1.5px var(--ink), 0 3px 0 0 var(--rule); }
+  .btn.quiet:not(:disabled):active { box-shadow: inset 0 0 0 1.5px var(--ink), 0 1px 0 0 var(--rule); }
+  .btn:disabled { box-shadow: inset 0 0 0 1px var(--rule); }
+  .btn.cta, .sheet-foot .btn, .btn.sm { height: 56px; font-size: 13.5px; }
+
+  /* One drawer shape. */
+  .pop, .drawer, #home.sheet-open .pv-sheet {
+    position: fixed;
+    top: auto !important;
+    left: 8px !important;
+    right: 8px;
+    bottom: calc(8px + env(safe-area-inset-bottom));
+    width: auto;
+    max-height: calc(100dvh - 64px);
+    border-radius: 32px;
+    background: var(--card);
+    color: var(--ink);
+    animation: sheet-in 380ms var(--ease-out) both;
+  }
+  .pop::before, .drawer::before, #home.sheet-open .pv-sheet::before {
+    content: "";
+    display: block;
+    flex: none;
+    width: 36px;
+    height: 5px;
+    margin: -14px auto 14px;
+    border-radius: 999px;
+    background: var(--handle);
+  }
+  @keyframes sheet-in { from { transform: translate3d(0, 105%, 0); } }
+  .scrim { animation: fade 200ms var(--ease-out); }
+  .drawer .back, #home.sheet-open .sheet-close {
+    position: absolute;
+    top: 14px;
+    right: 14px;
+    z-index: 2;
+    display: grid;
+    place-items: center;
+    width: 36px;
+    height: 36px;
+    margin: 0;
+    border-radius: 50%;
+    background: var(--well);
+    color: var(--ink2);
+  }
+  .drawer .back { font-size: 0; }
+  .drawer .back svg { display: none; }
+  .drawer .back::before { content: ""; width: 14px; height: 14px; background: currentColor; -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 14 14'%3E%3Cpath d='M2.5 2.5l9 9M11.5 2.5l-9 9' fill='none' stroke='%23000' stroke-width='1.8'/%3E%3C/svg%3E") center / 14px no-repeat; mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 14 14'%3E%3Cpath d='M2.5 2.5l9 9M11.5 2.5l-9 9' fill='none' stroke='%23000' stroke-width='1.8'/%3E%3C/svg%3E") center / 14px no-repeat; }
+  #home.sheet-open .sheet-close svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.8; }
+
+  /* A term's list. */
+  .pop { overflow: auto; padding: 22px 20px 20px; box-shadow: 0 0 0 100vmax var(--scrim); }
+  .pop .q { padding-right: 8px; font-size: 19px; }
+  .opts button { min-height: 58px; border-radius: 14px; background: var(--well); }
+  .opts .on { background: var(--lav); }
+  .opts .off { border-radius: 14px; }
+  .typed .field { height: 50px; border-radius: 14px; background: var(--well); box-shadow: none; }
+  .typed .field:focus-within { box-shadow: inset 0 0 0 1.5px var(--purple); }
+  .typed .btn { justify-self: stretch; }
+  .pop .seg.units { border-radius: 12px; background: var(--well); box-shadow: none; }
+  .pop .seg.units button { border-radius: 9px; }
+
+  /* Review and place. */
+  .drawer { display: flex; flex-direction: column; overflow: hidden; padding-top: 22px; box-shadow: 0 24px 60px rgba(5, 4, 10, .28); }
+  .drawer .scroll { padding: 6px 20px 16px; }
+  .drawer .stick { padding: 14px 20px 18px; }
+  .drawer .said { margin: 0 44px 14px 0; font-size: 19px; line-height: 1.42; }
+  .drawer h2 { font-size: 24px; }
+  .fee { border-radius: 12px; background: var(--well); }
+  .check { border-radius: 14px; background: var(--well); box-shadow: none; }
+  .chart-fold { display: flex; align-items: center; justify-content: space-between; width: 100%; margin-top: 10px; padding: 13px 0; border-top: 1px solid var(--hairline); font-weight: 500; font-size: 15px; text-align: left; }
+  .chart-fold svg { width: 14px; height: 14px; fill: none; stroke: var(--muted); stroke-width: 1.8; transition: transform 180ms var(--ease-out); }
+  .chart-fold[aria-expanded="true"] svg { transform: rotate(180deg); }
+  .drawer .chartcard { display: none; }
+  .drawer.show-chart .chartcard { display: block; margin-top: 4px; }
+
+  /* Predict: the composer ends at its button. */
+  .predict .windows { display: none; }
+
+  /* Positions: predictions in play lead as cards, earlier ones follow as a ruled list. */
+  #list-view > .opener { display: none; }
+  #list-view > .card { padding: 0; background: none; box-shadow: none; }
+  #list-view > .card h2 { margin: 6px 0 0; font-size: 26px; }
+  #positions-sub:not([hidden]) { display: block; margin: 4px 0 16px; }
+  .plist { gap: 0; }
+  .prow { grid-template-columns: auto minmax(0, 1fr) auto; gap: 12px; margin: 0; padding: 13px 0; }
+  .prow:hover { background: none; }
+  .prow + .prow { border-top: 1px solid var(--hairline); }
+  .prow b { font-size: 15px; }
+  .prow .m { font-size: 13px; }
+  .prow .m .win { display: none; }
+  .prow .r { grid-column: auto; justify-items: end; text-align: right; gap: 3px; }
+  .prow:not(.live) .kindico { width: 36px; height: 36px; background: var(--fill); color: var(--ink2); }
+  .prow:not(.live) .kindico svg { width: 20px; height: 20px; }
+  .plist-head { margin: 22px 0 0; color: var(--ink); font: 600 17px/1.3 var(--sans); letter-spacing: -.015em; text-transform: none; }
+  .plist-head + .prow { border-top: 0; }
+
+  .prow.live { column-gap: 10px; grid-template-areas: "icon title pill" "icon meta meta" "bar bar bar" "money money money"; row-gap: 0; align-items: center; margin: 0 0 10px; padding: 14px 16px 16px; border-top: 0; border-radius: 4px; background: var(--card); box-shadow: var(--shadow), inset 0 0 0 1px var(--card-edge); }
+  .prow.live + .prow { border-top: 0; }
+  .prow.live > .kindico { grid-area: icon; }
+  .prow.live > span:nth-child(2), .prow.live > .r { display: contents; }
+  .prow.live b { grid-area: title; font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .prow.live .m { grid-area: meta; font-size: 13.5px; color: var(--ink2); }
+  .prow.live.ahead .m { color: var(--purple); }
+  .prow.live.behind .kindico { background: var(--fill); color: var(--ink2); }
+  .prow.live .pill { grid-area: pill; justify-self: end; height: 24px; padding: 0 8px; font-size: 12px; }
+  .prow.live .left-bar { grid-area: bar; height: 4px; margin-top: 14px; }
+  .prow.live .r small { display: none; }
+  .prow.live .money { grid-area: money; display: flex; justify-content: space-between; margin-top: 8px; color: var(--muted); font: 400 12px/1.4 var(--mono); }
+  .clock-row .pill.live::before { content: ""; width: 7px; height: 7px; margin-right: 6px; background: var(--purple); animation: blink 1.6s ease-in-out infinite; }
+
+  /* A position is its own page, read top to bottom: the call, the clock, where BTC is, the chart. */
+  #position-view .back { margin: 2px 0 14px; }
+  #position-view .sentence.past { font-size: 21px; line-height: 1.42; }
+  #position-view .grid { display: block; margin-top: 16px; }
+  #position-view .grid > .card { padding: 0; background: none; box-shadow: none; }
+  #position-body .badge { margin: 0 0 10px; }
+  #position-body h2 { font-size: 23px; }
+  .clock-row { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; }
+  .clock-fig { margin: 0; }
+  .clock-fig .big { display: block; font: 500 44px/1 var(--mono); letter-spacing: -.05em; color: var(--ink); }
+  .clock-fig .cap { display: block; margin-top: 6px; color: var(--muted); font-size: 13.5px; }
+  .state-well { margin-top: 16px; padding: 12px 14px; border-radius: 16px; background: var(--well); }
+  .state-well p { margin: 0; font-size: 15px; }
+  .state-well .ahead, .state-well .behind { margin-top: 2px; font-size: 14px; font-weight: 500; }
+  .state-well .ahead { color: var(--purple); }
+  .state-well .behind { color: var(--ink2); }
+  #position-body .chartcard { margin: 16px 0 4px; padding: 0; background: none; box-shadow: none; }
+  #position-body .chartcard h3, #position-body .chartcard .cap, #position-body .chartcard .legend { display: none; }
+  #position-body .ledger { margin-top: 12px; }
+  #position-body .steps { margin-top: 14px; }
+  #position-body .acts { display: grid; grid-template-columns: 1fr 1fr; gap: 14px 12px; margin-top: 18px; }
+  #position-body .acts .btn { grid-column: 1 / -1; width: 100%; }
+  #position-body .acts .textbtn { justify-self: center; }
+  #position-body details.more .sub, #position-body details.more .txs { margin: 0 0 12px; }
+  #position-body details.more summary { font-size: 15px; }
+
+  /* Sending the stake: a drawer over the list. */
+  #home.sheet-open #position-view { position: fixed; inset: 0; z-index: 41; }
+  #home.sheet-open .pv-scrim { display: block; position: absolute; inset: 0; background: var(--scrim); animation: fade 200ms var(--ease-out); }
+  #home.sheet-open .pv-sheet { z-index: 1; overflow: auto; overscroll-behavior: contain; padding: 22px 20px 20px; box-shadow: 0 24px 60px rgba(5, 4, 10, .28); }
+  #home.sheet-open .pv-sheet .back { display: none; }
+  #home.sheet-open .sentence.past { margin-right: 44px; font-size: 19px; }
+  #home.sheet-open .grid { margin-top: 14px; }
+  #home.sheet-open .clock { margin: 16px 0 0; padding: 14px 16px; border-radius: 16px; background: var(--well); font: 500 22px/1.2 var(--mono); letter-spacing: -.03em; }
 }
