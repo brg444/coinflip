@@ -853,6 +853,19 @@ button.chip:not(:disabled):hover { transform: translateY(-1px); }
 .pull svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 .pull.ready { background: var(--face); color: #fffdf8; }
 .pull.spinning svg { animation: spin 700ms linear infinite; }
+/* The page reaches the screen's edges (viewport-fit=cover), so it keeps clear of a landscape notch. */
+body { padding-left: env(safe-area-inset-left); padding-right: env(safe-area-inset-right); }
+/* Home-screen app on a phone: the tab bar sits on the home indicator's safe area, sized like the
+   system's own tab bars, and the page and the bet button clear it. */
+@media (max-width: 560px) {
+  html.standalone { --tabbar: calc(54px + max(8px, env(safe-area-inset-bottom))); }
+  .nav { padding-left: max(4px, env(safe-area-inset-left)); padding-right: max(4px, env(safe-area-inset-right)); }
+  html.standalone .nav { padding: 2px max(8px, env(safe-area-inset-right)) max(8px, calc(env(safe-area-inset-bottom) - 2px)) max(8px, env(safe-area-inset-left)); }
+  html.standalone .nav button { height: 50px; gap: 3px; font-size: 10.5px; }
+  html.standalone .nav button[aria-current="page"]::before { top: -2px; }
+  html.standalone .nav .count { top: 1px; }
+  html.standalone .strip { padding-top: env(safe-area-inset-top); height: calc(28px + env(safe-area-inset-top)); }
+}
 /* iOS only sends a tap on a plain element to the page when it looks clickable. */
 .scrim { cursor: pointer; }
 .plist-head { margin: 18px 0 2px; color: var(--muted); font: 500 11.5px/1.4 var(--mono); letter-spacing: .08em; text-transform: uppercase; }

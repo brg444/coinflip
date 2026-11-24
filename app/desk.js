@@ -457,19 +457,42 @@ async function abortLock(position, button) {
   renderBlotter();
 }
 
+const TOOK_IT = "The desk took it after all, so your prediction is live.";
+
 async function refund(position, button) {
   button.disabled = true;
-  button.textContent = "Taking it back";
+  button.textContent = "Checking";
+  // The page re-renders often, so what happened goes in the status line, which stays put.
+  const say = (text) => {
+    if (state.selected === position.id) $("status").textContent = text;
+  };
   try {
+    // A fill can land after the page stopped waiting for it. Read the coin again before taking anything back.
+    const before = await readIntent(watchRow(position));
+    if (!before.refundable) {
+      applyChain(position, before);
+      say(["filled", "settled"].includes(position.status) ? TOOK_IT : "There’s nothing to take back yet. Checking again in a moment.");
+      return;
+    }
+    button.textContent = "Taking it back";
     await cancelIntent(await fundRequest(position));
     applyChain(position, await readIntent(watchRow(position)));
-    if (position.refundable && button.isConnected) {
+    if (position.status === "refunded") say("");
+  } catch (err) {
+    // A refund that fails is most often a fill that landed in the meantime.
+    try {
+      applyChain(position, await readIntent(watchRow(position)));
+    } catch {
+      // Keep what we know.
+    }
+    say(["filled", "settled"].includes(position.status)
+      ? TOOK_IT
+      : `Couldn’t take it back: ${err instanceof Error ? err.message : "try again in a moment"}.`);
+  } finally {
+    if (button.isConnected) {
       button.disabled = false;
       button.textContent = "Take it back";
     }
-  } catch (err) {
-    button.disabled = false;
-    button.textContent = err instanceof Error ? err.message : "Couldn’t take it back";
   }
 }
 
@@ -481,9 +504,21 @@ const CHAIN_STATUS = {
   refunded: "refunded",
 };
 
+/**
+ * A fill the desk sent just before the deadline can take a few seconds to reach the indexer, and the
+ * phone's clock can run ahead of the desk's. A stake that arrived therefore waits this long past the
+ * deadline before the page calls it missed and offers it back.
+ */
+const FILL_GRACE_S = 45;
+
 function applyChain(position, update) {
-  const next = CHAIN_STATUS[update.phase];
+  let next = CHAIN_STATUS[update.phase];
   if (!next) return;
+  const now = Math.floor(Date.now() / 1000);
+  if (next === "expired" && update.fundingTxid && now < Number(position.deadline) + FILL_GRACE_S) {
+    next = "deposited";
+    update = { ...update, refundable: false };
+  }
   if (next === "locking" && position.status !== "locking") return;
   const fundingTxid = update.fundingTxid || position.fundingTxid || "";
   const closeTxid = update.closeTxid || position.closeTxid || "";
@@ -555,6 +590,9 @@ function tick() {
     if (!isPredict(position.kind)) continue;
     if (position.status !== "deposited" || !position.deadline || now < Number(position.deadline)) continue;
     if (!position.address || expiring.has(position.address)) continue;
+    // Through the grace after the deadline, look again every few seconds rather than every tick.
+    if (now - (position.checkedAt || 0) < 4) continue;
+    position.checkedAt = now;
     expiring.add(position.address);
     void readIntent(watchRow(position)).then((phase) => {
       applyChain(position, phase);
@@ -1259,6 +1297,7 @@ function closeBetPop() {
  */
 function pullToReload() {
   const standalone = window.matchMedia?.("(display-mode: standalone)").matches || navigator.standalone === true;
+  document.documentElement.classList.toggle("standalone", standalone);
   if (!standalone) return;
   const PULL = 80;
   const mark = el("div", "pull");
