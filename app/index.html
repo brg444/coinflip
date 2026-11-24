@@ -176,6 +176,46 @@
         </figure>
         </div>
       </article>
+
+      <article class="how-phone" aria-labelledby="how-phone-title">
+        <h1 id="how-phone-title">How COINFLIP works</h1>
+        <p class="how-lede">You call where Bitcoin closes a few minutes from now. Call it right and the payout is yours; call it wrong and your stake goes to the desk.</p>
+
+        <div class="how-calls">
+          <section class="how-call" aria-labelledby="how-phone-higher">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M2.5 15.5l4.5-4.5 3 2.5 6-8"/><path d="M13 5.5h3.5V9"/></svg>
+            <h2 id="how-phone-higher">Higher</h2>
+            <p>Win if BTC closes above your line.</p>
+          </section>
+          <section class="how-call" aria-labelledby="how-phone-lower">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M2.5 4.5l4.5 4.5 3-2.5 6 8"/><path d="M13 14.5h3.5V11"/></svg>
+            <h2 id="how-phone-lower">Lower</h2>
+            <p>Win if BTC closes below your line.</p>
+          </section>
+        </div>
+        <p class="how-aside">A close exactly on the line goes to the desk.</p>
+
+        <h2 class="how-head">From call to payout</h2>
+        <ol class="how-steps">
+          <li><b>Pick a line and a close</b><span>A close comes every five minutes. The further your line from today’s price, the bigger the multiple.</span></li>
+          <li><b>Send your stake</b><span>Placing the prediction fixes your multiple, then you have 60 seconds to send the stake from your Arkade wallet.</span></li>
+          <li><b>The desk takes the other side</b><span>In one transaction your stake goes to the desk and the desk locks your whole payout in a vault.</span></li>
+          <li><b>The close decides it</b><span>A minute after the close the oracle’s price is fixed, and the vault pays you if you were right. Nothing for you to do.</span></li>
+        </ol>
+
+        <h2 class="how-head">The multiple</h2>
+        <div class="how-example">
+          <p class="how-sum"><span>50,000 sats at 1.90×</span><b>94,000 sats back</b></p>
+          <p>The multiple is what each sat returns if you’re right, priced from Deribit’s Bitcoin options less the desk’s 5% edge, so an even call pays 1.90×. A 1,000-sat price-check fee comes out of the payout.</p>
+        </div>
+
+        <details class="how-more">
+          <summary>If the desk doesn’t take it</summary>
+          <p>If the desk doesn’t fund the vault in time, your stake stays yours: take it back from Positions. There are no partial payouts, only all or nothing at the close.</p>
+        </details>
+
+        <button type="button" class="btn go cta" id="how-start">Make a prediction</button>
+      </article>
     </section>
   </main>
 

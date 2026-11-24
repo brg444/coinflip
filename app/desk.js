@@ -2814,6 +2814,7 @@ function bind() {
     }
     if (state.view === "home" && $("home").classList.contains("sheet-open")) location.hash = "#/positions";
   });
+  listen("how-start", "click", () => show("predict"));
   listen("scrim", "click", () => {
     if (state.bet.open) closeBetPop();
     else closeBet();
