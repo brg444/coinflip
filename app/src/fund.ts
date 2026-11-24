@@ -44,6 +44,7 @@ export type FundRequest = {
   holderPkHex?: string;
   /** Predict: the bettor's address. The payout and a refund pay its taproot key. */
   holderAddress?: string;
+  holderPubkey?: string;
   /** Predict: the desk's key. */
   writerPkHex?: string;
   /** Display txid of the beacon identity asset, from the desk's quote. Required to build a vault. */
@@ -70,6 +71,7 @@ export type WriterBinding = {
   pubkey: string;
   pkScript: string;
   address: string;
+  signerKey?: Uint8Array;
   payoutKey: Uint8Array;
   serverKey: Uint8Array;
   emulatorKey: Uint8Array;
@@ -121,6 +123,7 @@ function operatorSession(): Promise<Session> {
 }
 
 const ADDRESS_KEY = "arkade-options-address-v1";
+const PUBKEY_KEY = "arkade-options-pubkey-v1";
 const SESSION_KEY = "arkade-options-session-v1";
 
 function openSession(identity: SingleKey): Promise<Session> {
@@ -188,14 +191,40 @@ export function readAddress(): string | null {
   }
 }
 
-export function saveAddress(raw: string): string {
+export function readPubkey(): string | null {
+  return storedHex(PUBKEY_KEY);
+}
+
+export function saveAddress(raw: string, pubkey?: string): string {
   const address = parseWriterAddress(raw);
   globalThis.localStorage?.setItem(ADDRESS_KEY, address);
+  const hex = pubkey?.trim().toLowerCase() ?? "";
+  if (/^[0-9a-f]{64}$/.test(hex) && hex !== "0".repeat(64)) {
+    globalThis.localStorage?.setItem(PUBKEY_KEY, hex);
+  } else {
+    globalThis.localStorage?.removeItem(PUBKEY_KEY);
+  }
   return address;
 }
 
 export function clearAddress(): void {
   globalThis.localStorage?.removeItem(ADDRESS_KEY);
+  globalThis.localStorage?.removeItem(PUBKEY_KEY);
+}
+
+export function verifiedSignerKey(
+  address: string,
+  pubkey: string | undefined,
+  serverKey: Uint8Array,
+  exit: bigint = EXIT,
+): Uint8Array | undefined {
+  const hex = pubkey?.trim().toLowerCase() ?? "";
+  if (!/^[0-9a-f]{64}$/.test(hex) || hex === "0".repeat(64)) return undefined;
+  const decoded = ArkAddress.decode(parseWriterAddress(address));
+  const candidate = hexToBytes(hex);
+  return bytesToHex(payoutVtxo(candidate, serverKey, exit).pkScript) === bytesToHex(decoded.pkScript)
+    ? candidate
+    : undefined;
 }
 
 function sessionHex(): string {
@@ -209,7 +238,7 @@ function sessionHex(): string {
   return hex;
 }
 
-export async function writerBinding(address: string): Promise<WriterBinding> {
+export async function writerBinding(address: string, pubkey?: string, exit: bigint = EXIT): Promise<WriterBinding> {
   const decoded = ArkAddress.decode(parseWriterAddress(address));
   const { client } = await openSession(SingleKey.fromHex(sessionHex()));
   if (!client.emulatorKey) throw new Error("The emulator key is missing.");
@@ -218,10 +247,12 @@ export async function writerBinding(address: string): Promise<WriterBinding> {
     throw new Error("That address is for a different Arkade server.");
   }
   const payoutKey = xOnly(decoded.vtxoTaprootKey);
+  const signerKey = verifiedSignerKey(decoded.encode(), pubkey, client.serverKey, exit);
   return {
-    pubkey: bytesToHex(payoutKey),
+    pubkey: bytesToHex(signerKey ?? payoutKey),
     pkScript: bytesToHex(decoded.pkScript),
     address: decoded.encode(),
+    signerKey,
     payoutKey,
     serverKey: client.serverKey,
     emulatorKey: client.emulatorKey,
@@ -297,13 +328,13 @@ async function buildPredict(req: FundRequest) {
     throw new Error("A prediction needs a desk quote that names the beacon.");
   }
   if (!req.holderAddress) throw new Error("Paste your Arkade address first.");
-  const binding = await writerBinding(req.holderAddress);
+  const exit = req.exit ?? EXIT;
+  const binding = await writerBinding(req.holderAddress, req.holderPubkey, exit);
   const { client } = await openSession(SingleKey.fromHex(sessionHex()));
-  const holderPk = binding.payoutKey;
+  const holderPk = binding.signerKey ?? binding.payoutKey;
   const writerPk = hexToBytes(req.writerPkHex);
   const beaconTxidHex = req.beaconTxidHex.toLowerCase();
   const beaconGidx = req.beaconGidx ?? 0;
-  const exit = req.exit ?? EXIT;
   const terms: Terms = {
     kind: req.kind,
     strike: req.strike,
@@ -314,7 +345,7 @@ async function buildPredict(req: FundRequest) {
     exit,
     writerPk,
     holderPk,
-    holderPayoutKey: binding.payoutKey,
+    holderPayoutKey: binding.signerKey ? undefined : binding.payoutKey,
     beacon: beaconIdOf(asset.AssetId.create(beaconTxidHex, beaconGidx)),
     readFee: BEACON_READ_FEE,
     serverKey: binding.serverKey,

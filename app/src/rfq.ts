@@ -54,9 +54,10 @@ export async function requestPredictQuotes(input: {
   stake: bigint;
   expiry: bigint;
   holderAddress: string;
+  holderPubkey?: string;
 }): Promise<{ quotes: PredictQuote[]; note: string }> {
   const names = new Map(input.desks.map((desk) => [desk.pubkey, desk.name]));
-  const profile = await writerBinding(input.holderAddress);
+  const profile = await writerBinding(input.holderAddress, input.holderPubkey);
   const request: RfqRequest = {
     v: 1,
     type: "rfq_request",
@@ -115,8 +116,8 @@ export async function requestPredictQuotes(input: {
         deadline: BigInt(quote.profile.deadline),
         exit: EXIT,
         writerPk: hexToBytes(quote.profile.writer_pubkey),
-        holderPk: profile.payoutKey,
-        holderPayoutKey: profile.payoutKey,
+        holderPk: profile.signerKey ?? profile.payoutKey,
+        holderPayoutKey: profile.signerKey ? undefined : profile.payoutKey,
         beacon: beaconIdOf(asset.AssetId.create(quote.profile.beacon_txid, quote.profile.beacon_gidx)),
         readFee: BEACON_READ_FEE,
         serverKey: profile.serverKey,

@@ -6,6 +6,7 @@ import {
   deskPkScript,
   paymentUri,
   readAddress,
+  readPubkey,
   registerIntent,
   saveAddress,
   WALLET_URL,
@@ -49,6 +50,7 @@ const state = {
   points: null,
   loaded: false,
   address: "",
+  pubkey: "",
   view: "predict",
   positions: loadPositions(),
   selected: null,
@@ -130,6 +132,7 @@ function persist() {
     settleCents: p.settleCents || "",
     deskPkHex: p.deskPkHex || "",
     holderAddress: p.holderAddress || "",
+    holderPubkey: p.holderPubkey || "",
     placedCents: p.placedCents || "",
     windowMin: p.windowMin || 0,
     ticks: Array.isArray(p.ticks) ? p.ticks : [],
@@ -404,6 +407,7 @@ async function copyToClipboard(button, text) {
 function connectAddress() {
   try {
     state.address = saveAddress($("account-key").value);
+    state.pubkey = "";
     $("account-error").textContent = "";
     $("account-key").value = "";
     show("predict");
@@ -415,6 +419,7 @@ function connectAddress() {
 function disconnect() {
   clearAddress();
   state.address = "";
+  state.pubkey = "";
   dropBet();
   show("connect");
 }
@@ -429,6 +434,7 @@ async function fundRequest(position) {
     deadline: BigInt(position.deadline),
     writerPkHex: position.deskPkHex,
     holderAddress: position.holderAddress || position.payoutAddress,
+    holderPubkey: position.holderPubkey || undefined,
     beaconTxidHex: position.beaconTxid,
     beaconGidx: position.beaconGidx,
     exit: position.exit != null ? BigInt(position.exit) : undefined,
@@ -666,7 +672,8 @@ function openWallet(position) {
 function applyWalletHandoff(handoff, pending) {
   if (handoff.kind === "connect" && pending === "connect") {
     try {
-      state.address = saveAddress(handoff.address);
+      state.address = saveAddress(handoff.address, handoff.pubkey);
+      state.pubkey = readPubkey() || "";
       walletError(null, "");
     } catch (err) {
       walletError(null, err instanceof Error ? err.message : "That address was not saved.");
@@ -1385,6 +1392,7 @@ async function askBet() {
       stake: asked.stake,
       expiry: asked.expiry,
       holderAddress: state.address,
+      holderPubkey: state.pubkey || undefined,
     });
     if (gen !== betGen) return;
     const quote = live.quotes[0];
@@ -1397,6 +1405,7 @@ async function askBet() {
       expiry: asked.expiry,
       deadline: BigInt(quote.deadline),
       holderAddress: state.address,
+      holderPubkey: state.pubkey || undefined,
       writerPkHex: quote.deskPkHex,
       beaconTxidHex: quote.beaconTxid,
       beaconGidx: quote.beaconGidx,
@@ -1449,6 +1458,7 @@ function placeBet() {
       exit: deposit.exit,
       vaultAddress: deposit.vaultAddress,
       holderAddress: state.address,
+      holderPubkey: state.pubkey || "",
       payoutAddress: state.address,
       placedCents: state.spotCents != null ? state.spotCents.toString() : "",
       windowMin: betWindow(placed.expiry),
@@ -2419,6 +2429,7 @@ function showFromHash(mode = "quiet") {
 }
 
 state.address = readAddress() || "";
+state.pubkey = readPubkey() || "";
 window.addEventListener("message", onWalletMessage);
 if (!consumeWalletHandoff()) {
   bind();
