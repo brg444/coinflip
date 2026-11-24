@@ -847,7 +847,14 @@ button.chip:not(:disabled):hover { transform: translateY(-1px); }
  * from the screen, 32px corners, a handle, a scrim. Positions are pages.
  * Buttons rest on a 3px ledge, as the wallet's do.
  * ------------------------------------------------------------------------- */
-.pv-scrim, .sheet-close, .chart-fold, .prow .money, #positions-sub { display: none; }
+.pv-scrim, .sheet-close, .sheet-x, .chart-fold, .prow .money, #positions-sub { display: none; }
+/* Home-screen app: the mark that follows a pull from the top and reloads past it. */
+.pull { position: fixed; top: calc(10px + env(safe-area-inset-top)); left: 50%; z-index: 60; display: grid; place-items: center; width: 36px; height: 36px; border-radius: 50%; background: var(--card); color: var(--purple); box-shadow: var(--pop-shadow), inset 0 0 0 1px var(--card-edge); opacity: 0; transform: translate(-50%, -48px); pointer-events: none; }
+.pull svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.pull.ready { background: var(--face); color: #fffdf8; }
+.pull.spinning svg { animation: spin 700ms linear infinite; }
+/* iOS only sends a tap on a plain element to the page when it looks clickable. */
+.scrim { cursor: pointer; }
 .plist-head { margin: 18px 0 2px; color: var(--muted); font: 500 11.5px/1.4 var(--mono); letter-spacing: .08em; text-transform: uppercase; }
 
 :root { --face: #381993; --face-press: #2f1585; --face-ledge: #23105f; --well: #f4f2f8; --handle: #e4e1ea; }
@@ -879,7 +886,7 @@ button.chip:not(:disabled):hover { transform: translateY(-1px); }
     border-radius: 32px;
     background: var(--card);
     color: var(--ink);
-    animation: sheet-in 380ms var(--ease-out) both;
+    animation: sheet-in 380ms var(--ease-out) backwards;
   }
   .pop::before, .drawer::before, #home.sheet-open .pv-sheet::before {
     content: "";
@@ -893,28 +900,24 @@ button.chip:not(:disabled):hover { transform: translateY(-1px); }
   }
   @keyframes sheet-in { from { transform: translate3d(0, 105%, 0); } }
   .scrim { animation: fade 200ms var(--ease-out); }
-  .drawer .back, #home.sheet-open .sheet-close {
+  /* The handle, a swipe down and the scrim close a drawer; its close button stays for screen readers only. */
+  .drawer .back, #home.sheet-open .sheet-close, .pop .sheet-x {
     position: absolute;
-    top: 14px;
-    right: 14px;
-    z-index: 2;
-    display: grid;
-    place-items: center;
-    width: 36px;
-    height: 36px;
-    margin: 0;
-    border-radius: 50%;
-    background: var(--well);
-    color: var(--ink2);
+    display: block;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+    border: 0;
   }
-  .drawer .back { font-size: 0; }
-  .drawer .back svg { display: none; }
-  .drawer .back::before { content: ""; width: 14px; height: 14px; background: currentColor; -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 14 14'%3E%3Cpath d='M2.5 2.5l9 9M11.5 2.5l-9 9' fill='none' stroke='%23000' stroke-width='1.8'/%3E%3C/svg%3E") center / 14px no-repeat; mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 14 14'%3E%3Cpath d='M2.5 2.5l9 9M11.5 2.5l-9 9' fill='none' stroke='%23000' stroke-width='1.8'/%3E%3C/svg%3E") center / 14px no-repeat; }
-  #home.sheet-open .sheet-close svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.8; }
+  .pop::before, .drawer::before, #home.sheet-open .pv-sheet::before { width: 40px; }
 
   /* A term's list. */
-  .pop { overflow: auto; padding: 22px 20px 20px; box-shadow: 0 0 0 100vmax var(--scrim); }
-  .pop .q { padding-right: 8px; font-size: 19px; }
+  .pop { overflow: auto; overscroll-behavior: contain; padding: 22px 20px 20px; box-shadow: 0 24px 60px rgba(5, 4, 10, .28); }
+  .pop .q { font-size: 19px; }
   .opts button { min-height: 58px; border-radius: 14px; background: var(--well); }
   .opts .on { background: var(--lav); }
   .opts .off { border-radius: 14px; }
@@ -928,7 +931,7 @@ button.chip:not(:disabled):hover { transform: translateY(-1px); }
   .drawer { display: flex; flex-direction: column; overflow: hidden; padding-top: 22px; box-shadow: 0 24px 60px rgba(5, 4, 10, .28); }
   .drawer .scroll { padding: 6px 20px 16px; }
   .drawer .stick { padding: 14px 20px 18px; }
-  .drawer .said { margin: 0 44px 14px 0; font-size: 19px; line-height: 1.42; }
+  .drawer .said { margin: 0 0 14px; font-size: 19px; line-height: 1.42; }
   .drawer h2 { font-size: 24px; }
   .fee { border-radius: 12px; background: var(--well); }
   .check { border-radius: 14px; background: var(--well); box-shadow: none; }
@@ -940,6 +943,8 @@ button.chip:not(:disabled):hover { transform: translateY(-1px); }
 
   /* Predict: the composer ends at its button. */
   .predict .windows { display: none; }
+  /* Two lines are kept for the note under the price, so the card holds its size as the wording changes. */
+  .market #mkt-sub { min-height: calc(2 * 1.45em); line-height: 1.45; }
 
   /* Positions: predictions in play lead as cards, earlier ones follow as a ruled list. */
   #list-view > .opener { display: none; }
@@ -1004,7 +1009,7 @@ button.chip:not(:disabled):hover { transform: translateY(-1px); }
   #home.sheet-open .pv-scrim { display: block; position: absolute; inset: 0; background: var(--scrim); animation: fade 200ms var(--ease-out); }
   #home.sheet-open .pv-sheet { z-index: 1; overflow: auto; overscroll-behavior: contain; padding: 22px 20px 20px; box-shadow: 0 24px 60px rgba(5, 4, 10, .28); }
   #home.sheet-open .pv-sheet .back { display: none; }
-  #home.sheet-open .sentence.past { margin-right: 44px; font-size: 19px; }
+  #home.sheet-open .sentence.past { font-size: 19px; }
   #home.sheet-open .grid { margin-top: 14px; }
   #home.sheet-open .clock { margin: 16px 0 0; padding: 14px 16px; border-radius: 16px; background: var(--well); font: 500 22px/1.2 var(--mono); letter-spacing: -.03em; }
 }
