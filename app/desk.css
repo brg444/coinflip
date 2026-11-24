@@ -1005,6 +1005,11 @@ body { padding-left: env(safe-area-inset-left); padding-right: env(safe-area-ins
 
   /* Predict: the composer ends at its button. */
   .predict .windows { display: none; }
+  /* The market card on a phone: no label row above the figures. BTC sits in front of the price, and the
+     close time is on the chart itself. */
+  .market .mkt-label { display: none; }
+  .market #mkt-price::before { content: "BTC"; margin-right: 8px; color: var(--muted); font: 500 13px/1 var(--sans); letter-spacing: 0; vertical-align: .32em; }
+  .market #mkt-price, .market #mkt-count { margin-top: 0; }
   /* Two lines are kept for the note under the price, so the card holds its size as the wording changes. */
   .market #mkt-sub { min-height: calc(2 * 1.45em); line-height: 1.45; }
 
