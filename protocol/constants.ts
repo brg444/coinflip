@@ -40,3 +40,7 @@ export const STAKE_MAX = 1_000_000n;
 export const PREDICT_EDGE = 0.05;
 export const MULTIPLIER_MIN = 1.05;
 export const MULTIPLIER_MAX = 10;
+export const PREDICT_VOID_AFTER = 86_400n;
+// BIP68 512s units: ~6.1h primary response window before Tier 2 backup, +~1h buffer to Tier 3 2-of-2.
+export const PREDICT_FALLBACK_DELAY = 22_016n;
+export const PREDICT_FINAL_EXIT_DELAY = 25_600n;

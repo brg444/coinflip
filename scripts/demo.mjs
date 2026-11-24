@@ -212,10 +212,12 @@ async function oracleUp(key) {
 }
 
 async function deskUp(key, beacon) {
+  const backupPubkey = process.env.BACKUP_EMULATOR_PUBKEY?.trim().toLowerCase();
   start("desk", "desk/main.ts", {
     DESK_KEY: key.deskKey,
     BEACON_TXID: beacon.issueTxid,
     ORACLE_URL: oracleUrl,
+    ...(backupPubkey ? { BACKUP_EMULATOR_PUBKEY: backupPubkey } : {}),
     DESK_RATCHET_MARGIN_S: process.env.DESK_RATCHET_MARGIN_S?.trim() || String(5 * 86_400),
     DATA_DIR: path.join(home, "desk"),
     PORT: String(PORTS.desk),
@@ -260,7 +262,11 @@ function buildPage(key, beacon) {
     ? { pubkeys: beacon.pubkeys, assetId: beacon.assetId, issueTxid: beacon.issueTxid, address: beacon.address, args: beacon.args }
     : null;
   const pubkey = getPublicKey(Uint8Array.from(Buffer.from(key.deskKey, "hex")));
-  writeFileSync(config, JSON.stringify({ desks: [{ name: "Demo desk", pubkey }], beacon: status, setup: true }, null, 2));
+  const backupPubkey = process.env.BACKUP_EMULATOR_PUBKEY?.trim().toLowerCase();
+  writeFileSync(
+    config,
+    JSON.stringify({ desks: [{ name: "Demo desk", pubkey }], beacon: status, setup: true, ...(backupPubkey ? { backupPubkey } : {}) }, null, 2),
+  );
   const built = spawnSync(process.execPath, [path.join(root, "scripts/build.mjs")], {
     cwd: root,
     env: { ...process.env, COINFLIP_DEMO: config, OUT_DIR: path.join(home, "site") },

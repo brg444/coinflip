@@ -11,7 +11,16 @@ import { base64, hex } from "@scure/base";
 
 import { beaconIdOf, bindBeacon, decodeState, genesisState, nextState, priceValue, statePacketOf } from "../protocol/beacon.ts";
 import { centsOf, intentSigned, SCALE, type DiaIntent } from "../protocol/dia.ts";
-import { BEACON_READ_FEE, EXIT, OPTION_VAULT_PROGRAM_ID, PAIR, PREDICT_VAULT_PROGRAM_ID } from "../protocol/constants.ts";
+import {
+  BEACON_READ_FEE,
+  EXIT,
+  OPTION_VAULT_PROGRAM_ID,
+  PAIR,
+  PREDICT_FALLBACK_DELAY,
+  PREDICT_FINAL_EXIT_DELAY,
+  PREDICT_VAULT_PROGRAM_ID,
+  PREDICT_VOID_AFTER,
+} from "../protocol/constants.ts";
 import { bindContracts } from "../protocol/contracts.ts";
 import { statePacket } from "../protocol/cospend.ts";
 import { bytesToHex } from "../protocol/hex.ts";
@@ -680,6 +689,11 @@ test("publishAnnounced requires a derived vault address funded to at least colla
     writer_pk_script: bytesToHex(bound.writerPkScript),
     holder_pubkey: bytesToHex(bettorPk),
     holder_pk_script: bytesToHex(bound.holderPkScript),
+    stake: "50000",
+    backup_pubkey: bytesToHex(emulatorKey.subarray(1)),
+    void_after: Number(PREDICT_VOID_AFTER),
+    fallback_delay: Number(PREDICT_FALLBACK_DELAY),
+    final_exit_delay: Number(PREDICT_FINAL_EXIT_DELAY),
     beacon_txid: ourTxid,
     beacon_gidx: 0,
     vault_address: vaultAddress,

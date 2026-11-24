@@ -62,6 +62,10 @@ export type OptionQuoteProfile = QuoteBinding & {
 export type PredictQuoteProfile = QuoteBinding & {
   writer_pubkey: string;
   writer_pk_script: string;
+  backup_pubkey: string;
+  void_after: number;
+  fallback_delay: number;
+  final_exit_delay: number;
 };
 
 export type QuoteProfile = OptionQuoteProfile | PredictQuoteProfile;
@@ -134,6 +138,11 @@ export type OptionPosition = {
   holder_pubkey: string;
   /** Predict only: the bettor's Arkade address script, which the payout pays. */
   holder_pk_script?: string;
+  stake?: string;
+  backup_pubkey?: string;
+  void_after?: number;
+  fallback_delay?: number;
+  final_exit_delay?: number;
   beacon_txid: string;
   beacon_gidx: number;
   vault_address: string;
@@ -219,6 +228,10 @@ function parseRequest(body: Record<string, unknown>): RfqRequest | null {
   };
 }
 
+function bip68Delay(value: unknown, min: number): value is number {
+  return int(value, 0xffff * 512) && value >= min && value > 0 && value % 512 === 0;
+}
+
 function parseQuote(body: Record<string, unknown>): RfqQuote | null {
   const profile = record(body.profile);
   if (!profile) return null;
@@ -250,11 +263,19 @@ function parseQuote(body: Record<string, unknown>): RfqQuote | null {
     valid_until: body.valid_until,
   };
   if (writer) {
+    if (!hex64(profile.backup_pubkey) || profile.backup_pubkey === profile.writer_pubkey) return null;
+    if (!int(profile.void_after, 30 * 86_400) || profile.void_after <= 0) return null;
+    if (!bip68Delay(profile.fallback_delay, profile.exit)) return null;
+    if (!bip68Delay(profile.final_exit_delay, profile.fallback_delay + 512)) return null;
     return {
       ...quote,
       profile: {
         writer_pubkey: profile.writer_pubkey as string,
         writer_pk_script: profile.writer_pk_script as string,
+        backup_pubkey: profile.backup_pubkey,
+        void_after: profile.void_after,
+        fallback_delay: profile.fallback_delay,
+        final_exit_delay: profile.final_exit_delay,
         ...binding,
       },
     };
@@ -297,13 +318,38 @@ export function parsePosition(value: unknown): OptionPosition | null {
   const program_id = readProgramId(body.program_id, body.kind);
   if (!program_id) return null;
   // A predict payout goes to the bettor's own address, so the settler needs its script.
-  if (isPredict(body.kind) && !script(body.holder_pk_script)) return null;
-  if (!isPredict(body.kind) && body.holder_pk_script !== undefined) return null;
+  const predict = isPredict(body.kind);
+  if (predict && !script(body.holder_pk_script)) return null;
+  if (!predict && body.holder_pk_script !== undefined) return null;
   if (!amount(body.collateral) || !amount(body.strike)) return null;
   if (!int(body.expiry, 4_000_000_000) || !int(body.exit, 4_000_000_000)) return null;
   if (!hex64(body.writer_pubkey) || !script(body.writer_pk_script)) return null;
   if (!hex64(body.holder_pubkey) || !hex64(body.beacon_txid) || !int(body.beacon_gidx, 65_535)) return null;
   if (!address(body.vault_address) || !hex64(body.fill_txid)) return null;
+  let predictFields: Pick<OptionPosition, "holder_pk_script" | "stake" | "backup_pubkey" | "void_after" | "fallback_delay" | "final_exit_delay"> = {};
+  if (predict) {
+    if (!amount(body.stake) || BigInt(body.stake) <= DUST_SATS) return null;
+    if (!hex64(body.backup_pubkey) || body.backup_pubkey.toLowerCase() === body.writer_pubkey.toLowerCase()) return null;
+    if (!int(body.void_after, 30 * 86_400) || body.void_after <= 0) return null;
+    if (!bip68Delay(body.fallback_delay, body.exit)) return null;
+    if (!bip68Delay(body.final_exit_delay, body.fallback_delay + 512)) return null;
+    predictFields = {
+      holder_pk_script: (body.holder_pk_script as string).toLowerCase(),
+      stake: body.stake,
+      backup_pubkey: body.backup_pubkey.toLowerCase(),
+      void_after: body.void_after,
+      fallback_delay: body.fallback_delay,
+      final_exit_delay: body.final_exit_delay,
+    };
+  } else if (
+    body.stake !== undefined
+    || body.backup_pubkey !== undefined
+    || body.void_after !== undefined
+    || body.fallback_delay !== undefined
+    || body.final_exit_delay !== undefined
+  ) {
+    return null;
+  }
   return {
     v: 1,
     type: "option_position",
@@ -318,7 +364,7 @@ export function parsePosition(value: unknown): OptionPosition | null {
     writer_pubkey: body.writer_pubkey.toLowerCase(),
     writer_pk_script: body.writer_pk_script.toLowerCase(),
     holder_pubkey: body.holder_pubkey.toLowerCase(),
-    ...(isPredict(body.kind) ? { holder_pk_script: (body.holder_pk_script as string).toLowerCase() } : {}),
+    ...predictFields,
     beacon_txid: body.beacon_txid.toLowerCase(),
     beacon_gidx: body.beacon_gidx,
     vault_address: body.vault_address,

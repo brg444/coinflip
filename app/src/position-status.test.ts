@@ -69,4 +69,12 @@ test("splitPayouts recognizes a 0-user-payout settlement when deskScript matches
     { amount: 69000n, script: WRITER },
   ], WRITER, DESK);
   assert.deepEqual(partial, { writer: 69000n, desk: 30000n });
+
+  const voided = splitPayouts([
+    { amount: 20000n, script: WRITER },
+    { amount: 18000n, script: DESK },
+    { amount: 0n, script: "6a00" },
+    { amount: 0n, script: "51024e73" },
+  ], WRITER, DESK);
+  assert.deepEqual(voided, { writer: 20000n, desk: 18000n });
 });

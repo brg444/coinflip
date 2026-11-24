@@ -47,6 +47,10 @@ export type FundRequest = {
   holderPubkey?: string;
   /** Predict: the desk's key. */
   writerPkHex?: string;
+  backupPkHex?: string;
+  voidAfter?: bigint;
+  fallbackDelay?: bigint;
+  finalExitDelay?: bigint;
   /** Display txid of the beacon identity asset, from the desk's quote. Required to build a vault. */
   beaconTxidHex?: string;
   beaconGidx?: number;
@@ -346,6 +350,10 @@ async function buildPredict(req: FundRequest) {
     writerPk,
     holderPk,
     holderPayoutKey: binding.signerKey ? undefined : binding.payoutKey,
+    backupPk: req.backupPkHex ? hexToBytes(req.backupPkHex) : undefined,
+    voidAfter: req.voidAfter,
+    fallbackDelay: req.fallbackDelay,
+    finalExitDelay: req.finalExitDelay,
     beacon: beaconIdOf(asset.AssetId.create(beaconTxidHex, beaconGidx)),
     readFee: BEACON_READ_FEE,
     serverKey: binding.serverKey,

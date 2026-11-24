@@ -9,7 +9,7 @@ import {
   RestIndexerProvider,
 } from "@arkade-os/sdk";
 
-import { ARK_URL, DEFAULT_RELAYS, EMULATOR_URL } from "../protocol/constants.ts";
+import { ARK_URL, DEFAULT_RELAYS, EMULATOR_URL, isPredict, PREDICT_VOID_AFTER } from "../protocol/constants.ts";
 import { bytesToHex } from "../protocol/hex.ts";
 import { networkByName } from "../protocol/network.ts";
 import { bindContracts } from "../protocol/contracts.ts";
@@ -20,7 +20,7 @@ import { chooseSample } from "../oracle/store.ts";
 import { fetchOraclePrices, fetchOracleStatus, parseOracleBeacon, serviceOrigin } from "./oracle.ts";
 import { duePositions, manualPositions, publishOutcome, publishReady, settlementPositions, termsFor } from "./positions.ts";
 import { Progress } from "./progress.ts";
-import { settleQuote } from "./vault.ts";
+import { refundQuote, settleQuote } from "./vault.ts";
 
 /**
  * A third party. It watches public filled-vault events on nostr.arkade.sh and
@@ -157,6 +157,41 @@ function onPosition(position: OptionPosition) {
   });
 }
 
+async function tryVoid(
+  position: ReturnType<typeof settlementPositions>[number],
+  terms: ReturnType<typeof termsFor>,
+  now: number,
+): Promise<boolean> {
+  if (!isPredict(position.kind)) return false;
+  const voidAfter = Number(position.voidAfter ?? PREDICT_VOID_AFTER);
+  if (now < position.expiry + voidAfter) return false;
+  try {
+    const outcome = await refundQuote({
+      chain: client.indexer!,
+      serverKey: client.serverKey,
+      emulatorKey: client.emulatorKey!,
+      emulator: client.emulator!,
+      checkpoint: client.checkpoint,
+      fillTxid: position.fillTxid,
+      terms,
+      now,
+    });
+    if (outcome.result === "refunded" || outcome.result === "spent") {
+      progress.note(position.id, outcome.txid);
+      try {
+        await progress.save();
+      } catch (err) {
+        console.error("progress save", position.rfqId, err instanceof Error ? err.message : err);
+      }
+      console.log("voided", position.rfqId, outcome.txid);
+      return true;
+    }
+  } catch (err) {
+    console.error(`void ${position.rfqId} ${position.expiry} ${err instanceof Error ? err.message : err}`);
+  }
+  return false;
+}
+
 /**
  * One settle per pass. Filled vaults share one beacon coin, so the next vault
  * has to read the outpoint the previous settle created.
@@ -205,7 +240,10 @@ async function progressDue() {
     let expected: { price: bigint; time: bigint } | undefined;
     if (hasLiveVault) {
       const published = await askPublish(position.expiry, nowMs);
-      if (published === "failed") continue;
+      if (published === "failed") {
+        if (await tryVoid(position, terms, now)) return;
+        continue;
+      }
       if (published === "fixed") {
         try {
           const samples = await fetchOraclePrices(
@@ -258,6 +296,7 @@ async function progressDue() {
         continue;
       }
       if (outcome.result === "unfixed") {
+        if (await tryVoid(position, terms, now)) return;
         console.error(`publish ${position.expiry} unfixed`);
         continue;
       }

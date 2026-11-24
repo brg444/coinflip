@@ -30,7 +30,7 @@ import { intentProgram, predictVaultProgram, vaultProgram } from "../protocol/pr
 import { openSqliteStorage } from "../protocol/sqlite-storage.ts";
 import { createOracle } from "../oracle/service.ts";
 import { parseOracleBeacon } from "../settle/oracle.ts";
-import { settleQuote } from "../settle/vault.ts";
+import { refundQuote, settleQuote } from "../settle/vault.ts";
 
 /**
  * Option covenant on a local arkade-regtest stack (bitcoin regtest + arkd + emulator).
@@ -352,6 +352,8 @@ test("a prediction fills from the desk float, pays the bettor above the line, an
     };
     const fill = bindContracts({ ...shared, deadline: now + 3_600n });
     const cancel = bindContracts({ ...shared, deadline: now + 45n });
+    const voidTerms = { ...shared, expiry: now + 50n, voidAfter: 5n, deadline: now + 3_600n };
+    const voidFill = bindContracts(voidTerms);
     const deskScript = payoutVtxo(deskPk, serverKey, EXIT);
     assert.equal(bytesToHex(fill.writerPkScript), bytesToHex(deskScript.pkScript));
     assert.equal(bytesToHex(fill.holderPkScript), bytesToHex(bettorVtxo.pkScript));
@@ -362,13 +364,16 @@ test("a prediction fills from the desk float, pays the bettor above the line, an
     arkSend(regtestDir, [
       { to: fill.intentAddress, amount: Number(stake) },
       { to: cancel.intentAddress, amount: Number(stake) },
-      { to: deskAddress, amount: Number(payout) },
+      { to: voidFill.intentAddress, amount: Number(stake) },
+      { to: deskAddress, amount: Number(payout * 2n + 2_000n) },
     ]);
     const fillIntent = deskClient.contract(intentProgram(), fill.intent);
     const cancelIntent = bettorClient.contract(intentProgram(), cancel.intent);
+    const voidIntent = deskClient.contract(intentProgram(), voidFill.intent);
     await waitFor(async () => (await fillIntent.getUtxos()).some((coin) => BigInt(coin.value) >= stake), "stake");
     await waitFor(async () => (await cancelIntent.getUtxos()).some((coin) => BigInt(coin.value) >= stake), "unfilled stake");
-    await waitFor(async () => (await scriptCoins(indexer, deskScript.pkScript)).some((coin) => BigInt(coin.value) >= payout), "desk float");
+    await waitFor(async () => (await voidIntent.getUtxos()).some((coin) => BigInt(coin.value) >= stake), "void stake");
+    await waitFor(async () => (await scriptCoins(indexer, deskScript.pkScript)).some((coin) => BigInt(coin.value) >= payout * 2n), "desk float");
 
     const deskBefore = ids(await scriptCoins(indexer, deskScript.pkScript));
     const row: QuoteRow = {
@@ -394,6 +399,43 @@ test("a prediction fills from the desk float, pays the bettor above the line, an
     const vault = deskClient.contract(predictVaultProgram(), fill.vault);
     await waitFor(async () => (await vault.getUtxos()).some((coin) => BigInt(coin.value) === payout), "predict vault");
     await waitFor(async () => fresh(await scriptCoins(indexer, deskScript.pkScript), deskBefore, stake), "stake to the desk");
+    await waitFor(async () => (await scriptCoins(indexer, deskScript.pkScript)).some((coin) => BigInt(coin.value) >= payout), "desk float for void");
+
+    const voidRow: QuoteRow = {
+      ...quoteRow(voidFill, now, Number(now + 3_600n), deskPk, bettorKey, issueTxid),
+      rfqId: "fe".repeat(32),
+      collateral: payout.toString(),
+      premium: stake.toString(),
+      kind: 2,
+      strike: line.toString(),
+      expiry: Number(voidTerms.expiry),
+      writerPkScript: bytesToHex(voidFill.writerPkScript),
+      holderPkScript: bytesToHex(voidFill.holderPkScript),
+    };
+    const voidFilled = await fillQuote({
+      client: deskClient,
+      deskScript,
+      row: voidRow,
+      now: Number(now),
+      ark: deskClient.arkProvider as RestArkProvider,
+      termsFor: () => voidTerms,
+    });
+    console.log("predict void finalize", voidFilled.result, voidFilled.txid ?? "");
+    assert.equal(voidFilled.result, "filled", `void finalize ${voidFilled.result}`);
+    const voidVault = deskClient.contract(predictVaultProgram(), voidFill.vault);
+    await waitFor(async () => (await voidVault.getUtxos()).some((coin) => BigInt(coin.value) === payout), "predict void vault");
+
+    const earlyVoid = await refundQuote({
+      chain: indexer,
+      serverKey,
+      emulatorKey: bettorClient.emulatorKey!,
+      emulator,
+      checkpoint: deskClient.checkpoint,
+      fillTxid: voidFilled.txid,
+      terms: voidTerms,
+      now: Number(voidTerms.expiry),
+    });
+    assert.deepEqual(earlyVoid, { result: "waiting", reason: "early" });
 
     const cancelCoin = (await cancelIntent.getUtxos()).find((coin) => BigInt(coin.value) >= stake);
     assert.ok(cancelCoin, "unfilled stake missing");
@@ -406,6 +448,36 @@ test("a prediction fills from the desk float, pays the bettor above the line, an
       .send();
     console.log("predict refund", refunded.txid);
     await waitFor(async () => fresh(await scriptCoins(indexer, cancel.userPkScript), bettorAtCancel, stake), "refund");
+
+    await sleepUntil(Number(voidTerms.expiry + voidTerms.voidAfter) + 2, "predict void refund");
+    const bettorBeforeVoid = ids(await scriptCoins(indexer, voidFill.holderPkScript));
+    const deskBeforeVoid = ids(await scriptCoins(indexer, deskScript.pkScript));
+    let voided: Awaited<ReturnType<typeof refundQuote>> | undefined;
+    for (let attempt = 1; attempt <= 10; attempt += 1) {
+      try {
+        voided = await refundQuote({
+          chain: indexer,
+          serverKey,
+          emulatorKey: bettorClient.emulatorKey!,
+          emulator,
+          checkpoint: deskClient.checkpoint,
+          fillTxid: voidFilled.txid,
+          terms: voidTerms,
+          now: Math.floor(Date.now() / 1000),
+        });
+        console.log("predict void", voided.result, "txid" in voided ? voided.txid : "", `(${attempt})`);
+        if (voided.result === "refunded") break;
+      } catch (err) {
+        console.log("predict void retry", err instanceof Error ? err.message : String(err), `(${attempt})`);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 2_000));
+    }
+    assert.ok(voided && voided.result === "refunded", `void ${voided?.result}`);
+    assert.equal(voided.holder, stake);
+    assert.equal(voided.writer, payout - stake);
+    await waitFor(async () => fresh(await scriptCoins(indexer, voidFill.holderPkScript), bettorBeforeVoid, stake), "void stake back");
+    await waitFor(async () => fresh(await scriptCoins(indexer, deskScript.pkScript), deskBeforeVoid, payout - stake), "void house share");
+    await waitFor(async () => (await voidVault.getUtxos()).length === 0, "predict void vault spent");
 
     const expiryLag = Number(parsed.beacon.expiryLag);
     await sleepUntil(Number(expiry), "predict sample");
@@ -579,8 +651,12 @@ function holdsUnit(coin: { assets?: readonly { assetId?: string; amount?: bigint
 async function fetchWindowIntent(expiry: number, expiryLag: number) {
   const deadline = expiry + expiryLag;
   while (Math.floor(Date.now() / 1000) <= deadline) {
-    const intent = await fetchPinnedIntent();
-    if (intent.time >= expiry && intent.time <= deadline) return intent;
+    try {
+      const intent = await fetchPinnedIntent();
+      if (intent.time >= expiry && intent.time <= deadline) return intent;
+    } catch (err) {
+      console.log("dia retry", err instanceof Error ? err.message : String(err));
+    }
     await new Promise((resolve) => setTimeout(resolve, 3_000));
   }
   throw new Error("DIA timestamp is outside the expiry window");

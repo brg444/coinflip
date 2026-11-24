@@ -10,11 +10,15 @@ contract PredictVault(
   ScriptPubKey holderScript,
   int strike,
   int collateral,
+  int stake,
   int expiry,
   bytes32 beaconTxid,
   int beaconGidx,
   int readFee,
-  int exit
+  pubkey backupPk,
+  int voidAfter,
+  int fallbackDelay,
+  int finalExitDelay
 ) {
   const int DUST = 330;
   const int PRICE_MAX = 1000000000;
@@ -94,13 +98,44 @@ contract PredictVault(
     }
   }
 
+  function refund() {
+    require(voidAfter > 0, "voidAfter");
+    require(checkTime(expiry + voidAfter), "too early to void");
+    require(this.activeInputIndex == 0 && tx.numInputs == 1, "vault only");
+    require(stake > DUST, "stake");
+    require(stake <= Q_MAX, "stake cap");
+    int locked = tx.input.current.value;
+    require(locked >= stake, "underfunded");
+    int house = locked - stake;
+    require(tx.outputs[0].script == holderScript, "holder script");
+    if (house > DUST) {
+      require(tx.outputs[0].value >= stake, "stake back");
+      require(tx.outputs[1].script == writerScript, "writer script");
+      require(tx.outputs[1].value >= house, "house share");
+    }
+    if (house <= DUST) {
+      require(tx.outputs[0].value >= locked, "stake back");
+    }
+  }
+
+  function reboard() {
+    require(tx.version == 2, "intent only");
+    require(this.activeInputIndex >= 1, "intent input");
+    require(this.tunnel(this.activeInputIndex - 1), "same position");
+  }
+
   function close(signature writerSig, signature holderSig) {
     require(checkSig(writerSig, writerPk), "writer");
     require(checkSig(holderSig, holderPk), "holder");
   }
 
-  function unilateral(signature writerSig) tapscript {
-    require(older(exit));
-    require(checkSig(writerSig, writerPk));
+  function refundBackup(signature backupSig) tapscript {
+    require(older(fallbackDelay));
+    require(checkSig(backupSig, tweak(backupPk, refund)));
+  }
+
+  function unilateral(signature writerSig, signature holderSig) tapscript {
+    require(older(finalExitDelay));
+    require(checkMultisig([writerPk, holderPk], [writerSig, holderSig]));
   }
 }
