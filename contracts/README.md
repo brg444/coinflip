@@ -23,6 +23,8 @@ Cash-settled options and short-window binary predictions on Arkade. The compiler
 Constructor: `kind`, `writerPk`, `holderPk`, `writerScript`, `holderScript`, `strike`, `collateral`, `stake`, `expiry`, `beaconTxid`, `beaconGidx`, `readFee`, `backupPk`, `voidAfter`, `fallbackDelay`, `finalExitDelay`.
 
 > **Mainnet note:** On Mutinynet, if `BACKUP_EMULATOR_PUBKEY` / `PINNED_BACKUP_PUBKEY` is unset, the desk and page fall back to the primary emulator key as a placeholder. On Bitcoin mainnet (`NETWORK=bitcoin`), both the desk and page fail closed unless an independent backup emulator pubkey is explicitly configured, and `exit` / `fallbackDelay` / `finalExitDelay` scale to mainnet `arkd`'s 7-day `unilateralExitDelay` (`605,184s` / `605,184s` / `691,200s`). See `docs/mainnet-runbook.md`.
+>
+> **Tier-2 L1 trust model:** Because Bitcoin L1 does not execute the Arkade VM, the `refundBackup` tapscript leaf enforces only `older(fallbackDelay)` and a Schnorr signature from the script-tweaked `backupPk` (`scripts/backup-refund.ts` signs with that plain key). After `fallbackDelay` (7 days on mainnet), the backup key custodian can spend any still-unsettled vault on L1 and is trusted to sign only valid void refunds.
 
 ## OptionVault
 

@@ -46,7 +46,7 @@ ORACLE_ADMIN=<secret>
 BACKUP_EMULATOR_PUBKEY=<64-hex x-only pubkey>
 ```
 
-Optional overrides: `DESK_STAKE_MAX`, `DESK_STRIKE_CAP`, `DESK_TOTAL_CAP`, `DESK_DRAIN`.
+Optional overrides: `DESK_STAKE_MAX`, `DESK_STRIKE_CAP`, `DESK_TOTAL_CAP`, `DESK_DRAIN`, `BEACON_RENEW_BEFORE_S` (default `432000` / 5 days on mainnet), `ALERT_WEBHOOK_URL` (optional webhook for `[ALERT]` notifications on renewal failure or upcoming `deprecatedSigners` cutoff).
 
 Startup sequence:
 1. Deploy the service. `/demo.json` returns `{ "ok": true, "network": "bitcoin", "stage": "..." }` (setup wizard and wallet balances are not exposed publicly on mainnet).
@@ -58,14 +58,21 @@ Startup sequence:
 
 ### A. Beacon 30-Day Batch Renewal (`reboard` + `reseed`)
 
-Monitor `beaconExpiry` from `http://127.0.0.1:8789/api/status`. When `beaconExpiry - now < 5 days` (and well inside mainnet's free renewal window of `<= 29 days` remaining):
+**Automated renewal (default):** `scripts/demo.mjs` runs `scripts/beacon-renewal.mjs` every 15 minutes. When `beaconExpiry - now <= BEACON_RENEW_BEFORE_S` (default 5 days on mainnet, and inside mainnet's `<= 29` day free renewal window):
 
-1. Enable graceful drain so no new quotes are issued while open positions settle:
+1. It enables graceful drain on the desk (`POST /drain?enabled=1`, preserving any pre-existing manual drain).
+2. It waits (up to 70 minutes) until `quoteCounts.live == 0` and all filled vaults settle. `POST /api/renew` also enforces this directly and refuses with `409 live vault open` while any filled position's vault VTXO is still unspent on the indexer (so recorded prices are never blanked while a vault still needs them).
+3. It renews and reseeds the beacon (`POST /api/renew`), preserving `BEACON_TXID`, incrementing `round`, and preserving monotonic `lastExpiry`.
+4. It always re-enables quoting (`POST /drain?enabled=0`) in `finally` if it enabled drain, and emits `[ALERT]` logs (plus an optional `ALERT_WEBHOOK_URL` POST) if renewal fails, `beaconExpiry == 0`, or an `arkd` `deprecatedSigners` cutoff is within 7 days.
+
+**Manual fallback:** If an alert fires or you need to renew manually:
+
+1. Enable graceful drain:
    ```bash
    curl -X POST -H "Authorization: Bearer $ORACLE_ADMIN" "http://127.0.0.1:8788/drain?enabled=1"
    ```
-2. Wait until `quoteCounts.live == 0` on desk `/status` and all due positions have settled on settler `/status`.
-3. Renew and reseed the beacon in one step (preserves the exact `BEACON_TXID`, increments `round`, and preserves monotonic `lastExpiry`):
+2. Wait until `quoteCounts.live == 0` on desk `/status` and all open vaults have settled.
+3. Renew and reseed the beacon:
    ```bash
    curl -X POST -H "Authorization: Bearer $ORACLE_ADMIN" -H "Content-Type: application/json" -d '{}' http://127.0.0.1:8789/api/renew
    ```
@@ -98,3 +105,5 @@ NETWORK=bitcoin BACKUP_KEY=<offline-64-hex> POSITION_FILE=position.json \
 ```
 
 Broadcast `rawTxHex` to Bitcoin L1 once both `lockTime` (`expiry + voidAfter`) and CSV `sequence` (`fallbackDelay`) are satisfied.
+
+> **Tier-2 trust model disclosure:** Bitcoin L1 cannot evaluate Arkade VM scripts, so after `fallbackDelay` (7 days) the `refundBackup` tapscript leaf checks only `older(fallbackDelay)` and a signature from the script-tweaked `BACKUP_EMULATOR_PUBKEY`. `scripts/backup-refund.ts` signs with that plain backup private key. That key is therefore a single trusted recovery key after 7 days: the page verifies only that it differs from the desk and primary emulator keys, and users trust the independent custodian (Ark Labs for the canary) to sign only valid void refunds.

@@ -609,6 +609,19 @@ export async function createOracle(deps: OracleDeps) {
       let targetPrev = prev;
       let commitmentTxid = "";
       if (needsReboard) {
+        if (deps.announcedPositions) {
+          const ourTxid = bytesToHex(assetId.txid).toLowerCase();
+          const ourGidx = Number(assetId.groupIndex);
+          const allowed = deps.allowedPubkey?.toLowerCase();
+          const matching = [...deps.announcedPositions()].filter((pos) => (
+            pos.beacon_txid.toLowerCase() === ourTxid
+            && pos.beacon_gidx === ourGidx
+            && (!allowed || pos.writer_pubkey.toLowerCase() === allowed || pos.holder_pubkey.toLowerCase() === allowed)
+          ));
+          if (matching.length > 0 && await hasLiveVault(matching)) {
+            throw new HttpError(409, "live vault open");
+          }
+        }
         const opSig = schnorr.sign(
           reboardDigest({ domain: DOMAIN, id: beaconId, outpoint: { txid: internalTxid(coin.txid), vout: coin.vout } }),
           deps.oracleKey,
@@ -738,7 +751,7 @@ export async function createOracle(deps: OracleDeps) {
     }
     for (const [scriptHex, required] of minByScript) {
       const found = await deps.indexer.getVtxos({ scripts: [scriptHex], spendableOnly: true });
-      if ((found.vtxos ?? []).some((coin) => !coin.isSpent && BigInt(coin.value) >= required)) return true;
+      if ((found.vtxos ?? []).some((coin) => !coin.isSpent && !coin.isSwept && BigInt(coin.value) >= required)) return true;
     }
     return false;
   }
@@ -756,9 +769,14 @@ export async function createOracle(deps: OracleDeps) {
           allowedPubkey: deps.allowedPubkey,
         })
       : dueExpiries(deps.announcedExpiries!(), clock, publishedExpiries, Number(EXPIRY_LAG)).map((expiry) => ({ expiry }));
+    const SAMPLE_GRACE_S = 120;
     for (const item of items) {
-      if (!chooseSample(item.expiry)) continue;
       if (item.positions && !(await hasLiveVault(item.positions))) continue;
+      if (!chooseSample(item.expiry)) {
+        // Wait for the DIA sample during the grace window rather than leapfrogging to a later close.
+        if (clock <= item.expiry + Number(EXPIRY_LAG) + SAMPLE_GRACE_S) break;
+        continue;
+      }
       try {
         await publish({ expiry: item.expiry });
         publishedExpiries.add(item.expiry);
@@ -774,8 +792,13 @@ export async function createOracle(deps: OracleDeps) {
           publishedExpiries.add(item.expiry);
           continue;
         }
-        if (skippedPublish(message)) continue;
+        if (skippedPublish(message)) {
+          if (clock <= item.expiry + Number(EXPIRY_LAG) + SAMPLE_GRACE_S) break;
+          continue;
+        }
         console.error(`oracle publish ${item.expiry} ${message || "publish failed"}`);
+        // Never leapfrog a transiently failed earlier close; monotonic expiry order would lock it out.
+        break;
       }
     }
   }

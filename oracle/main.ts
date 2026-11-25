@@ -9,14 +9,14 @@ import {
   Wallet,
 } from "@arkade-os/sdk";
 
-import { DEFAULT_RELAYS } from "../protocol/constants.ts";
+import { DEFAULT_RELAYS, PREDICT_VOID_AFTER } from "../protocol/constants.ts";
 import { bytesToHex, hexToBytes } from "../protocol/hex.ts";
 import type { OptionPosition } from "../protocol/messages.ts";
 import { assertNetworkMatch, networkProfile } from "../protocol/network.ts";
 import { watchPositions } from "../protocol/nostr.ts";
 import { openSqliteStorage } from "../protocol/sqlite-storage.ts";
 import { startDiaFeed } from "./feed.ts";
-import { createOracle, MAX_ANNOUNCE_AGE_S, type OracleWallet } from "./service.ts";
+import { createOracle, type OracleWallet } from "./service.ts";
 
 /**
  *   NETWORK        optional ("bitcoin" | "mutinynet" | "regtest"). Defaults to mutinynet.
@@ -96,10 +96,11 @@ if (wallet) {
 }
 
 const MAX_ANNOUNCED = 2_000;
+const TRACK_AGE_S = Number(PREDICT_VOID_AFTER);
 const announced = new Map<string, OptionPosition>();
 function pruneAnnounced(now = Math.floor(Date.now() / 1000)) {
   for (const [id, pos] of announced) {
-    if (now - pos.expiry > MAX_ANNOUNCE_AGE_S) announced.delete(id);
+    if (now - pos.expiry > TRACK_AGE_S) announced.delete(id);
   }
   while (announced.size > MAX_ANNOUNCED) {
     const oldest = announced.keys().next().value;
@@ -112,7 +113,7 @@ watchPositions({
   onPosition(position) {
     if (deskPubkeyRaw && position.writer_pubkey !== deskPubkeyRaw && position.holder_pubkey !== deskPubkeyRaw) return;
     const now = Math.floor(Date.now() / 1000);
-    if (now - position.expiry > MAX_ANNOUNCE_AGE_S) return;
+    if (now - position.expiry > TRACK_AGE_S) return;
     announced.set(position.rfq_id, position);
     pruneAnnounced(now);
   },
@@ -145,11 +146,6 @@ const oracle = await createOracle({
   announcedPositions: () => {
     pruneAnnounced();
     return announced.values();
-  },
-  onPublishedExpiry: (expiry) => {
-    for (const [id, pos] of announced) {
-      if (pos.expiry === expiry) announced.delete(id);
-    }
   },
 });
 onDiaIntent = (intent) => {

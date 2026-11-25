@@ -18,7 +18,7 @@ import { quoteRelay, watchPositions } from "../protocol/nostr.ts";
 import { revision } from "../protocol/sqlite-storage.ts";
 import { chooseSample } from "../oracle/store.ts";
 import { fetchOraclePrices, fetchOracleStatus, parseOracleBeacon, serviceOrigin } from "./oracle.ts";
-import { duePositions, manualPositions, publishOutcome, publishReady, settlementPositions, termsFor } from "./positions.ts";
+import { canAdvancePastFailedPublish, duePositions, manualPositions, publishOutcome, publishReady, settlementPositions, termsFor } from "./positions.ts";
 import { Progress } from "./progress.ts";
 import { refundQuote, settleQuote } from "./vault.ts";
 
@@ -92,20 +92,23 @@ function once(key: string, line: string, error = false) {
   else console.log(line);
 }
 
-const asked = new Map<number, { at: number; result: "published" | "fixed" | "failed" }>();
+type AskResult = { result: "published" | "fixed" | "failed"; status: number; error?: string };
+const asked = new Map<number, AskResult & { at: number }>();
 const PUBLISH_RETRY_MS = 15_000;
 
-/** Ask once a minute. "no sample" and other failures are logged. 409 still has to match the oracle's sample. */
-async function askPublish(expiry: number, nowMs: number): Promise<"published" | "fixed" | "failed"> {
+/** Ask the oracle to publish `expiry`. Retries every 15s on failure; 409 still verifies against oracle samples. */
+async function askPublish(expiry: number, nowMs: number): Promise<AskResult> {
   const prev = asked.get(expiry);
-  // Retry every 15s: a result is due the moment the window closes, and a miss used to cost a full minute.
-  if (prev && !publishReady(prev.at, nowMs, PUBLISH_RETRY_MS)) return prev.result;
+  if (prev && !publishReady(prev.at, nowMs, PUBLISH_RETRY_MS)) {
+    return { result: prev.result, status: prev.status, error: prev.error };
+  }
   if (!oracleAdmin) {
     once("oracle-admin", "ORACLE_ADMIN unset, so a missing fixing is not published", true);
-    asked.set(expiry, { at: nowMs, result: "failed" });
-    return "failed";
+    const out: AskResult = { result: "failed", status: 0, error: "oracle-admin unset" };
+    asked.set(expiry, { at: nowMs, ...out });
+    return out;
   }
-  let result: "published" | "fixed" | "failed" = "failed";
+  let out: AskResult = { result: "failed", status: 0 };
   try {
     const res = await fetch(`${oracleUrl}/api/publish`, {
       method: "POST",
@@ -114,13 +117,16 @@ async function askPublish(expiry: number, nowMs: number): Promise<"published" | 
       signal: AbortSignal.timeout(20_000),
     });
     const body = res.ok ? {} : (await res.json().catch(() => ({}))) as { error?: string };
-    result = publishOutcome(res.status, body.error);
+    const result = publishOutcome(res.status, body.error);
+    out = { result, status: res.status, error: body.error };
     if (result === "failed") console.error(`publish ${expiry} ${body.error ?? res.status}`);
   } catch (err) {
-    console.error(`publish ${expiry} ${err instanceof Error ? err.message : err}`);
+    const msg = err instanceof Error ? err.message : String(err);
+    out = { result: "failed", status: 0, error: msg };
+    console.error(`publish ${expiry} ${msg}`);
   }
-  asked.set(expiry, { at: nowMs, result });
-  return result;
+  asked.set(expiry, { at: nowMs, ...out });
+  return out;
 }
 
 async function loadManual() {
@@ -224,8 +230,10 @@ async function progressDue() {
 
   const lag = Number(parsed.beacon.expiryLag);
   const nowMs = Date.now();
+  let blockedExpiry: number | null = null;
   for (const position of due) {
     if (position.expiry + lag > now) continue;
+    if (blockedExpiry != null && position.expiry > blockedExpiry) break;
     if (!matchesOurBeacon(position.beaconTxid, position.beaconGidx)) {
       once(`beacon:${position.id}`, `skip ${position.rfqId} beacon mismatch`, true);
       continue;
@@ -244,11 +252,14 @@ async function progressDue() {
     let expected: { price: bigint; time: bigint } | undefined;
     if (hasLiveVault) {
       const published = await askPublish(position.expiry, nowMs);
-      if (published === "failed") {
+      if (published.result === "failed") {
         if (await tryVoid(position, terms, now)) return;
+        if (!canAdvancePastFailedPublish({ status: published.status, error: published.error, expiry: position.expiry, lag, now })) {
+          blockedExpiry = position.expiry;
+        }
         continue;
       }
-      if (published === "fixed") {
+      if (published.result === "fixed") {
         try {
           const samples = await fetchOraclePrices(
             oracleUrl,

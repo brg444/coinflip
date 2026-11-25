@@ -25,6 +25,8 @@ import { createGzip } from "node:zlib";
 
 import { getPublicKey } from "nostr-tools/pure";
 
+import { startBeaconRenewalWatcher } from "./beacon-renewal.mjs";
+
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const home = path.resolve(process.env.COINFLIP_DEMO_DIR?.trim() || path.join(os.homedir(), ".coinflip-demo"));
 const args = new Set(process.argv.slice(2));
@@ -522,6 +524,19 @@ buildPage(key, beacon);
 const desk = await deskUp(key, beacon);
 settlerUp(key);
 void watchSetup();
+const renewBeforeRaw = process.env.BEACON_RENEW_BEFORE_S?.trim();
+const renewalWatcher = startBeaconRenewalWatcher({
+  oracleUrl,
+  deskUrl,
+  oracleAdminToken: key.admin,
+  deskAdminToken: process.env.DESK_ADMIN?.trim() || key.admin,
+  network: netId,
+  isMainnet,
+  ...(renewBeforeRaw && /^[1-9][0-9]*$/.test(renewBeforeRaw) ? { renewBeforeS: Number(renewBeforeRaw) } : {}),
+  alertWebhookUrl: process.env.ALERT_WEBHOOK_URL?.trim() || "",
+  log: say,
+});
+process.on("exit", () => renewalWatcher.stop());
 
 say("");
 say("The demo is running.");

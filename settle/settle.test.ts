@@ -26,7 +26,7 @@ import { statePacket } from "../protocol/cospend.ts";
 import { bytesToHex, hexToBytes } from "../protocol/hex.ts";
 import { parsePosition } from "../protocol/messages.ts";
 import { serviceOrigin, parseOracleBeacon, parseOracleLatest } from "./oracle.ts";
-import { duePositions, manualPositions, positionFromAnnouncement, publishOutcome, publishReady, settlementPositions, termsFor } from "./positions.ts";
+import { canAdvancePastFailedPublish, duePositions, manualPositions, positionFromAnnouncement, publishOutcome, publishReady, settlementPositions, termsFor } from "./positions.ts";
 import { settleQuote, slotPrice, settlePayouts, type ChainCoin } from "./vault.ts";
 
 const CHECKPOINT = "03080040b27520dfcaec558c7e78cf3e38b898ba8a43cfb5727266bae32c5c5b3aeb32c558aa0bac";
@@ -157,6 +157,13 @@ test("a failed publish is not a fixing, and a minute must pass before the same e
   assert.equal(publishReady(0, 60_000), true);
   assert.equal(publishReady(1_000, 1_000 + 59_999), false);
   assert.equal(publishReady(1_000, 1_000 + 60_000), true);
+
+  assert.equal(canAdvancePastFailedPublish({ status: 500, error: "emulator", expiry: EXPIRY, lag: 60, now: EXPIRY + 600 }), false);
+  assert.equal(canAdvancePastFailedPublish({ status: 0, error: "timeout", expiry: EXPIRY, lag: 60, now: EXPIRY + 600 }), false);
+  assert.equal(canAdvancePastFailedPublish({ status: 409, error: "publish in progress", expiry: EXPIRY, lag: 60, now: EXPIRY + 600 }), false);
+  assert.equal(canAdvancePastFailedPublish({ status: 400, error: "no sample", expiry: EXPIRY, lag: 60, now: EXPIRY + 180 }), false);
+  assert.equal(canAdvancePastFailedPublish({ status: 400, error: "no sample", expiry: EXPIRY, lag: 60, now: EXPIRY + 181 }), true);
+  assert.equal(canAdvancePastFailedPublish({ status: 409, error: "expiry order", expiry: EXPIRY, lag: 60, now: EXPIRY + 60 }), true);
 });
 
 test("a positions file accepts one vault, a list, or a positions object", () => {

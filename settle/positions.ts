@@ -124,6 +124,27 @@ export function publishOutcome(status: number, error?: string): "published" | "f
   return "failed";
 }
 
+const PERMANENT_MISSING = new Set(["no sample", "sample before expiry", "sample after close", "expiry grid"]);
+
+/**
+ * Because `AttestationBeacon` requires strictly increasing close times, the settler must not
+ * jump ahead to a newer close after a transient publish failure on an older live close.
+ */
+export function canAdvancePastFailedPublish(input: {
+  status: number;
+  error?: string;
+  expiry: number;
+  lag: number;
+  now: number;
+  graceS?: number;
+}): boolean {
+  if (input.status === 409 && input.error === "expiry order") return true;
+  if (input.status === 400 && input.error && PERMANENT_MISSING.has(input.error)) {
+    return input.now > input.expiry + input.lag + (input.graceS ?? 120);
+  }
+  return false;
+}
+
 export function termsFor(position: WatchPosition, serverKey: Uint8Array, emulatorKey: Uint8Array, readFee = 0n, hrp?: string): Terms {
   return {
     kind: position.kind,
