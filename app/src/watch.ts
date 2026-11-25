@@ -32,6 +32,7 @@ export type PhaseUpdate = {
   fundingTxid: string;
   closeTxid: string;
   settleTxid: string;
+  unrolled?: boolean;
 };
 
 const indexer = new RestIndexerProvider(ARK_URL);
@@ -188,14 +189,17 @@ export async function readIntent(row: WatchRow, now = Math.floor(Date.now() / 10
     }
   }
   let settleTxid = "";
+  let unrolled = false;
   if (outcome.phase === "filled") {
     try {
-      settleTxid = await vaultSpend(row.vaultAddress);
+      const vault = await vaultSpend(row.vaultAddress);
+      settleTxid = vault.settleTxid;
+      unrolled = vault.unrolled;
     } catch {
       settleTxid = "";
     }
   }
-  return { ...outcome, settleTxid };
+  return { ...outcome, settleTxid, unrolled };
 }
 
 async function payoutLanded(writerScript: string, txid: string): Promise<boolean> {
@@ -207,14 +211,19 @@ async function payoutLanded(writerScript: string, txid: string): Promise<boolean
   }
 }
 
-async function vaultSpend(address: string | undefined): Promise<string> {
-  if (!address) return "";
-  const spent = await indexer.getVtxos({ scripts: [pkScriptOf(address)], spentOnly: true });
+async function vaultSpend(address: string | undefined): Promise<{ settleTxid: string; unrolled: boolean }> {
+  if (!address) return { settleTxid: "", unrolled: false };
+  const script = pkScriptOf(address);
+  const [live, spent] = await Promise.all([
+    indexer.getVtxos({ scripts: [script], spendableOnly: true }),
+    indexer.getVtxos({ scripts: [script], spentOnly: true }),
+  ]);
+  const unrolled = (live.vtxos ?? []).some((coin) => Boolean(coin.isUnrolled));
   for (const coin of spent.vtxos ?? []) {
     const id = settlementTxid(coin);
-    if (id) return id;
+    if (id) return { settleTxid: id, unrolled };
   }
-  return "";
+  return { settleTxid: "", unrolled };
 }
 
 function addRow(owners: Map<string, WatchRow[]>, script: string, row: WatchRow) {

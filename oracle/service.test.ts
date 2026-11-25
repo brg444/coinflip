@@ -649,7 +649,7 @@ test("publishAnnounced requires a derived vault address funded to at least colla
   const bettorPk = await SingleKey.fromHex(hex.encode(secret(22))).xOnlyPublicKey();
   const beacon = beaconIdOf(asset.AssetId.create(ourTxid, 0));
   const derive = (exp: number) => bindContracts({
-    kind: 2,
+    kind: 0,
     strike: 8_000_000n,
     collateral: 95_000n,
     premium: 50_000n,
@@ -658,7 +658,6 @@ test("publishAnnounced requires a derived vault address funded to at least colla
     exit: EXIT,
     writerPk: deskPk,
     holderPk: bettorPk,
-    holderPayoutKey: bettorPk,
     beacon,
     readFee: BEACON_READ_FEE,
     serverKey,
@@ -677,10 +676,10 @@ test("publishAnnounced requires a derived vault address funded to at least colla
   const makePos = (rfqByte: string, exp: number, bound: ReturnType<typeof derive>, vaultAddress: string): OptionPosition => ({
     v: 1,
     type: "option_position",
-    program_id: PREDICT_VAULT_PROGRAM_ID,
+    program_id: OPTION_VAULT_PROGRAM_ID,
     rfq_id: rfqByte.repeat(32),
     pair: PAIR,
-    kind: 2,
+    kind: 0,
     collateral: "95000",
     strike: "8000000",
     expiry: exp,
@@ -688,12 +687,6 @@ test("publishAnnounced requires a derived vault address funded to at least colla
     writer_pubkey: bytesToHex(deskPk),
     writer_pk_script: bytesToHex(bound.writerPkScript),
     holder_pubkey: bytesToHex(bettorPk),
-    holder_pk_script: bytesToHex(bound.holderPkScript),
-    stake: "50000",
-    backup_pubkey: bytesToHex(emulatorKey.subarray(1)),
-    void_after: Number(PREDICT_VOID_AFTER),
-    fallback_delay: Number(PREDICT_FALLBACK_DELAY),
-    final_exit_delay: Number(PREDICT_FINAL_EXIT_DELAY),
     beacon_txid: ourTxid,
     beacon_gidx: 0,
     vault_address: vaultAddress,
@@ -782,17 +775,22 @@ test("an intent is stored only when the pinned DIA key signed it", async () => {
   }
 });
 
-test("ingestIntent stores distinct DIA intents immediately and skips before issue", async () => {
+test("ingestIntent stores distinct DIA intents immediately before issue and exposes signed samples", async () => {
   const ctx = await boot({ now: () => RECORDED.time });
   try {
-    await ctx.oracle.ingestIntent(RECORDED);
-    assert.equal((await call(ctx.oracle.url, "/api/status")).json.samples, 0);
-    assert.equal((await call(ctx.oracle.url, "/api/issue", {}, "test-token")).status, 200);
     await ctx.oracle.ingestIntent(RECORDED);
     await ctx.oracle.ingestIntent(RECORDED);
     const status = await call(ctx.oracle.url, "/api/status");
     assert.equal(status.json.samples, 1);
     assert.equal((status.json.latest as { price?: string } | null)?.price, centsOf(RECORDED.price).toString());
+    const res = await fetch(`${ctx.oracle.url}/api/prices?from=${RECORDED.time - 10}&to=${RECORDED.time + 10}&signed=1`);
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { samples: { price: string; time: number; raw?: string; nonce?: string; intentExpiry?: number; sig?: string }[] };
+    assert.equal(body.samples.length, 1);
+    assert.equal(body.samples[0]?.raw, RECORDED.price.toString());
+    assert.equal(body.samples[0]?.nonce, RECORDED.nonce.toString());
+    assert.equal(body.samples[0]?.intentExpiry, RECORDED.intentExpiry);
+    assert.equal(body.samples[0]?.sig, bytesToHex(RECORDED.sig));
   } finally {
     await ctx.close();
   }

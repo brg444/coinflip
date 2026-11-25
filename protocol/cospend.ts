@@ -20,6 +20,7 @@ import { base64 } from "@scure/base";
 
 import { STATE_TYPE } from "./beacon.ts";
 import { DUST_SATS } from "./constants.ts";
+import type { DiaIntent } from "./dia.ts";
 import { bytesToHex } from "./hex.ts";
 
 /**
@@ -160,6 +161,32 @@ export function buildSettle(input: {
     ...input.payouts,
   ];
   return build(spends, outputs, [unitTransfer(input.beacon.id, 1, 0), statePacket(input.beacon.state)], input.checkpoint);
+}
+
+export function buildPredictSettle(input: {
+  vault: { script: ProgramScript; coin: Coin };
+  dia: DiaIntent;
+  payout: { script: Uint8Array; amount: bigint };
+  checkpoint: CSVMultisigTapscript.Type;
+}): Built {
+  if (input.dia.sig.length !== 64) throw new Error("dia signature");
+  return build(
+    [{
+      script: input.vault.script,
+      fn: "settle",
+      callArgs: {
+        rawPrice: input.dia.price,
+        time: BigInt(input.dia.time),
+        nonce: input.dia.nonce,
+        intentExpiry: BigInt(input.dia.intentExpiry),
+        oracleSig: input.dia.sig,
+      },
+      coin: input.vault.coin,
+    }],
+    [input.payout],
+    [],
+    input.checkpoint,
+  );
 }
 
 export function refundOutputs(

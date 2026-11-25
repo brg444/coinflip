@@ -17,6 +17,7 @@ import {
   BEACON_READ_FEE,
   DEFAULT_RELAYS,
   EMULATOR_URL,
+  EXECUTOR_URL,
   EXIT,
   isPredict,
   LOCK_S,
@@ -25,14 +26,19 @@ import {
   PREDICT_FALLBACK_DELAY,
   PREDICT_FINAL_EXIT_DELAY,
   PREDICT_LOCK_S,
+  PREDICT_READ_FEE,
   PREDICT_VOID_AFTER,
   QUOTE_TTL_S,
   vaultProgramId,
 } from "../protocol/constants.ts";
 import { assertServerExit, bindContracts, directPayoutKey, payoutVtxo, type Terms } from "../protocol/contracts.ts";
+import { DIA_PUBKEY } from "../protocol/dia.ts";
+import { cancelIntentDelegation, cancelIntentTemplate, Executor, reboardVaultDelegation, reboardVaultTemplate } from "../protocol/executor.ts";
 import { bytesToHex, hexToBytes, xOnly } from "../protocol/hex.ts";
 import { networkByName } from "../protocol/network.ts";
 import { intentProgram } from "../protocol/programs.ts";
+import intentArtifact from "../contracts/option_intent.artifact.json" with { type: "json" };
+import predictArtifact from "../contracts/predict_vault.artifact.json" with { type: "json" };
 import {
   isPredictRequest,
   beaconWindowRefusal,
@@ -260,13 +266,41 @@ function backupPubkeyFromEnv(defaultKey: Uint8Array, deskKey: Uint8Array): strin
   return hex;
 }
 const backupPubkeyHex = backupPubkeyFromEnv(client.emulatorKey, holderPk);
+const oraclePubkeyHex = bytesToHex(DIA_PUBKEY);
+const executorUrl = process.env.EXECUTOR_URL?.trim() ?? EXECUTOR_URL;
+let executorPromise: Promise<Executor | undefined> | null = null;
+function deskExecutor(): Promise<Executor | undefined> {
+  if (!executorUrl || executorUrl === "none") return Promise.resolve(undefined);
+  if (!executorPromise) {
+    executorPromise = Executor.connect(executorUrl, { serverKey: client.serverKey, emulatorKey: client.emulatorKey! })
+      .catch(() => undefined);
+  }
+  return executorPromise;
+}
+
+async function delegateOffer(row: QuoteRow, bound: ReturnType<typeof bindContracts>) {
+  const exec = await deskExecutor();
+  if (!exec) return;
+  const id = await exec.ensureTemplate("cancel_intent", intentArtifact as arkade.ContractArtifact, cancelIntentTemplate);
+  if (id) await exec.delegate(cancelIntentDelegation(id, bound));
+}
+
+async function delegateFilledVault(row: QuoteRow) {
+  if (!isPredict(row.kind)) return;
+  const exec = await deskExecutor();
+  if (!exec) return;
+  const bound = bindContracts(termsFor(row));
+  const id = await exec.ensureTemplate("reboard_vault", predictArtifact as arkade.ContractArtifact, reboardVaultTemplate);
+  if (id) await exec.delegate(reboardVaultDelegation(id, bound));
+}
 
 let balance = 0n;
 let spot: { cents: bigint; sources: string[] } | null = null;
 let polling = false;
 
-function beaconFromEnv() {
+function beaconFromEnv(): { txid: string; gidx: number } | null {
   const txid = (process.env.BEACON_TXID ?? "").trim().toLowerCase();
+  if (!txid) return null;
   if (!/^[0-9a-f]{64}$/.test(txid)) {
     throw new Error("BEACON_TXID must be the 64-hex display txid of the identity asset");
   }
@@ -276,6 +310,7 @@ function beaconFromEnv() {
 }
 
 function termsFor(row: QuoteRow): Terms {
+  const predict = isPredict(row.kind);
   return {
     kind: row.kind,
     strike: BigInt(row.strike),
@@ -288,11 +323,12 @@ function termsFor(row: QuoteRow): Terms {
     payoutKey: directPayoutKey(row.writerPubkey, row.writerPkScript),
     holderPk: hexToBytes(row.holderPubkey),
     holderPayoutKey: row.holderPkScript ? directPayoutKey(row.holderPubkey, row.holderPkScript) : undefined,
-    beacon: beaconIdOf(asset.AssetId.create(row.beaconTxid, row.beaconGidx)),
-    readFee: BEACON_READ_FEE,
+    ...(!predict && row.beaconTxid ? { beacon: beaconIdOf(asset.AssetId.create(row.beaconTxid, row.beaconGidx ?? 0)) } : {}),
+    readFee: predict ? PREDICT_READ_FEE : BEACON_READ_FEE,
     serverKey: client.serverKey,
     emulatorKey: client.emulatorKey!,
-    ...(isPredict(row.kind) ? {
+    ...(predict ? {
+      oraclePk: hexToBytes(row.oraclePubkey ?? oraclePubkeyHex),
       backupPk: hexToBytes(row.backupPubkey ?? backupPubkeyHex),
       voidAfter: BigInt(row.voidAfter ?? Number(PREDICT_VOID_AFTER)),
       fallbackDelay: BigInt(row.fallbackDelay ?? Number(PREDICT_FALLBACK_DELAY)),
@@ -317,12 +353,12 @@ function quoteMessage(row: QuoteRow): RfqQuote {
       profile: {
         writer_pubkey: row.writerPubkey,
         writer_pk_script: bytesToHex(bound.writerPkScript),
+        oracle_pubkey: row.oraclePubkey ?? oraclePubkeyHex,
         backup_pubkey: row.backupPubkey ?? backupPubkeyHex,
         void_after: row.voidAfter ?? Number(PREDICT_VOID_AFTER),
         fallback_delay: row.fallbackDelay ?? Number(PREDICT_FALLBACK_DELAY),
         final_exit_delay: row.finalExitDelay ?? Number(PREDICT_FINAL_EXIT_DELAY),
-        beacon_txid: row.beaconTxid,
-        beacon_gidx: row.beaconGidx,
+        ...(row.beaconTxid ? { beacon_txid: row.beaconTxid, beacon_gidx: row.beaconGidx ?? 0 } : {}),
         deadline: row.deadline,
         exit: row.exit,
         intent_address: row.intentAddress,
@@ -342,8 +378,8 @@ function quoteMessage(row: QuoteRow): RfqQuote {
     profile: {
       holder_pubkey: row.holderPubkey,
       holder_pk_script: bytesToHex(bound.holderPkScript),
-      beacon_txid: row.beaconTxid,
-      beacon_gidx: row.beaconGidx,
+      beacon_txid: row.beaconTxid!,
+      beacon_gidx: row.beaconGidx ?? 0,
       deadline: row.deadline,
       exit: row.exit,
       intent_address: row.intentAddress,
@@ -446,12 +482,12 @@ async function onPredict(message: RfqRequest & { profile: PredictRequestProfile 
   }
   const stake = BigInt(message.amount);
   const payout = predictPayout(stake, multiplier);
-  const bad = payoutRefusal(payout, stake, BEACON_READ_FEE);
+  const bad = payoutRefusal(payout, stake, PREDICT_READ_FEE);
   if (bad) {
     await refuse(from, message.rfq_id, bad);
     return;
   }
-  const minExpiry = minFillCoinExpiry(message.profile.expiry, beaconExpiry, undefined, ratchetMargin);
+  const minExpiry = minFillCoinExpiry(message.profile.expiry, null, undefined, ratchetMargin);
   if (eligibleFloatBalance(minExpiry) < openPremium(book.list(), now) + payout) await refreshFloat();
   if (eligibleFloatBalance(minExpiry) < openPremium(book.list(), now) + payout) {
     await refuse(from, message.rfq_id, "float short");
@@ -471,12 +507,12 @@ async function onPredict(message: RfqRequest & { profile: PredictRequestProfile 
     writerPkScript: bytesToHex(deskScript.pkScript),
     holderPubkey: message.profile.holder_pubkey,
     holderPkScript: message.profile.holder_pk_script,
+    oraclePubkey: oraclePubkeyHex,
     backupPubkey: backupPubkeyHex,
     voidAfter: Number(PREDICT_VOID_AFTER),
     fallbackDelay: Number(PREDICT_FALLBACK_DELAY),
     finalExitDelay: Number(PREDICT_FINAL_EXIT_DELAY),
-    beaconTxid: beaconDisplay.txid,
-    beaconGidx: beaconDisplay.gidx,
+    ...(beaconDisplay ? { beaconTxid: beaconDisplay.txid, beaconGidx: beaconDisplay.gidx } : {}),
     intentAddress: "",
     vaultAddress: "",
     status: "open",
@@ -495,6 +531,7 @@ async function onPredict(message: RfqRequest & { profile: PredictRequestProfile 
   row.intentAddress = bound.intentAddress;
   row.vaultAddress = bound.vaultAddress;
   await offer(row, from);
+  void delegateOffer(row, bound);
 }
 
 async function onRequest(message: RfqRequest, from: string) {
@@ -511,6 +548,14 @@ async function onRequest(message: RfqRequest, from: string) {
     await refuse(from, message.rfq_id, bad);
     return;
   }
+  if (isPredictRequest(message.profile)) {
+    await onPredict(message as RfqRequest & { profile: PredictRequestProfile }, from, now);
+    return;
+  }
+  if (!beaconDisplay) {
+    await refuse(from, message.rfq_id, "beacon unavailable");
+    return;
+  }
   const lagRefusal = beaconWindowRefusal(beaconExpiryLag);
   if (lagRefusal) {
     await refuse(from, message.rfq_id, lagRefusal);
@@ -519,10 +564,6 @@ async function onRequest(message: RfqRequest, from: string) {
   const expiryRefusal = beaconExpiryRefusal(message.profile.expiry, beaconExpiry);
   if (expiryRefusal) {
     await refuse(from, message.rfq_id, expiryRefusal);
-    return;
-  }
-  if (isPredictRequest(message.profile)) {
-    await onPredict(message as RfqRequest & { profile: PredictRequestProfile }, from, now);
     return;
   }
   const profile = message.profile;
@@ -641,15 +682,17 @@ let oracleSpot: OracleLatest | null = null;
 let oracleStatusAt = 0;
 
 async function refreshOracleStatus(force = false) {
-  if (!force && beaconExpiryLag != null && Date.now() - oracleStatusAt < 10_000) return;
+  if (!force && oracleSpot != null && Date.now() - oracleStatusAt < 10_000) return;
   try {
     const body = await fetchOracleStatus(oracleUrl, AbortSignal.timeout(10_000));
-    const parsed = parseOracleBeacon(body, beaconDisplay.txid, beaconDisplay.gidx);
-    if (parsed.ok) {
-      beaconExpiryLag = parsed.beacon.expiryLag;
-      beaconExpiry = parsed.beacon.beaconExpiry ?? null;
-    } else {
-      beaconExpiry = null;
+    if (beaconDisplay) {
+      const parsed = parseOracleBeacon(body, beaconDisplay.txid, beaconDisplay.gidx);
+      if (parsed.ok) {
+        beaconExpiryLag = parsed.beacon.expiryLag;
+        beaconExpiry = parsed.beacon.beaconExpiry ?? null;
+      } else {
+        beaconExpiry = null;
+      }
     }
     const latest = parseOracleLatest(body);
     if (latest) oracleSpot = latest;
@@ -659,11 +702,11 @@ async function refreshOracleStatus(force = false) {
   }
 }
 await refreshOracleStatus(true);
-if (beaconWindowRefusal(beaconExpiryLag)) {
-  console.error(beaconExpiryLag == null ? "oracle unreachable, quotes refused" : `beacon expiryLag ${beaconExpiryLag}, quotes refused`);
+if (beaconDisplay && beaconWindowRefusal(beaconExpiryLag)) {
+  console.error(beaconExpiryLag == null ? "oracle unreachable, options quotes refused" : `beacon expiryLag ${beaconExpiryLag}, options quotes refused`);
 }
-if (beaconExpiry == null || beaconExpiry <= 0) {
-  console.error(beaconExpiry === 0 ? "beacon coin missing or swept, quotes refused" : "beacon expiry unknown, quotes refused");
+if (beaconDisplay && (beaconExpiry == null || beaconExpiry <= 0)) {
+  console.error(beaconExpiry === 0 ? "beacon coin missing or swept, options quotes refused" : "beacon expiry unknown, options quotes refused");
 }
 
 const transport = connectTransport({ relays, secretKey: secret, onMessage });
@@ -687,13 +730,16 @@ function filledPosition(row: QuoteRow): OptionPosition | null {
     ...(isPredict(row.kind) ? {
       holder_pk_script: row.holderPkScript,
       stake: row.premium,
+      oracle_pubkey: row.oraclePubkey ?? oraclePubkeyHex,
       backup_pubkey: row.backupPubkey ?? backupPubkeyHex,
       void_after: row.voidAfter ?? Number(PREDICT_VOID_AFTER),
       fallback_delay: row.fallbackDelay ?? Number(PREDICT_FALLBACK_DELAY),
       final_exit_delay: row.finalExitDelay ?? Number(PREDICT_FINAL_EXIT_DELAY),
-    } : {}),
-    beacon_txid: row.beaconTxid,
-    beacon_gidx: row.beaconGidx,
+      ...(row.beaconTxid ? { beacon_txid: row.beaconTxid, beacon_gidx: row.beaconGidx ?? 0 } : {}),
+    } : {
+      beacon_txid: row.beaconTxid,
+      beacon_gidx: row.beaconGidx ?? 0,
+    }),
     vault_address: row.vaultAddress,
     fill_txid: row.fillTxid,
   });
@@ -910,7 +956,7 @@ async function pump() {
           now,
           float: [...deskCoins.values()],
           ark,
-          beaconExpiry,
+          beaconExpiry: isPredict(row.kind) ? null : beaconExpiry,
           ratchetMargin,
           checkPredict: checkPredictFill,
         });
@@ -931,6 +977,7 @@ async function pump() {
           // A prediction's stake is paid to the desk, not by it.
           if (fresh) countFill(hour, isPredict(row.kind) ? 0n : BigInt(row.premium), BigInt(row.collateral));
           console.log("filled", row.rfqId, outcome.txid ?? "");
+          void delegateFilledVault(row);
           void announceFilled();
           await refreshFloat();
         } else if (outcome.result === "expired" || outcome.result === "declined") {
@@ -1051,8 +1098,9 @@ function statusBody() {
     pubkey,
     address,
     balance: balance.toString(),
-    beaconTxid: beaconDisplay.txid,
-    beaconGidx: beaconDisplay.gidx,
+    beaconTxid: beaconDisplay?.txid ?? null,
+    beaconGidx: beaconDisplay?.gidx ?? null,
+    oraclePubkey: oraclePubkeyHex,
     beaconExpiry,
     spotCents: spot ? spot.cents.toString() : null,
     spotSources: spot?.sources ?? [],
@@ -1120,7 +1168,8 @@ server.listen(port, () => {
   console.log(`commit ${revision()}`);
   console.log(`desk ${pubkey}`);
   console.log(`address ${address}`);
-  console.log(`beacon ${beaconDisplay.txid}:${beaconDisplay.gidx}`);
+  console.log(`oracle ${oraclePubkeyHex}`);
+  if (beaconDisplay) console.log(`beacon ${beaconDisplay.txid}:${beaconDisplay.gidx}`);
   console.log(`status http://127.0.0.1:${port}/status`);
 });
 

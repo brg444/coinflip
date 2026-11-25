@@ -142,17 +142,44 @@ export function decodeIntent(resultHex: string): DiaIntent {
 }
 
 /** The pinned DIA key signed this intent. A bad signature is false, not an exception. */
-export function intentSigned(intent: DiaIntent): boolean {
-  if (intent.sig.length !== 64) return false;
+export function intentSigned(intent: DiaIntent, oraclePk: Uint8Array = DIA_PUBKEY): boolean {
+  if (intent.sig.length !== 64 || oraclePk.length !== 34 || oraclePk[0] !== 0x10) return false;
   try {
-    return secp256k1.verify(intent.sig, intentDigest(intent), DIA_PUBKEY.subarray(1), { prehash: false }) === true;
+    return secp256k1.verify(intent.sig, intentDigest(intent), oraclePk.subarray(1), { prehash: false, lowS: false }) === true;
   } catch {
     return false;
   }
 }
 
-function accepts(intent: DiaIntent): boolean {
-  return intentSigned(intent);
+export function ethAddressOf(oraclePk: Uint8Array = DIA_PUBKEY): string {
+  const uncompressed = secp256k1.Point.fromBytes(oraclePk.subarray(1)).toBytes(false).subarray(1);
+  return [...keccak_256(uncompressed).subarray(12)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/** Synthetic DIA signer for local regtest and unit tests. */
+export function localFeed(secret: Uint8Array, priceCents: () => bigint): {
+  key: Uint8Array;
+  sign(priceCentsValue: bigint, time: number, nonce?: bigint, intentExpiry?: number): DiaIntent;
+  latest(now?: number): DiaIntent;
+} {
+  const key = concat(Uint8Array.of(0x10), secp256k1.getPublicKey(secret, true));
+  const sign = (cents: bigint, time: number, nonce = BigInt(time), intentExpiry = time + 3_600): DiaIntent => {
+    const price = cents * SCALE;
+    if (price <= 0n) throw new Error("nonpositive price");
+    const sig = secp256k1.sign(intentDigest({ price, time, nonce, intentExpiry }), secret, { prehash: false });
+    return { price, time, nonce, intentExpiry, sig };
+  };
+  return {
+    key,
+    sign,
+    latest(now = Math.floor(Date.now() / 1000)) {
+      return sign(priceCents(), now - 5);
+    },
+  };
+}
+
+function accepts(intent: DiaIntent, oraclePk: Uint8Array = DIA_PUBKEY): boolean {
+  return intentSigned(intent, oraclePk);
 }
 
 async function rpc(method: string, params: unknown[], signal?: AbortSignal): Promise<unknown> {
@@ -197,9 +224,9 @@ export async function fetchLatestIntent(signal?: AbortSignal): Promise<DiaIntent
  * The newest BTC/USD intent the pinned key signed. The registry also stores
  * prints from other authorized signers. Those do not pass `attest`.
  */
-export async function fetchPinnedIntent(signal?: AbortSignal): Promise<DiaIntent> {
+export async function fetchPinnedIntent(signal?: AbortSignal, oraclePk: Uint8Array = DIA_PUBKEY): Promise<DiaIntent> {
   const latest = await fetchLatestIntent(signal);
-  if (accepts(latest)) return latest;
+  if (accepts(latest, oraclePk)) return latest;
   const head = Number(await rpc("eth_blockNumber", [], signal));
   const filter = intentRegisteredFilter();
   const logs = await rpc("eth_getLogs", [{
@@ -209,7 +236,7 @@ export async function fetchPinnedIntent(signal?: AbortSignal): Promise<DiaIntent
     topics: filter.topics,
   }], signal);
   if (!Array.isArray(logs)) throw new Error("dia logs");
-  const want = "10e34723aa722c7a9860f5ec6446f22252db168a"; // DIA's pinned signer address
+  const want = ethAddressOf(oraclePk);
   for (let i = logs.length - 1; i >= 0; i--) {
     const log = logs[i] as { data?: string; topics?: string[] };
     const data = (log.data ?? "").replace(/^0x/, "");
@@ -219,9 +246,48 @@ export async function fetchPinnedIntent(signal?: AbortSignal): Promise<DiaIntent
     const hash = log.topics?.[1];
     if (!hash) continue;
     const intent = await intentByHash(hash, signal);
-    if (accepts(intent)) return intent;
+    if (accepts(intent, oraclePk)) return intent;
   }
   throw new Error("no pinned DIA intent");
+}
+
+/** Find the newest pinned DIA intent inside `[expiry, expiry + expiryLag]` directly from Lasernet logs. */
+export async function findWindowIntent(
+  expiry: number,
+  expiryLag = 60,
+  oraclePk: Uint8Array = DIA_PUBKEY,
+  signal?: AbortSignal,
+): Promise<DiaIntent | null> {
+  const head = Number(await rpc("eth_blockNumber", [], signal));
+  const now = Math.floor(Date.now() / 1000);
+  // Lasernet produces ~3.3 blocks/s; cover back past expiry with margin, capped to a reasonable RPC range.
+  const ageBlocks = Math.max(0, now - expiry) * 4 + 2_000;
+  const fromBlock = Math.max(0, head - Math.min(ageBlocks, 500_000));
+  const filter = intentRegisteredFilter();
+  const logs = await rpc("eth_getLogs", [{
+    address: filter.address,
+    fromBlock: `0x${fromBlock.toString(16)}`,
+    toBlock: "latest",
+    topics: filter.topics,
+  }], signal);
+  if (!Array.isArray(logs)) return null;
+  const want = ethAddressOf(oraclePk);
+  const hi = expiry + expiryLag;
+  for (let i = logs.length - 1; i >= 0; i--) {
+    const log = logs[i] as { data?: string; topics?: string[] };
+    const data = (log.data ?? "").replace(/^0x/, "");
+    if (data.length < 128) continue;
+    const stamp = Number(BigInt(`0x${data.slice(0, 64)}`));
+    if (stamp > hi) continue;
+    if (stamp < expiry) break;
+    const signer = data.slice(64 + 24, 128).toLowerCase();
+    if (signer !== want) continue;
+    const hash = log.topics?.[1];
+    if (!hash) continue;
+    const intent = await intentByHash(hash, signal);
+    if (intent.time >= expiry && intent.time <= hi && accepts(intent, oraclePk)) return intent;
+  }
+  return null;
 }
 
 /** Topic of `IntentRegistered` for symbol `BTC/USD`. Indexed string is keccak256 of the bytes. */

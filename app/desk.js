@@ -7,6 +7,7 @@ import {
   paymentUri,
   readAddress,
   readPubkey,
+  registerExecutorDelegations,
   registerIntent,
   saveAddress,
   WALLET_URL,
@@ -24,11 +25,11 @@ import {
 import { requestPredictQuotes } from "./src/rfq.ts";
 import { btcUsdCents, deribitMultiplier, fetchSurface } from "../protocol/deribit.ts";
 import {
-  BEACON_READ_FEE,
   isPredict,
   PREDICT_GRID_S,
   PREDICT_LOCK_S,
   PREDICT_MIN_LEFT_S,
+  PREDICT_READ_FEE,
   PREDICT_VOID_AFTER,
   QUOTE_TTL_S,
   STAKE_MAX,
@@ -37,8 +38,9 @@ import {
 import { predictPayout } from "../protocol/pricing.ts";
 import { openingSample, WINDOW_LINE_WITHIN_S } from "../protocol/window-line.ts";
 import { PINNED_BACKUP_PUBKEY, PINNED_DESKS, RELAYS } from "./rfq-config.js";
+import { explainError } from "./src/explain.ts";
 import { settlementKnown, usdFromCents } from "./src/position-status.ts";
-import { refundVaultFromPage } from "./src/settle.ts";
+import { reboardVaultFromPage, refundVaultFromPage } from "./src/settle.ts";
 import { addressBalance, pkScriptOf, readIntent, readKept, watchIntents } from "./src/watch.ts";
 
 const STORE = "arkade-options-desk-v1";
@@ -136,6 +138,7 @@ function persist() {
     settleCents: p.settleCents || "",
     fixCents: p.fixCents || "",
     deskPkHex: p.deskPkHex || "",
+    oraclePkHex: p.oraclePkHex || "",
     backupPkHex: p.backupPkHex || "",
     voidAfter: p.voidAfter || 0,
     fallbackDelay: p.fallbackDelay || 0,
@@ -377,7 +380,7 @@ function sendClock(node) {
 
 function canSettle(position) {
   if (position.status !== "filled") return false;
-  if (!position.vaultAddress || !position.deskPkHex || !position.beaconTxid) return false;
+  if (!position.vaultAddress || !position.deskPkHex) return false;
   const expiry = Number(position.expiry) || 0;
   if (!expiry || expiry > Math.floor(Date.now() / 1000)) return false;
   if (position.settleTxid && position.settleTxid !== position.closeTxid) return false;
@@ -415,7 +418,7 @@ async function voidRefundPosition(position, button) {
   } catch (err) {
     button.disabled = false;
     button.textContent = "Try again";
-    renderStatus($("status"), "Couldn’t refund yet. Try again in a moment.", err instanceof Error ? err.message : "refund failed");
+    renderStatus($("status"), explainError("refund", err), err instanceof Error ? err.message : "refund failed");
   }
 }
 
@@ -494,6 +497,7 @@ async function fundRequest(position) {
     expiry: position.expiry,
     deadline: BigInt(position.deadline),
     writerPkHex: position.deskPkHex,
+    oraclePkHex: position.oraclePkHex || undefined,
     backupPkHex: position.backupPkHex || undefined,
     voidAfter: position.voidAfter ? BigInt(position.voidAfter) : undefined,
     fallbackDelay: position.fallbackDelay ? BigInt(position.fallbackDelay) : undefined,
@@ -561,7 +565,7 @@ async function refund(position, button) {
     }
     say(["filled", "settled"].includes(position.status)
       ? TOOK_IT
-      : `Couldn’t take it back: ${err instanceof Error ? err.message : "try again in a moment"}.`);
+      : explainError("cancel", err));
   } finally {
     if (button.isConnected) {
       button.disabled = false;
@@ -585,6 +589,21 @@ const CHAIN_STATUS = {
  */
 const FILL_GRACE_S = 45;
 
+const reboarding = new Set();
+
+async function tryReboard(position) {
+  if (!isPredict(position.kind) || !position.deskPkHex || reboarding.has(position.id)) return;
+  reboarding.add(position.id);
+  try {
+    await reboardVaultFromPage({
+      ...(await fundRequest(position)),
+      fillTxid: position.closeTxid || undefined,
+    });
+  } catch {
+    reboarding.delete(position.id);
+  }
+}
+
 function applyChain(position, update) {
   let next = CHAIN_STATUS[update.phase];
   if (!next) return;
@@ -598,6 +617,7 @@ function applyChain(position, update) {
   const closeTxid = update.closeTxid || position.closeTxid || "";
   const settleTxid = next === "refunded" ? "" : (update.settleTxid || position.settleTxid || "");
   const display = next === "filled" && settlementKnown({ settleTxid, closeTxid }) ? "settled" : next;
+  if (update.unrolled && display === "filled") void tryReboard(position);
   const same = position.status === display
     && Boolean(position.refundable) === update.refundable
     && (position.fundingTxid || "") === fundingTxid
@@ -642,7 +662,7 @@ function startWatch() {
   const watched = rows.map((position) => ({
     ...watchRow(position),
     register: async () => {
-      if (!position.deskPkHex || !position.beaconTxid) return "";
+      if (!position.deskPkHex) return "";
       return registerIntent(await fundRequest(position));
     },
   }));
@@ -1055,7 +1075,7 @@ const localTime = (unix) => new Date(Number(unix) * 1000).toLocaleTimeString(und
 const utcTime = (unix) => `${hhmm(new Date(Number(unix) * 1000))} UTC`;
 const usdCents = (cents) => `$${usdFromCents(BigInt(cents))}`;
 const timesX = (m) => `${m.toFixed(2)}×`;
-const won = (payout) => payout - BEACON_READ_FEE;
+const won = (payout) => payout - PREDICT_READ_FEE;
 const amount = (sats) => (sats < 100_000n ? `${int(sats)} sats` : `₿${fmtBtc(sats)}`);
 
 /** The next closes on the 5-minute grid, then the quarter hours after them. */
@@ -1742,9 +1762,14 @@ function renderBet() {
     $("bet-head").textContent = "This doesn’t beat your stake.";
     $("bet-sub").textContent = m == null
       ? "The desk doesn’t quote this line for this close."
-      : `It wins ${int(won(payout))} sats after the 1,000-sat fee, not more than the ${int(t.stake)} you put in.`;
+      : `It wins ${int(won(payout))} sats, not more than the ${int(t.stake)} you put in.`;
   }
-  $("bet-fee-label").textContent = `Price-check fee at ${at}`;
+  const feeRow = $("bet-fee");
+  if (feeRow) {
+    feeRow.hidden = PREDICT_READ_FEE === 0n;
+    $("bet-fee-label").textContent = `Price-check fee at ${at}`;
+    $("bet-fee-amount").textContent = `−${int(PREDICT_READ_FEE)} sats`;
+  }
   $("bet-rows-when").textContent = `If BTC at ${at} is`;
   const rows = [
     [`${capital(DIR[t.kind])} ${line}`, payout != null ? inUnit(won(payout)) : "—",
@@ -1820,6 +1845,9 @@ function renderBetFoot() {
     label = "Try again";
     [sentence, detail] = betFault(state.bet.quoteNote);
   }
+  if (!sentence && state.address && !state.pubkey) {
+    sentence = "Pasted address: payouts work, but connect a wallet if you want emergency 2-of-2 recovery.";
+  }
   $("bet-confirm").textContent = label;
   $("bet-confirm").disabled = off;
   renderStatus($("bet-status"), sentence, detail);
@@ -1859,6 +1887,7 @@ async function askBet() {
       holderAddress: state.address,
       holderPubkey: state.pubkey || undefined,
       writerPkHex: quote.deskPkHex,
+      oraclePkHex: quote.oraclePkHex,
       backupPkHex: quote.backupPkHex,
       voidAfter: BigInt(quote.voidAfter),
       fallbackDelay: BigInt(quote.fallbackDelay),
@@ -1909,6 +1938,7 @@ function placeBet() {
       deadline: quote.deadline,
       address: deposit.address,
       deskPkHex: quote.deskPkHex,
+      oraclePkHex: quote.oraclePkHex,
       backupPkHex: quote.backupPkHex,
       voidAfter: quote.voidAfter,
       fallbackDelay: quote.fallbackDelay,
@@ -1933,6 +1963,7 @@ function placeBet() {
   state.selected = position.id;
   show("home");
   startWatch();
+  void fundRequest(position).then((req) => registerExecutorDelegations(req));
   openWallet(position);
 }
 
@@ -2208,7 +2239,7 @@ function renderPrediction(p) {
     body.push(ledger([
       ["You staked", `${int(stake)} sats`],
       ["From the desk", `+${int(payout - stake)}`],
-      [`Price-check fee at ${at}`, `−${int(payout - back)}`, "minus"],
+      ...(payout > back ? [[`Price-check fee at ${at}`, `−${int(payout - back)}`, "minus"]] : []),
       ["Paid to you", `${int(back)} sats`, "tot"],
     ]));
     body.push(el("p", "sub", "Paid to your Arkade wallet. Nothing left to do."), ...again());
@@ -2288,7 +2319,7 @@ function renderPrediction(p) {
       body.push(ledger([
         ["You staked", `${int(stake)} sats`],
         ["From the desk", `+${int(payout - stake)}`],
-        [`Price-check fee at ${at}`, `−${int(payout - won(payout))}`, "minus"],
+        ...(payout > won(payout) ? [[`Price-check fee at ${at}`, `−${int(payout - won(payout))}`, "minus"]] : []),
         ["Paid to you", `${int(won(payout))} sats`, "tot"],
       ]));
       body.push(...again());

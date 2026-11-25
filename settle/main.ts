@@ -10,6 +10,7 @@ import {
 } from "@arkade-os/sdk";
 
 import { ARK_URL, DEFAULT_RELAYS, EMULATOR_URL, isPredict, PREDICT_VOID_AFTER } from "../protocol/constants.ts";
+import { DIA_PUBKEY, findWindowIntent, type DiaIntent } from "../protocol/dia.ts";
 import { bytesToHex } from "../protocol/hex.ts";
 import { networkByName } from "../protocol/network.ts";
 import { bindContracts } from "../protocol/contracts.ts";
@@ -17,10 +18,10 @@ import type { OptionPosition } from "../protocol/messages.ts";
 import { quoteRelay, watchPositions } from "../protocol/nostr.ts";
 import { revision } from "../protocol/sqlite-storage.ts";
 import { chooseSample } from "../oracle/store.ts";
-import { fetchOraclePrices, fetchOracleStatus, parseOracleBeacon, serviceOrigin } from "./oracle.ts";
+import { fetchOraclePrices, fetchOracleStatus, fetchSignedOraclePrices, parseOracleBeacon, serviceOrigin } from "./oracle.ts";
 import { duePositions, manualPositions, publishOutcome, publishReady, settlementPositions, termsFor } from "./positions.ts";
 import { Progress } from "./progress.ts";
-import { refundQuote, settleQuote } from "./vault.ts";
+import { refundQuote, settlePredictQuote, settleQuote } from "./vault.ts";
 
 /**
  * A third party. It watches public filled-vault events on nostr.arkade.sh and
@@ -150,7 +151,7 @@ async function loadManual() {
 }
 
 function onPosition(position: OptionPosition) {
-  if (!matchesOurBeacon(position.beacon_txid, position.beacon_gidx)) return;
+  if (!isPredict(position.kind) && (!position.beacon_txid || !matchesOurBeacon(position.beacon_txid, position.beacon_gidx ?? 0))) return;
   if (!progress.remember(position)) return;
   void progress.save().catch((err) => {
     console.error("progress save", err instanceof Error ? err.message : err);
@@ -192,9 +193,24 @@ async function tryVoid(
   return false;
 }
 
+async function fixingIntentFor(expiry: number, lag: number, oraclePk: Uint8Array): Promise<DiaIntent | null> {
+  try {
+    const samples = await fetchSignedOraclePrices(oracleUrl, expiry, expiry + lag, oraclePk, AbortSignal.timeout(10_000));
+    const chosen = chooseSample(samples, expiry, lag);
+    if (chosen && chosen.time >= expiry && chosen.time <= expiry + lag) return chosen.intent;
+  } catch {
+    // Fall back to Lasernet RPC below when the oracle service is unreachable.
+  }
+  try {
+    return await findWindowIntent(expiry, lag, oraclePk, AbortSignal.timeout(12_000));
+  } catch {
+    return null;
+  }
+}
+
 /**
- * One settle per pass. Filled vaults share one beacon coin, so the next vault
- * has to read the outpoint the previous settle created.
+ * Progress expired vaults. Direct-DIA PredictVaults have no shared beacon coin and
+ * settle independently; OptionVaults still share one beacon coin (one settle per pass).
  */
 async function progressDue() {
   await loadManual();
@@ -204,29 +220,85 @@ async function progressDue() {
   const due = duePositions(positions, now, progress.ids());
   if (!due.length) return;
 
-  let parsed;
-  try {
-    parsed = parseOracleBeacon(await fetchOracleStatus(oracleUrl, AbortSignal.timeout(10_000)));
-  } catch (err) {
-    once("oracle-fetch", `oracle ${err instanceof Error ? err.message : err}`, true);
-    return;
+  const PREDICT_LAG = 60;
+  let beaconSpec: ReturnType<typeof parseOracleBeacon> | null = null;
+  const needBeacon = due.some((p) => !isPredict(p.kind));
+  if (needBeacon) {
+    try {
+      beaconSpec = parseOracleBeacon(await fetchOracleStatus(oracleUrl, AbortSignal.timeout(10_000)));
+      if (beaconSpec.ok) {
+        updateBeaconFilter(beaconSpec.beacon.assetId);
+        noted.delete("oracle-fetch");
+      } else {
+        once(`oracle-parse:${beaconSpec.error}`, `oracle ${beaconSpec.error}`, true);
+      }
+    } catch (err) {
+      once("oracle-fetch", `oracle ${err instanceof Error ? err.message : err}`, true);
+    }
   }
-  if (!parsed.ok) {
-    once(`oracle-parse:${parsed.error}`, `oracle ${parsed.error}`, true);
-    return;
-  }
-  updateBeaconFilter(parsed.beacon.assetId);
-  noted.delete("oracle-fetch");
 
-  const lag = Number(parsed.beacon.expiryLag);
   const nowMs = Date.now();
   for (const position of due) {
+    if (isPredict(position.kind)) {
+      if (position.expiry + PREDICT_LAG > now) continue;
+      const oraclePk = position.oraclePk ?? DIA_PUBKEY;
+      const terms = termsFor(position, client.serverKey, client.emulatorKey!, 0n);
+      const bound = bindContracts(terms);
+      if (bound.vaultAddress !== position.vaultAddress) {
+        once(`addr:${position.id}`, `skip ${position.rfqId} vault address`, true);
+        continue;
+      }
+      const dia = await fixingIntentFor(position.expiry, PREDICT_LAG, oraclePk);
+      if (!dia) {
+        if (await tryVoid(position, terms, now)) continue;
+        once(`unfixed:${position.id}`, `waiting ${position.rfqId} dia fixing`);
+        continue;
+      }
+      try {
+        const outcome = await settlePredictQuote({
+          chain: client.indexer!,
+          serverKey: client.serverKey,
+          emulatorKey: client.emulatorKey!,
+          emulator: client.emulator!,
+          checkpoint: client.checkpoint,
+          fillTxid: position.fillTxid,
+          terms,
+          dia,
+          expiryLag: PREDICT_LAG,
+          now,
+        });
+        if (outcome.result === "settled") {
+          progress.note(position.id, outcome.txid);
+          try {
+            await progress.save();
+          } catch (err) {
+            console.error("progress save", position.rfqId, err instanceof Error ? err.message : err);
+          }
+          console.log("settled", position.rfqId, outcome.txid);
+          continue;
+        }
+        if (outcome.result === "unfixed" || outcome.result === "rejected") {
+          if (await tryVoid(position, terms, now)) continue;
+          continue;
+        }
+        if (outcome.result === "waiting") {
+          once(`wait:${position.id}:${outcome.reason}`, `waiting ${position.rfqId} ${outcome.reason}`);
+        }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        console.error(`settle ${position.rfqId} ${position.expiry} ${message}`);
+      }
+      continue;
+    }
+
+    if (!beaconSpec || !beaconSpec.ok) continue;
+    const lag = Number(beaconSpec.beacon.expiryLag);
     if (position.expiry + lag > now) continue;
-    if (!matchesOurBeacon(position.beaconTxid, position.beaconGidx)) {
+    if (!position.beaconTxid || !matchesOurBeacon(position.beaconTxid, position.beaconGidx ?? 0)) {
       once(`beacon:${position.id}`, `skip ${position.rfqId} beacon mismatch`, true);
       continue;
     }
-    const terms = termsFor(position, client.serverKey, client.emulatorKey!, parsed.beacon.readFee);
+    const terms = termsFor(position, client.serverKey, client.emulatorKey!, beaconSpec.beacon.readFee);
     const bound = bindContracts(terms);
     if (bound.vaultAddress !== position.vaultAddress) {
       once(`addr:${position.id}`, `skip ${position.rfqId} vault address`, true);
@@ -240,10 +312,7 @@ async function progressDue() {
     let expected: { price: bigint; time: bigint } | undefined;
     if (hasLiveVault) {
       const published = await askPublish(position.expiry, nowMs);
-      if (published === "failed") {
-        if (await tryVoid(position, terms, now)) return;
-        continue;
-      }
+      if (published === "failed") continue;
       if (published === "fixed") {
         try {
           const samples = await fetchOraclePrices(
@@ -273,7 +342,7 @@ async function progressDue() {
         checkpoint: client.checkpoint,
         fillTxid: position.fillTxid,
         terms,
-        beacon: parsed.beacon,
+        beacon: beaconSpec.beacon,
         now,
         expected,
       });
@@ -296,7 +365,6 @@ async function progressDue() {
         continue;
       }
       if (outcome.result === "unfixed") {
-        if (await tryVoid(position, terms, now)) return;
         console.error(`publish ${position.expiry} unfixed`);
         continue;
       }

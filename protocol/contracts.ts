@@ -10,6 +10,7 @@ import {
   PREDICT_VOID_AFTER,
   type Kind,
 } from "./constants.ts";
+import { DIA_PUBKEY } from "./dia.ts";
 import { bytesToHex, hexToBytes, xOnly } from "./hex.ts";
 import { exitSequence, intentProgram, vaultProgramFor } from "./programs.ts";
 
@@ -28,10 +29,12 @@ export type Terms = {
   holderPk: Uint8Array;
   /** Taproot output key of the bettor's Arkade address. A predict payout and a refund pay this key. */
   holderPayoutKey?: Uint8Array;
-  /** Identity asset of the AttestationBeacon that settle reads. */
-  beacon: BeaconId;
-  /** Sats this settle leaves on the beacon. Must match the beacon's readFee. */
+  /** Identity asset of the AttestationBeacon that OptionVault.settle reads. Omitted for direct-DIA PredictVault. */
+  beacon?: BeaconId;
+  /** Sats OptionVault.settle leaves on the beacon. Must match the beacon's readFee. */
   readFee?: bigint;
+  /** 34-byte DIA ECDSA key (0x10 || compressed33) checked directly by PredictVault.settle. */
+  oraclePk?: Uint8Array;
   serverKey: Uint8Array;
   emulatorKey: Uint8Array;
   backupPk?: Uint8Array;
@@ -121,9 +124,10 @@ export function bindContracts(terms: Terms): Bound {
   if (terms.emulatorKey.length !== 33) {
     throw new Error("emulator key must be 33 bytes");
   }
-  if (terms.beacon.txid.length !== 32) throw new Error("beacon txid must be 32 bytes");
-
   const predict = isPredict(terms.kind);
+  if (!predict && (!terms.beacon || terms.beacon.txid.length !== 32)) {
+    throw new Error("beacon txid must be 32 bytes");
+  }
   const writer = terms.payoutKey ? directPayout(terms.payoutKey) : payoutVtxo(writerPk, serverKey, terms.exit);
   const holder = terms.holderPayoutKey ? directPayout(terms.holderPayoutKey) : payoutVtxo(holderPk, serverKey, terms.exit);
   const keys = { serverKey, emulatorKey: terms.emulatorKey };
@@ -136,6 +140,8 @@ export function bindContracts(terms: Terms): Bound {
     if (voidAfter <= 0n) throw new Error("voidAfter must be positive");
     if (fallbackDelay < terms.exit) throw new Error("fallbackDelay must be at least exit");
     if (finalExitDelay <= fallbackDelay) throw new Error("finalExitDelay must exceed fallbackDelay");
+    const oraclePk = terms.oraclePk ?? DIA_PUBKEY;
+    if (oraclePk.length !== 34 || oraclePk[0] !== 0x10) throw new Error("oraclePk must be 34 bytes (0x10 || pubkey)");
     const backupPk = xOnly(terms.backupPk ?? terms.emulatorKey);
     vaultArgs = {
       kind: BigInt(terms.kind),
@@ -147,9 +153,7 @@ export function bindContracts(terms: Terms): Bound {
       collateral: terms.collateral,
       stake: terms.premium,
       expiry: terms.expiry,
-      beaconTxid: terms.beacon.txid,
-      beaconGidx: terms.beacon.gidx,
-      readFee: terms.readFee ?? 0n,
+      oraclePk,
       backupPk,
       voidAfter,
       fallbackDelay: exitSequence(fallbackDelay),
@@ -166,8 +170,8 @@ export function bindContracts(terms: Terms): Bound {
       strike: terms.strike,
       collateral: terms.collateral,
       expiry: terms.expiry,
-      beaconTxid: terms.beacon.txid,
-      beaconGidx: terms.beacon.gidx,
+      beaconTxid: terms.beacon!.txid,
+      beaconGidx: terms.beacon!.gidx,
       readFee: terms.readFee ?? 0n,
       exit: exitSequence(terms.exit),
       server: serverKey,

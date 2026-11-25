@@ -188,7 +188,7 @@ test("slot offsets match both contract sources", () => {
   assert.ok(beacon.includes("const int VALUE_AT = 17;"));
   assert.ok(beacon.includes("const int HISTORY_AT = 49;"));
   assert.ok(beacon.includes("const int HISTORY = 280;"));
-  assert.ok(beacon.includes("num2bin(cents, 8) + num2bin(time, 8) + num2bin(0, 16)"));
+  assert.ok(beacon.includes("int2bytes(cents, 8) + int2bytes(time, 8) + int2bytes(0, 16)"));
   assert.ok(beacon.includes("0x100211ee120bca9f272034d98b1b026bb4ab735ebeb5da8be6a69bf7ee0ea24cfd48"));
   assert.ok(beacon.includes('require(time >= expiry, "sample before expiry")'));
   const vault = readFileSync(here("../contracts/option_vault.ark"), "utf8");

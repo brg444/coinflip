@@ -15,11 +15,15 @@ import {
 } from "@arkade-os/sdk";
 
 import { beaconIdOf } from "../../protocol/beacon-id.ts";
-import { ARK_URL, BEACON_READ_FEE, DUST_SATS, EMULATOR_URL, EXIT, isPredict, type Kind } from "../../protocol/constants.ts";
+import { ARK_URL, BEACON_READ_FEE, DUST_SATS, EMULATOR_URL, EXECUTOR_URL, EXIT, isPredict, PREDICT_READ_FEE, type Kind } from "../../protocol/constants.ts";
 import { assertServerExit, bindContracts, payoutVtxo, type Terms } from "../../protocol/contracts.ts";
+import { DIA_PUBKEY } from "../../protocol/dia.ts";
+import { cancelIntentDelegation, cancelIntentTemplate, Executor, reboardVaultDelegation, reboardVaultTemplate } from "../../protocol/executor.ts";
 import { bytesToHex, hexToBytes, xOnly } from "../../protocol/hex.ts";
 import { networkByName } from "../../protocol/network.ts";
 import { intentProgram, vaultProgram, vaultProgramFor } from "../../protocol/programs.ts";
+import intentArtifact from "../../contracts/option_intent.artifact.json" with { type: "json" };
+import predictArtifact from "../../contracts/predict_vault.artifact.json" with { type: "json" };
 
 const NETWORK_NAME = "Mutinynet";
 export const WALLET_URL = "https://mutinynet.arkade.money";
@@ -47,11 +51,12 @@ export type FundRequest = {
   holderPubkey?: string;
   /** Predict: the desk's key. */
   writerPkHex?: string;
+  oraclePkHex?: string;
   backupPkHex?: string;
   voidAfter?: bigint;
   fallbackDelay?: bigint;
   finalExitDelay?: bigint;
-  /** Display txid of the beacon identity asset, from the desk's quote. Required to build a vault. */
+  /** Display txid of the beacon identity asset (Options only). */
   beaconTxidHex?: string;
   beaconGidx?: number;
   exit?: bigint;
@@ -328,8 +333,8 @@ async function build(req: FundRequest) {
 
 /** Predict: the bettor holds, and their address is paid. The desk writes. */
 async function buildPredict(req: FundRequest) {
-  if (!req.writerPkHex || !req.beaconTxidHex) {
-    throw new Error("A prediction needs a desk quote that names the beacon.");
+  if (!req.writerPkHex) {
+    throw new Error("A prediction needs a desk quote.");
   }
   if (!req.holderAddress) throw new Error("Paste your Arkade address first.");
   const exit = req.exit ?? EXIT;
@@ -337,8 +342,9 @@ async function buildPredict(req: FundRequest) {
   const { client } = await openSession(SingleKey.fromHex(sessionHex()));
   const holderPk = binding.signerKey ?? binding.payoutKey;
   const writerPk = hexToBytes(req.writerPkHex);
-  const beaconTxidHex = req.beaconTxidHex.toLowerCase();
+  const beaconTxidHex = (req.beaconTxidHex ?? "").toLowerCase();
   const beaconGidx = req.beaconGidx ?? 0;
+  const oraclePk = req.oraclePkHex ? hexToBytes(req.oraclePkHex) : DIA_PUBKEY;
   const terms: Terms = {
     kind: req.kind,
     strike: req.strike,
@@ -350,12 +356,13 @@ async function buildPredict(req: FundRequest) {
     writerPk,
     holderPk,
     holderPayoutKey: binding.signerKey ? undefined : binding.payoutKey,
+    oraclePk,
     backupPk: req.backupPkHex ? hexToBytes(req.backupPkHex) : undefined,
     voidAfter: req.voidAfter,
     fallbackDelay: req.fallbackDelay,
     finalExitDelay: req.finalExitDelay,
-    beacon: beaconIdOf(asset.AssetId.create(beaconTxidHex, beaconGidx)),
-    readFee: BEACON_READ_FEE,
+    ...(beaconTxidHex ? { beacon: beaconIdOf(asset.AssetId.create(beaconTxidHex, beaconGidx)) } : {}),
+    readFee: PREDICT_READ_FEE,
     serverKey: binding.serverKey,
     emulatorKey: binding.emulatorKey,
   };
@@ -436,4 +443,32 @@ export async function cancelIntent(req: FundRequest): Promise<string> {
     lastTxid = sent.txid;
   }
   return lastTxid;
+}
+
+let cachedExecutor: Promise<Executor | undefined> | null = null;
+function connectExecutor(serverKey: Uint8Array, emulatorKey: Uint8Array): Promise<Executor | undefined> {
+  if (!cachedExecutor) {
+    cachedExecutor = Executor.connect(EXECUTOR_URL, { serverKey, emulatorKey }).catch(() => undefined);
+  }
+  return cachedExecutor;
+}
+
+/** Best-effort registration with executord for automatic intent refund and vault reboard/renewal. */
+export async function registerExecutorDelegations(req: FundRequest): Promise<{ cancel: boolean; reboard: boolean }> {
+  try {
+    const { client, bound } = await build(req);
+    if (!client.emulatorKey) return { cancel: false, reboard: false };
+    const executor = await connectExecutor(client.serverKey, client.emulatorKey);
+    if (!executor) return { cancel: false, reboard: false };
+    const cancelId = await executor.ensureTemplate("cancel_intent", intentArtifact as arkade.ContractArtifact, cancelIntentTemplate);
+    const cancel = cancelId ? await executor.delegate(cancelIntentDelegation(cancelId, bound)) : false;
+    let reboard = false;
+    if (isPredict(req.kind)) {
+      const reboardId = await executor.ensureTemplate("reboard_vault", predictArtifact as arkade.ContractArtifact, reboardVaultTemplate);
+      reboard = reboardId ? await executor.delegate(reboardVaultDelegation(reboardId, bound)) : false;
+    }
+    return { cancel, reboard };
+  } catch {
+    return { cancel: false, reboard: false };
+  }
 }

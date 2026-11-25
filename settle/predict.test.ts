@@ -2,21 +2,22 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { base64 } from "@scure/base";
-import { arkade, asset, CSVMultisigTapscript, Extension, SingleKey, Transaction } from "@arkade-os/sdk";
+import { arkade, CSVMultisigTapscript, SingleKey, Transaction } from "@arkade-os/sdk";
 
 import { holderPayoff, settlementOutputs } from "../app/settle-math.js";
-import { beaconIdOf, bindBeacon, genesisState, nextState, priceValue } from "../protocol/beacon.ts";
 import {
   BEACON_READ_FEE,
   EXIT,
   PAIR,
   PREDICT_FALLBACK_DELAY,
   PREDICT_FINAL_EXIT_DELAY,
+  PREDICT_READ_FEE,
   PREDICT_VOID_AFTER,
   STAKE_MIN,
 } from "../protocol/constants.ts";
 import { bindContracts, type Terms } from "../protocol/contracts.ts";
-import { refundOutputs, statePacket } from "../protocol/cospend.ts";
+import { refundOutputs } from "../protocol/cospend.ts";
+import { DIA_PUBKEY, localFeed } from "../protocol/dia.ts";
 import { bytesToHex, hexToBytes } from "../protocol/hex.ts";
 import { classifyIntent } from "../protocol/intent-state.ts";
 import { parsePosition, parseWire, payoutRefusal, predictRefusal, requestRefusal, type RfqRequest } from "../protocol/messages.ts";
@@ -24,9 +25,8 @@ import { positionEvent, readPosition } from "../protocol/nostr.ts";
 import { payoutMultiplier, predictMultiplier, predictPayout, probAbove } from "../protocol/pricing.ts";
 import { predictVaultProgram } from "../protocol/programs.ts";
 import { outlay, openPremium, type QuoteRow } from "../desk/book.ts";
-import { parseOracleBeacon } from "./oracle.ts";
 import { positionFromAnnouncement, termsFor } from "./positions.ts";
-import { refundQuote, settleQuote, settlePayouts, type ChainCoin } from "./vault.ts";
+import { refundQuote, settlePredictQuote, settlePayouts, type ChainCoin } from "./vault.ts";
 
 const CHECKPOINT = "03080040b27520dfcaec558c7e78cf3e38b898ba8a43cfb5727266bae32c5c5b3aeb32c558aa0bac";
 const DISPLAY = "00".repeat(31) + "07";
@@ -34,6 +34,7 @@ const EXPIRY = 1_700_000_100;
 const LINE = 8_231_500n;
 const STAKE = 50_000n;
 const PAYOUT = 95_000n;
+const FEED = localFeed(new Uint8Array(32).fill(42), () => LINE);
 
 const key = (n: number) => SingleKey.fromHex(n.toString(16).padStart(64, "0"));
 
@@ -51,18 +52,17 @@ async function predictTerms(kind: 2 | 3 = 2): Promise<Terms> {
     writerPk: desk,
     holderPk: bettor,
     holderPayoutKey: bettor,
-    beacon: beaconIdOf(asset.AssetId.create(DISPLAY, 0)),
-    readFee: BEACON_READ_FEE,
+    oraclePk: FEED.key,
+    readFee: PREDICT_READ_FEE,
     serverKey: await key(1).xOnlyPublicKey(),
     emulatorKey: await key(2).compressedPublicKey(),
   };
 }
 
-function coinTx(outputs: { script: Uint8Array; amount: bigint }[], packets: Parameters<typeof Extension.create>[0] = []) {
+function coinTx(outputs: { script: Uint8Array; amount: bigint }[]) {
   const tx = new Transaction({ version: 3, allowUnknownOutputs: true });
   tx.addInput({ txid: new Uint8Array(32), index: 1 });
   for (const output of outputs) tx.addOutput(output);
-  if (packets.length > 0) tx.addOutput(Extension.create(packets).txOut());
   return tx;
 }
 
@@ -78,24 +78,28 @@ test("predict is all or nothing, and a close on the line pays the desk", () => {
   assert.deepEqual(settlementOutputs(0n, PAYOUT, BEACON_READ_FEE), { mode: "writer", holder: 0n, writer: 94_000n });
 });
 
-test("PredictVault exposes three-tier exit leaves and expected opcodes", async () => {
+test("PredictVault exposes three-tier exit leaves and direct-DIA opcodes", async () => {
   const predict = predictVaultProgram();
   assert.equal(predict.name, "PredictVault");
   assert.deepEqual(
     Object.keys(predict.functions).sort(),
-    ["close", "reboard", "refund", "refundBackup", "settle", "unilateral"],
+    ["close", "reboard", "refund", "refundBackup", "settle", "settleBackup", "unilateral"],
   );
   const asm = predict.functions.settle?.arkadeScript?.asm ?? [];
   const count = (name: string) => asm.filter((token) => token === name).length;
   assert.equal(count("MUL"), 0);
-  assert.equal(count("DIV"), 0);
+  assert.equal(count("DIV"), 1);
+  assert.equal(count("MOD"), 1);
+  assert.equal(count("DIGEST"), 2);
   assert.equal(count("CHECKTIME"), 1);
-  assert.equal(count("INSPECTINASSETLOOKUP"), 1);
-  assert.equal(count("INSPECTINPUTPACKET"), 1);
-  assert.equal(count("CHECKSIGFROMSTACK"), 0);
+  assert.equal(count("CHECKSIGFROMSTACK"), 1);
+  assert.equal(count("INSPECTINASSETLOOKUP"), 0);
+  assert.equal(count("INSPECTINPUTPACKET"), 0);
 
   assert.ok((predict.functions.refund?.arkadeScript?.asm ?? []).includes("CHECKTIME"));
   assert.ok((predict.functions.reboard?.arkadeScript?.asm ?? []).includes("TUNNEL"));
+  assert.ok((predict.functions.reboard?.arkadeScript?.asm ?? []).includes("INSPECTINTENTMESSAGE"));
+  assert.ok(PREDICT_FINAL_EXIT_DELAY > PREDICT_VOID_AFTER);
 
   const terms = await predictTerms(2);
   const backupA = await key(30).xOnlyPublicKey();
@@ -105,14 +109,20 @@ test("PredictVault exposes three-tier exit leaves and expected opcodes", async (
   assert.notEqual(boundA.vaultAddress, boundB.vaultAddress);
 
   const scriptA = new arkade.ArkadeProgramScript(predict, boundA.vault, { serverKey: terms.serverKey, emulatorKey: terms.emulatorKey });
+  const settleLeaf = scriptA.functionByName("settle");
+  const settleBackupLeaf = scriptA.functionByName("settleBackup");
   const refundLeaf = scriptA.functionByName("refund");
   const refundBackupLeaf = scriptA.functionByName("refundBackup");
   const unilateralLeaf = scriptA.functionByName("unilateral");
+  assert.ok(settleLeaf?.arkadeScript);
+  assert.ok(settleBackupLeaf);
   assert.ok(refundLeaf?.arkadeScript);
   assert.ok(refundBackupLeaf);
   assert.ok(unilateralLeaf);
-  const tweakedBackup = arkade.computeArkadeScriptPublicKey(backupA, refundLeaf.arkadeScript);
-  assert.ok(bytesToHex(refundBackupLeaf.tapLeafScript[1]).includes(bytesToHex(tweakedBackup)));
+  const tweakedSettleBackup = arkade.computeArkadeScriptPublicKey(backupA, settleLeaf.arkadeScript);
+  assert.ok(bytesToHex(settleBackupLeaf.tapLeafScript[1]).includes(bytesToHex(tweakedSettleBackup)));
+  const tweakedRefundBackup = arkade.computeArkadeScriptPublicKey(backupA, refundLeaf.arkadeScript);
+  assert.ok(bytesToHex(refundBackupLeaf.tapLeafScript[1]).includes(bytesToHex(tweakedRefundBackup)));
   assert.equal(unilateralLeaf.def.tapscript.signatures?.length, 2);
   assert.ok(bytesToHex(unilateralLeaf.tapLeafScript[1]).includes(bytesToHex(terms.writerPk)));
   assert.ok(bytesToHex(unilateralLeaf.tapLeafScript[1]).includes(bytesToHex(terms.holderPk)));
@@ -134,7 +144,7 @@ test("a prediction binds intent side 1: the bettor holds, the desk writes", asyn
   assert.deepEqual(bound.intent["optionScript.program"], bound.optionProgram);
   assert.equal(bound.intent["userScript.version"], 1n);
   // Same terms on the option vault would be a different contract.
-  const asOption = bindContracts({ ...terms, kind: 0 });
+  const asOption = bindContracts({ ...terms, kind: 0, beacon: { txid: new Uint8Array(32).fill(7), gidx: 0n } });
   assert.notEqual(asOption.vaultAddress, bound.vaultAddress);
   assert.notEqual(bindContracts({ ...terms, kind: 3 }).vaultAddress, bound.vaultAddress);
 });
@@ -164,14 +174,13 @@ test("predict requests and quotes round-trip, and each side names the desk once"
   }), null);
 
   const binding = {
-    beacon_txid: DISPLAY,
-    beacon_gidx: 0,
     deadline: EXPIRY - 120,
     exit: Number(EXIT),
     intent_address: "tark1intent0000",
     vault_address: "tark1vault00000",
   };
   const predictExtras = {
+    oracle_pubkey: bytesToHex(DIA_PUBKEY),
     backup_pubkey: "33".repeat(32),
     void_after: Number(PREDICT_VOID_AFTER),
     fallback_delay: Number(PREDICT_FALLBACK_DELAY),
@@ -189,12 +198,13 @@ test("predict requests and quotes round-trip, and each side names the desk once"
     profile: { writer_pubkey: "21".repeat(32), writer_pk_script: `5120${"21".repeat(32)}`, ...predictExtras, ...binding },
   };
   assert.deepEqual(parseWire(quote), quote);
+  assert.equal(parseWire({ ...quote, profile: { ...quote.profile, oracle_pubkey: "00".repeat(34) } }), null);
   assert.equal(parseWire({ ...quote, profile: { ...quote.profile, backup_pubkey: "21".repeat(32) } }), null);
   assert.equal(parseWire({ ...quote, profile: { ...quote.profile, final_exit_delay: Number(PREDICT_FALLBACK_DELAY) } }), null);
   assert.equal(parseWire({ ...quote, profile: { ...quote.profile, fallback_delay: 2049 } }), null);
   const both = { ...quote, profile: { ...quote.profile, holder_pubkey: "21".repeat(32), holder_pk_script: `5120${"21".repeat(32)}` } };
   assert.equal(parseWire(both), null);
-  const neither = { ...quote, profile: binding };
+  const neither = { ...quote, profile: { ...binding, beacon_txid: DISPLAY, beacon_gidx: 0 } };
   assert.equal(parseWire(neither), null);
 });
 
@@ -270,23 +280,9 @@ test("a prediction's fill funds the vault, and the stake back is a refund", () =
   assert.equal(short.phase, "open");
 });
 
-test("a filled prediction settles to the bettor above the line and to the desk at it", async () => {
+test("a filled prediction settles directly from DIA to the bettor above the line and to the desk at it", async () => {
   const terms = await predictTerms(2);
   const bound = bindContracts(terms);
-  const adminPk = await key(9).xOnlyPublicKey();
-  const domain = new TextEncoder().encode("BTCUSD-FIX");
-  const assetId = asset.AssetId.create(DISPLAY, 0);
-  const id = beaconIdOf(assetId);
-  const beacon = bindBeacon({
-    id,
-    domain,
-    expiryLag: 60n,
-    readFee: BEACON_READ_FEE,
-    adminPk,
-    exit: EXIT,
-    serverKey: terms.serverKey,
-    emulatorKey: terms.emulatorKey,
-  });
   const vaultTx = coinTx([
     { script: bound.writerPkScript, amount: STAKE },
     { script: bound.vaultPkScript, amount: PAYOUT },
@@ -295,12 +291,6 @@ test("a filled prediction settles to the bettor above the line and to the desk a
     { txid: vaultTx.id, vout: 1, value: Number(PAYOUT), script: bytesToHex(bound.vaultPkScript) },
   ];
   const prev = new Map<string, string>([[vaultTx.id, base64.encode(vaultTx.toPSBT())]]);
-  const useFixing = (cents: bigint) => {
-    const state = nextState(genesisState(), terms.expiry, priceValue(cents, terms.expiry));
-    const tx = coinTx([{ script: beacon.pkScript, amount: 330n }], [statePacket(state)]);
-    coins[1] = { txid: tx.id, vout: 0, value: 330, script: bytesToHex(beacon.pkScript), assets: [{ assetId: assetId.toString(), amount: 1n }] };
-    prev.set(tx.id, base64.encode(tx.toPSBT()));
-  };
   const submitted: string[] = [];
   const chain = {
     async getVtxos(filter: { scripts?: string[]; spendableOnly?: boolean; spentOnly?: boolean }) {
@@ -317,25 +307,8 @@ test("a filled prediction settles to the bettor above the line and to the desk a
       return { txs: ids.map((txid) => prev.get(txid) ?? "") };
     },
   };
-  const status = {
-    issueTxid: DISPLAY,
-    assetId: assetId.toString(),
-    address: beacon.address,
-    args: {
-      ctrlTxid: bytesToHex(id.txid),
-      domain: bytesToHex(domain),
-      expiryLag: 60,
-      readFee: Number(BEACON_READ_FEE),
-      adminPk: bytesToHex(adminPk),
-      exit: Number(EXIT),
-    },
-    fixings: [],
-  };
-  const parsed = parseOracleBeacon(status, DISPLAY, 0);
-  assert.equal(parsed.ok, true);
-  if (!parsed.ok) return;
 
-  // The public announcement is enough to rebuild the same vault.
+  // The public announcement is enough to rebuild the same vault without any beacon.
   const announcement = parsePosition({
     v: 1,
     type: "option_position",
@@ -351,12 +324,11 @@ test("a filled prediction settles to the bettor above the line and to the desk a
     holder_pubkey: bytesToHex(terms.holderPk),
     holder_pk_script: bytesToHex(bound.holderPkScript),
     stake: STAKE.toString(),
+    oracle_pubkey: bytesToHex(FEED.key),
     backup_pubkey: bytesToHex(terms.emulatorKey.subarray(1)),
     void_after: Number(PREDICT_VOID_AFTER),
     fallback_delay: Number(PREDICT_FALLBACK_DELAY),
     final_exit_delay: Number(PREDICT_FINAL_EXIT_DELAY),
-    beacon_txid: DISPLAY,
-    beacon_gidx: 0,
     vault_address: bound.vaultAddress,
     fill_txid: vaultTx.id,
   });
@@ -371,7 +343,7 @@ test("a filled prediction settles to the bettor above the line and to the desk a
   const { holder_pk_script: _dropped, ...withoutHolder } = announcement;
   assert.equal(parsePosition(withoutHolder), null);
   const watched = positionFromAnnouncement(announcement)!;
-  const rebuilt = termsFor(watched, terms.serverKey, terms.emulatorKey, BEACON_READ_FEE);
+  const rebuilt = termsFor(watched, terms.serverKey, terms.emulatorKey, PREDICT_READ_FEE);
   assert.equal(bindContracts(rebuilt).vaultAddress, bound.vaultAddress);
 
   const env = {
@@ -387,29 +359,32 @@ test("a filled prediction settles to the bettor above the line and to the desk a
     checkpoint: CSVMultisigTapscript.decode(hexToBytes(CHECKPOINT)),
     fillTxid: vaultTx.id,
     terms: rebuilt,
-    beacon: parsed.beacon,
     now: EXPIRY + 60,
   };
 
-  useFixing(LINE + 3_710n);
-  const won = await settleQuote(env);
+  const outOfWindow = await settlePredictQuote({ ...env, dia: FEED.sign(LINE + 100n, EXPIRY + 61) });
+  assert.deepEqual(outOfWindow, { result: "unfixed" });
+
+  const badSig = await settlePredictQuote({ ...env, dia: { ...FEED.sign(LINE + 100n, EXPIRY + 5), sig: new Uint8Array(64).fill(9) } });
+  assert.deepEqual(badSig, { result: "rejected" });
+
+  const won = await settlePredictQuote({ ...env, dia: FEED.sign(LINE + 3_710n, EXPIRY + 5) });
   assert.equal(won.result, "settled");
   if (won.result !== "settled") return;
-  assert.equal(won.holder, 94_000n);
+  assert.equal(won.holder, PAYOUT);
   assert.equal(won.writer, 0n);
   const paid = Transaction.fromPSBT(base64.decode(submitted.at(-1)!));
-  assert.equal(paid.getOutput(0)?.amount, 1_330n);
-  assert.equal(paid.getOutput(1)?.amount, 94_000n);
-  assert.equal(bytesToHex(paid.getOutput(1)!.script!), bytesToHex(bound.holderPkScript));
+  assert.equal(paid.getOutput(0)?.amount, PAYOUT);
+  assert.equal(bytesToHex(paid.getOutput(0)!.script!), bytesToHex(bound.holderPkScript));
 
-  useFixing(LINE);
-  const onLine = await settleQuote(env);
+  const onLine = await settlePredictQuote({ ...env, dia: FEED.sign(LINE, EXPIRY + 5) });
   assert.equal(onLine.result, "settled");
   if (onLine.result !== "settled") return;
   assert.equal(onLine.holder, 0n);
-  assert.equal(onLine.writer, 94_000n);
+  assert.equal(onLine.writer, PAYOUT);
   const kept = Transaction.fromPSBT(base64.decode(submitted.at(-1)!));
-  assert.equal(bytesToHex(kept.getOutput(1)!.script!), bytesToHex(bound.writerPkScript));
+  assert.equal(kept.getOutput(0)?.amount, PAYOUT);
+  assert.equal(bytesToHex(kept.getOutput(0)!.script!), bytesToHex(bound.writerPkScript));
 
   const lower = settlePayouts({
     kind: 3,
@@ -417,12 +392,12 @@ test("a filled prediction settles to the bettor above the line and to the desk a
     strike: LINE,
     collateral: PAYOUT,
     locked: PAYOUT,
-    readFee: BEACON_READ_FEE,
+    readFee: PREDICT_READ_FEE,
     holderScript: bound.holderPkScript,
     writerScript: bound.writerPkScript,
   });
   assert.ok("payouts" in lower);
-  if ("payouts" in lower) assert.deepEqual(lower.payouts, [{ script: bound.holderPkScript, amount: 94_000n }]);
+  if ("payouts" in lower) assert.deepEqual(lower.payouts, [{ script: bound.holderPkScript, amount: PAYOUT }]);
 
   const earlyRefund = await refundQuote({ ...env, now: EXPIRY + Number(PREDICT_VOID_AFTER) - 1 });
   assert.deepEqual(earlyRefund, { result: "waiting", reason: "early" });

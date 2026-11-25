@@ -118,7 +118,7 @@ export function duePositionExpiries(
   const allowed = opts.allowedPubkey?.toLowerCase();
   const byExpiry = new Map<number, OptionPosition[]>();
   for (const pos of positions) {
-    if (pos.beacon_txid.toLowerCase() !== ourTxid || pos.beacon_gidx !== ourGidx) continue;
+    if (!pos.beacon_txid || pos.beacon_txid.toLowerCase() !== ourTxid || pos.beacon_gidx !== ourGidx) continue;
     if (allowed && pos.writer_pubkey.toLowerCase() !== allowed && pos.holder_pubkey.toLowerCase() !== allowed) continue;
     if (pos.program_id !== vaultProgramId(pos.kind)) continue;
     if (BigInt(pos.collateral) < READ_FEE + DUST_SATS) continue;
@@ -403,7 +403,6 @@ export async function createOracle(deps: OracleDeps) {
 
   async function recordIntent(intent: DiaIntent) {
     if (!adminPk) throw new HttpError(400, "ORACLE_KEY is required");
-    if (!store.assetId) throw new HttpError(409, "not issued");
     let cents: bigint;
     try {
       cents = centsOf(intent.price);
@@ -448,11 +447,21 @@ export async function createOracle(deps: OracleDeps) {
     const from = Number(query.get("from") ?? "0");
     const to = Number(query.get("to") ?? String(now()));
     const limit = Math.min(200, Math.max(1, Number(query.get("limit") ?? "50") || 50));
+    const signed = query.get("signed") === "1";
     const rows = store.samples
       .filter((sample) => sample.time >= from && sample.time <= to)
       .sort((a, b) => b.time - a.time)
       .slice(0, limit)
-      .map((sample) => ({ price: sample.price, time: sample.time }));
+      .map((sample) => (signed && sample.raw && sample.nonce && typeof sample.intentExpiry === "number" && sample.sig
+        ? {
+            price: sample.price,
+            time: sample.time,
+            raw: sample.raw,
+            nonce: sample.nonce,
+            intentExpiry: sample.intentExpiry,
+            sig: sample.sig,
+          }
+        : { price: sample.price, time: sample.time }));
     return { samples: rows };
   }
 
@@ -625,7 +634,7 @@ export async function createOracle(deps: OracleDeps) {
   }
 
   async function takeSample() {
-    if (!deps.pull || !store.assetId) return;
+    if (!deps.pull) return;
     const intent = await deps.pull();
     if (!intent) return;
     await recordIntent(intent);
@@ -647,7 +656,6 @@ export async function createOracle(deps: OracleDeps) {
   const timer = deps.sampleEveryMs && deps.sampleEveryMs > 0 ? setInterval(minute, deps.sampleEveryMs) : undefined;
   if (timer) minute();
   async function ingestIntent(intent: DiaIntent) {
-    if (!store.assetId) return;
     await recordIntent(intent);
   }
 

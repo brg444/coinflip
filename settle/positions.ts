@@ -25,12 +25,13 @@ export type WatchPosition = {
   /** Predict: the bettor's address key, which the payout pays. */
   holderPayoutKey?: Uint8Array;
   stake?: bigint;
+  oraclePk?: Uint8Array;
   backupPk?: Uint8Array;
   voidAfter?: bigint;
   fallbackDelay?: bigint;
   finalExitDelay?: bigint;
-  beaconTxid: string;
-  beaconGidx: number;
+  beaconTxid?: string;
+  beaconGidx?: number;
   vaultAddress: string;
   fillTxid?: string;
 };
@@ -73,12 +74,12 @@ export function positionFromAnnouncement(body: unknown): WatchPosition | null {
     payoutKey: directPayoutKey(row.writer_pubkey, row.writer_pk_script),
     holderPayoutKey: row.holder_pk_script ? directPayoutKey(row.holder_pubkey, row.holder_pk_script) : undefined,
     ...(row.stake ? { stake: BigInt(row.stake) } : {}),
+    ...(row.oracle_pubkey ? { oraclePk: hexToBytes(row.oracle_pubkey) } : {}),
     ...(row.backup_pubkey ? { backupPk: hexToBytes(row.backup_pubkey) } : {}),
     ...(row.void_after != null ? { voidAfter: BigInt(row.void_after) } : {}),
     ...(row.fallback_delay != null ? { fallbackDelay: BigInt(row.fallback_delay) } : {}),
     ...(row.final_exit_delay != null ? { finalExitDelay: BigInt(row.final_exit_delay) } : {}),
-    beaconTxid: row.beacon_txid,
-    beaconGidx: row.beacon_gidx,
+    ...(row.beacon_txid ? { beaconTxid: row.beacon_txid, beaconGidx: row.beacon_gidx ?? 0 } : {}),
     vaultAddress: row.vault_address,
     fillTxid: row.fill_txid,
   };
@@ -137,8 +138,9 @@ export function termsFor(position: WatchPosition, serverKey: Uint8Array, emulato
     payoutKey: position.payoutKey,
     holderPk: position.holderPk,
     holderPayoutKey: position.holderPayoutKey,
-    beacon: beaconIdOf(asset.AssetId.create(position.beaconTxid, position.beaconGidx)),
+    ...(position.beaconTxid ? { beacon: beaconIdOf(asset.AssetId.create(position.beaconTxid, position.beaconGidx ?? 0)) } : {}),
     readFee,
+    oraclePk: position.oraclePk,
     serverKey,
     emulatorKey,
     backupPk: position.backupPk,

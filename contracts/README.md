@@ -4,27 +4,29 @@ Cash-settled options and short-window binary predictions on Arkade. The compiler
 
 ## PredictVault
 
-`predict_vault.ark`. All-or-nothing call on where Bitcoin closes: higher (kind 2: `ST > strike`) or lower (kind 3: `ST < strike`). Exact strike pays the writer for both kinds.
+`predict_vault.ark` (compiled with `@arkade-os/compiler@0.1.0`, importing `dia_btc_usd_cents.ark`). All-or-nothing call on where Bitcoin closes: higher (kind 2: `ST > strike`) or lower (kind 3: `ST < strike`). Exact strike pays the writer for both kinds.
 
-- **Inputs & outputs.** The desk is the writer and funds `collateral` (the full payout); the bettor is the holder and paid `stake` to the desk when `OptionIntent` filled. `settle()` spends the vault as input 0 and `AttestationBeacon` as input 1. Output 0 is the beacon continuation with `readFee` sats added; payouts start at output 1 and sum to `collateral - readFee`.
-- **Beacon read & window.** Reads the newest matching fixing for `expiry` from the beacon state packet (first 8 bytes = price in USD cents, next 8 bytes = sample time). Rejects any sample time outside `[expiry, expiry + 60]`.
-- **Dust folding.** Any payout leg at or below `DUST` (`330` sats) is folded into the other party's output.
+- **Direct DIA verification (no beacon coin, 0-sat read fee).** The desk is the writer and funds `collateral` (the full payout); the bettor is the holder and paid `stake` to the desk when `OptionIntent` filled. `settle(rawPrice, time, nonce, intentExpiry, oracleSig)` verifies the DIA EIP-712 `OracleUpdate` signature directly inside the vault against the pinned `oraclePk`, requires `time` inside `[expiry, expiry + 60]`, and pays the full vault amount to output 0 (winner). Because no shared beacon coin is spent, any number of vaults settle in parallel with zero read fee, and Tier 2 `settleBackup` can settle the true winner on Bitcoin L1 without the primary operator.
+- **Dust folding.** On `refund()`, any leg at or below `DUST` (`330` sats) is folded into the holder's output.
 - **Three-tier exit & void model.** Replaces single-party writer unilateral exit so the House cannot unroll and walk away from a payout:
 
 | Tier | Function | Who | When | Outcome |
 | --- | --- | --- | --- | --- |
-| 1 | `settle()` | Anyone, with operator | After `expiry`, with beacon fixing | Winner paid (`collateral - readFee`) |
-| 1 | `reboard()` | Anyone, with operator | After an unroll (v2 intent proof) | Vault returns off-chain unchanged via `this.tunnel(activeInputIndex - 1)` |
-| 1 | `refund()` | Anyone, with operator | After `expiry + voidAfter` (24h) | Bet is void: `stake` back to holder, remainder to writer (dust folded) |
+| 1 | `settle(rawPrice, time, nonce, intentExpiry, oracleSig)` | Anyone, with operator | After `expiry`, with signed DIA print in `[expiry, expiry + 60]` | Full vault paid to winner (0-sat read fee) |
+| 1 | `reboard()` | Anyone, with operator (`executord` or page) | After an unroll or before expiry (v2 intent proof, `onchain_output_indexes == "[]"`) | Vault returns off-chain unchanged via `this.tunnel(activeInputIndex - 1)` |
+| 1 | `refund()` | Anyone, with operator | After `expiry + voidAfter` (24h) | Prediction is void: `stake` back to holder, remainder to writer (dust folded) |
 | 1 | `close(writerSig, holderSig)` | House and player | Any time | Cooperative split |
-| 2 | `refundBackup(backupSig)` | Backup emulator via `tweak(backupPk, refund)` | After `older(fallbackDelay)` (~6.1h) | Same void outcome on L1 without primary operator |
-| 3 | `unilateral(writerSig, holderSig)` | House and player (2-of-2) | After `older(finalExitDelay)` (~7.1h) | Mutual last-resort L1 exit |
+| 2 | `settleBackup(backupSig)` | Backup emulator via `tweak(backupPk, settle)` | After `older(fallbackDelay)` (~6.1h) | Winner paid on L1 directly from DIA without primary operator |
+| 2 | `refundBackup(backupSig)` | Backup emulator via `tweak(backupPk, refund)` | After `older(fallbackDelay)` (~6.1h) | Void refund on L1 without primary operator (after `expiry + voidAfter`) |
+| 3 | `unilateral(writerSig, holderSig)` | House and player (2-of-2) | After `older(finalExitDelay)` (~30h > `voidAfter`) | Mutual last-resort L1 exit |
 
-Constructor: `kind`, `writerPk`, `holderPk`, `writerScript`, `holderScript`, `strike`, `collateral`, `stake`, `expiry`, `beaconTxid`, `beaconGidx`, `readFee`, `backupPk`, `voidAfter`, `fallbackDelay`, `finalExitDelay`.
+Constructor: `kind`, `writerPk`, `holderPk`, `writerScript`, `holderScript`, `strike`, `collateral`, `stake`, `expiry`, `oraclePk`, `backupPk`, `voidAfter`, `fallbackDelay`, `finalExitDelay`.
+
+> **Mainnet note:** On Mutinynet, if `BACKUP_EMULATOR_PUBKEY` / `PINNED_BACKUP_PUBKEY` is unset, the desk and page fall back to the primary emulator key as a placeholder. On Bitcoin mainnet, the page refuses quotes unless an independent backup emulator pubkey is explicitly pinned.
 
 ## OptionVault
 
-`option_vault.ark`. The writer locks BTC. Kind 0 is a covered call. Kind 1 is a limited put. Settlement pays the holder in BTC from that lock using the same beacon read, `[expiry, expiry + 60]` window, and `330`-sat dust folding as `PredictVault`.
+`option_vault.ark`. The writer locks BTC. Kind 0 is a covered call. Kind 1 is a limited put. Settlement pays the holder in BTC from that lock using the `AttestationBeacon` read, `[expiry, expiry + 60]` window, and `330`-sat dust folding.
 
 | Function | |
 | --- | --- |
@@ -36,7 +38,7 @@ Constructor: `kind`, `writerPk`, `holderPk`, `writerScript`, `holderScript`, `st
 
 ## OptionIntent
 
-`option_intent.ark`. Timed RFQ funding lock filled before a vault exists. `side == 0` (options): writer locks `collateral`, solver pays `premium` and funds `OptionVault`. `side == 1` (Predict): holder locks stake (`premium`), solver pays stake to `solverScript` and funds `PredictVault` with `collateral`. Maker can `cancel()` after `deadline` or exit after `exit`.
+`option_intent.ark`. Timed RFQ funding lock filled before a vault exists. `side == 0` (options): writer locks `collateral`, solver pays `premium` and funds `OptionVault`. `side == 1` (Predict): holder locks stake (`premium`), solver pays stake to `solverScript` and funds `PredictVault` with `collateral`. Maker can `cancel()` immediately after `deadline` (`OP_CHECKTIME`), `executord` can auto-refund via `cancelCltv` (`after(deadline)` + `cancelAuto()`), or maker can exit on Bitcoin after `exit`.
 
 ## AttestationBeacon
 

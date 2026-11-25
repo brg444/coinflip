@@ -1,7 +1,8 @@
 pragma arkade ^0.1.0;
 
-// All-or-nothing vault (kind 2 higher, kind 3 lower); exact strike pays the writer.
+import "./dia_btc_usd_cents.ark";
 
+// All-or-nothing direct-DIA vault (kind 2 higher, kind 3 lower); exact strike pays the writer.
 contract PredictVault(
   int kind,
   pubkey writerPk,
@@ -12,9 +13,7 @@ contract PredictVault(
   int collateral,
   int stake,
   int expiry,
-  bytes32 beaconTxid,
-  int beaconGidx,
-  int readFee,
+  bytes oraclePk,
   pubkey backupPk,
   int voidAfter,
   int fallbackDelay,
@@ -24,10 +23,9 @@ contract PredictVault(
   const int PRICE_MAX = 1000000000;
   const int Q_MAX = 1000000000;
   const int EXPIRY_LAG = 60;
-  const int STATE = 32;
-  const int SIZE = 329;
 
-  function settle() {
+  @allow(unsigned-spend-path, "authorized by pinned DIA EIP-712 signature within the close window")
+  function settle(int rawPrice, int time, int nonce, int intentExpiry, signature oracleSig) {
     require(kind == 2 || kind == 3, "kind");
     require(strike > 0, "strike");
     require(strike <= PRICE_MAX, "strike cap");
@@ -35,73 +33,36 @@ contract PredictVault(
     require(collateral <= Q_MAX, "collateral cap");
     require(checkTime(expiry), "before expiry");
     require(this.activeInputIndex == 0, "vault is input 0");
-    require(tx.numInputs >= 2, "vault and beacon");
-    require(tx.inputs[1].assets.lookup(beaconTxid, beaconGidx) == 1, "beacon");
+    require(time >= expiry, "sample before expiry");
+    require(time <= expiry + EXPIRY_LAG, "sample after close");
 
-    bytes state = tx.inputs[1].packet(STATE);
-    require(size(state) == SIZE, "state size");
-    require(substr(state, 0, 1) == 0x01, "state version");
+    int st = DiaBtcUsdCents.verifyPrice(oraclePk, rawPrice, time, nonce, intentExpiry, oracleSig);
 
-    int st = 0;
-    int sampleTime = 0;
-    int found = 0;
-    int[8] slots = [9, 49, 89, 129, 169, 209, 249, 289];
-    for (i, offset) in slots {
-      if (found == 0 && substr(state, offset, 8) == num2bin(expiry, 8)) {
-        st = bin2num(substr(state, (offset + 8), 8));
-        sampleTime = bin2num(substr(state, (offset + 16), 8));
-        found = 1;
-      }
+    int holderWins = 0;
+    if (kind == 2 && st > strike) {
+      holderWins = 1;
     }
-    require(found == 1, "no fixing for expiry");
-    require(st > 0, "price");
-    require(st <= PRICE_MAX, "price cap");
-    require(sampleTime >= expiry, "sample before expiry");
-    require(sampleTime <= expiry + EXPIRY_LAG, "sample after close");
-
-    int ph = 0;
-    if (kind == 2) {
-      if (st > strike) {
-        ph = collateral;
-      }
-    }
-    if (kind == 3) {
-      if (st < strike) {
-        ph = collateral;
-      }
+    if (kind == 3 && st < strike) {
+      holderWins = 1;
     }
 
     int locked = tx.input.current.value;
     require(locked >= collateral, "underfunded");
-    require(readFee >= 0, "fee");
-    require(locked >= readFee, "fee");
-    int pot = locked - readFee;
-    int phPay = ph;
-    if (phPay > pot) {
-      phPay = pot;
+    let out0 = tx.outputs[0].script;
+    require(tx.outputs[0].value >= locked, "payout short");
+    if (holderWins == 1) {
+      require(out0 == holderScript, "holder script");
     }
-    int writerAmt = pot - phPay;
-
-    if (phPay > DUST && writerAmt > DUST) {
-      require(tx.outputs[1].value >= phPay, "holder short");
-      require(tx.outputs[1].script == holderScript, "holder script");
-      require(tx.outputs[2].value >= writerAmt, "writer short");
-      require(tx.outputs[2].script == writerScript, "writer script");
-    }
-    if (phPay <= DUST) {
-      require(tx.outputs[1].value >= pot, "writer short");
-      require(tx.outputs[1].script == writerScript, "writer script");
-    }
-    if (writerAmt <= DUST && phPay > DUST) {
-      require(tx.outputs[1].value >= pot, "holder short");
-      require(tx.outputs[1].script == holderScript, "holder script");
+    if (holderWins == 0) {
+      require(out0 == writerScript, "writer script");
     }
   }
 
+  @allow(unsigned-spend-path, "permissionless void after expiry + voidAfter returns stake to holder and rest to writer")
   function refund() {
     require(voidAfter > 0, "voidAfter");
     require(checkTime(expiry + voidAfter), "too early to void");
-    require(this.activeInputIndex == 0 && tx.numInputs == 1, "vault only");
+    require(this.activeInputIndex == 0, "vault is input 0");
     require(stake > DUST, "stake");
     require(stake <= Q_MAX, "stake cap");
     int locked = tx.input.current.value;
@@ -118,8 +79,14 @@ contract PredictVault(
     }
   }
 
+  @allow(unsigned-spend-path, "permissionless batch reboard/renewal preserving vault script and value")
   function reboard() {
     require(tx.version == 2, "intent only");
+    bytes intentType = tx.intent.field(bytes("type"));
+    require(intentType == bytes("register") || intentType == bytes("delete"), "intent type");
+    if (intentType == bytes("register")) {
+      require(tx.intent.field(bytes("onchain_output_indexes")) == bytes("[]"), "onchain output");
+    }
     require(this.activeInputIndex >= 1, "intent input");
     require(this.tunnel(this.activeInputIndex - 1), "same position");
   }
@@ -127,6 +94,11 @@ contract PredictVault(
   function close(signature writerSig, signature holderSig) {
     require(checkSig(writerSig, writerPk), "writer");
     require(checkSig(holderSig, holderPk), "holder");
+  }
+
+  function settleBackup(signature backupSig) tapscript {
+    require(older(fallbackDelay));
+    require(checkSig(backupSig, tweak(backupPk, settle)));
   }
 
   function refundBackup(signature backupSig) tapscript {
