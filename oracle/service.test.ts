@@ -775,9 +775,12 @@ test("an intent is stored only when the pinned DIA key signed it", async () => {
   }
 });
 
-test("ingestIntent stores distinct DIA intents immediately before issue and exposes signed samples", async () => {
+test("ingestIntent stores distinct DIA intents immediately, skips before issue, and exposes signed samples", async () => {
   const ctx = await boot({ now: () => RECORDED.time });
   try {
+    await ctx.oracle.ingestIntent(RECORDED);
+    assert.equal((await call(ctx.oracle.url, "/api/status")).json.samples, 0);
+    assert.equal((await call(ctx.oracle.url, "/api/issue", {}, "test-token")).status, 200);
     await ctx.oracle.ingestIntent(RECORDED);
     await ctx.oracle.ingestIntent(RECORDED);
     const status = await call(ctx.oracle.url, "/api/status");

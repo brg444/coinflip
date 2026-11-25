@@ -15,9 +15,8 @@ import {
 } from "@arkade-os/sdk";
 
 import { beaconIdOf } from "../../protocol/beacon-id.ts";
-import { ARK_URL, BEACON_READ_FEE, DUST_SATS, EMULATOR_URL, EXECUTOR_URL, EXIT, isPredict, PREDICT_READ_FEE, type Kind } from "../../protocol/constants.ts";
+import { ARK_URL, BEACON_READ_FEE, DUST_SATS, EMULATOR_URL, EXECUTOR_URL, EXIT, isPredict, type Kind } from "../../protocol/constants.ts";
 import { assertServerExit, bindContracts, payoutVtxo, type Terms } from "../../protocol/contracts.ts";
-import { DIA_PUBKEY } from "../../protocol/dia.ts";
 import { cancelIntentDelegation, cancelIntentTemplate, Executor, reboardVaultDelegation, reboardVaultTemplate } from "../../protocol/executor.ts";
 import { bytesToHex, hexToBytes, xOnly } from "../../protocol/hex.ts";
 import { networkByName } from "../../protocol/network.ts";
@@ -51,12 +50,11 @@ export type FundRequest = {
   holderPubkey?: string;
   /** Predict: the desk's key. */
   writerPkHex?: string;
-  oraclePkHex?: string;
   backupPkHex?: string;
   voidAfter?: bigint;
   fallbackDelay?: bigint;
   finalExitDelay?: bigint;
-  /** Display txid of the beacon identity asset (Options only). */
+  /** Display txid of the beacon identity asset. */
   beaconTxidHex?: string;
   beaconGidx?: number;
   exit?: bigint;
@@ -80,6 +78,7 @@ export type WriterBinding = {
   pubkey: string;
   pkScript: string;
   address: string;
+  network: string;
   signerKey?: Uint8Array;
   payoutKey: Uint8Array;
   serverKey: Uint8Array;
@@ -88,6 +87,7 @@ export type WriterBinding = {
 
 type Session = {
   client: Awaited<ReturnType<typeof arkade.Arkade.connect>>;
+  network: string;
 };
 
 const indexer = new RestIndexerProvider(ARK_URL);
@@ -122,7 +122,7 @@ function operatorSession(): Promise<Session> {
         contractManager,
         network: networkByName(info.network),
       });
-      return { client };
+      return { client, network: info.network.trim().toLowerCase() };
     })();
     operatorPromise.catch(() => {
       operatorPromise = null;
@@ -140,16 +140,19 @@ function openSession(identity: SingleKey): Promise<Session> {
   let pending = sessions.get(id);
   if (!pending) {
     pending = (async () => {
+      const ark = new RestArkProvider(ARK_URL);
+      const info = await ark.getInfo();
+      const network = info.network.trim().toLowerCase();
       const contractManager = await contracts();
       const client = await arkade.Arkade.connect({
-        arkade: new RestArkProvider(ARK_URL),
+        arkade: ark,
         indexer,
         emulator: new RestEmulatorProvider(EMULATOR_URL),
         identity,
         contractManager,
-        network: networks.mutinynet,
+        network: networkByName(network),
       });
-      return { client };
+      return { client, network };
     })();
     pending.catch(() => {
       sessions.delete(id);
@@ -249,7 +252,7 @@ function sessionHex(): string {
 
 export async function writerBinding(address: string, pubkey?: string, exit: bigint = EXIT): Promise<WriterBinding> {
   const decoded = ArkAddress.decode(parseWriterAddress(address));
-  const { client } = await openSession(SingleKey.fromHex(sessionHex()));
+  const { client, network } = await openSession(SingleKey.fromHex(sessionHex()));
   if (!client.emulatorKey) throw new Error("The emulator key is missing.");
   await assertServerExit();
   if (bytesToHex(xOnly(client.serverKey)) !== bytesToHex(xOnly(decoded.serverPubKey))) {
@@ -261,6 +264,7 @@ export async function writerBinding(address: string, pubkey?: string, exit: bigi
     pubkey: bytesToHex(signerKey ?? payoutKey),
     pkScript: bytesToHex(decoded.pkScript),
     address: decoded.encode(),
+    network,
     signerKey,
     payoutKey,
     serverKey: client.serverKey,
@@ -333,8 +337,8 @@ async function build(req: FundRequest) {
 
 /** Predict: the bettor holds, and their address is paid. The desk writes. */
 async function buildPredict(req: FundRequest) {
-  if (!req.writerPkHex) {
-    throw new Error("A prediction needs a desk quote.");
+  if (!req.writerPkHex || !req.beaconTxidHex) {
+    throw new Error("A prediction needs a desk quote that names the beacon.");
   }
   if (!req.holderAddress) throw new Error("Paste your Arkade address first.");
   const exit = req.exit ?? EXIT;
@@ -342,9 +346,8 @@ async function buildPredict(req: FundRequest) {
   const { client } = await openSession(SingleKey.fromHex(sessionHex()));
   const holderPk = binding.signerKey ?? binding.payoutKey;
   const writerPk = hexToBytes(req.writerPkHex);
-  const beaconTxidHex = (req.beaconTxidHex ?? "").toLowerCase();
+  const beaconTxidHex = req.beaconTxidHex.toLowerCase();
   const beaconGidx = req.beaconGidx ?? 0;
-  const oraclePk = req.oraclePkHex ? hexToBytes(req.oraclePkHex) : DIA_PUBKEY;
   const terms: Terms = {
     kind: req.kind,
     strike: req.strike,
@@ -356,13 +359,12 @@ async function buildPredict(req: FundRequest) {
     writerPk,
     holderPk,
     holderPayoutKey: binding.signerKey ? undefined : binding.payoutKey,
-    oraclePk,
     backupPk: req.backupPkHex ? hexToBytes(req.backupPkHex) : undefined,
     voidAfter: req.voidAfter,
     fallbackDelay: req.fallbackDelay,
     finalExitDelay: req.finalExitDelay,
-    ...(beaconTxidHex ? { beacon: beaconIdOf(asset.AssetId.create(beaconTxidHex, beaconGidx)) } : {}),
-    readFee: PREDICT_READ_FEE,
+    beacon: beaconIdOf(asset.AssetId.create(beaconTxidHex, beaconGidx)),
+    readFee: BEACON_READ_FEE,
     serverKey: binding.serverKey,
     emulatorKey: binding.emulatorKey,
   };

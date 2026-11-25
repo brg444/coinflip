@@ -247,10 +247,10 @@ test("addresses and unilateral tapscript bytes stay identical at EXIT=2048", asy
   assert.equal(call.vaultAddress, "tark1qqhsre0ptn9r28d07wzrldc08shs5x7aqhj6lzy2vauyaulppg4qrdm35e6fry9e8qt2xnrr34lt3hfh7vr7n7p5zdr52g3g04hk23dy9766w4");
   assert.equal(put.intentAddress, "tark1qqhsre0ptn9r28d07wzrldc08shs5x7aqhj6lzy2vauyaulppg4qrxna9s74zq3kvfwkvdms3hqd8mmdfnrj93ec93akm8mull0j06y23fwgrz");
   assert.equal(put.vaultAddress, "tark1qqhsre0ptn9r28d07wzrldc08shs5x7aqhj6lzy2vauyaulppg4qzxssap5m5k74dhu7qazfl5u46t9xdtzdpqqy0kan7nk7wqgmx3pn0g5938");
-  assert.equal(higher.intentAddress, "tark1qqhsre0ptn9r28d07wzrldc08shs5x7aqhj6lzy2vauyaulppg4qrgzespn7lwh886vczfuu7efyf36xg4nxpqghtq36rlakxa9xnepm7tqplc");
-  assert.equal(higher.vaultAddress, "tark1qqhsre0ptn9r28d07wzrldc08shs5x7aqhj6lzy2vauyaulppg4qzspw2trjqsvnfgugt9s0ntzfgjxu2mqk3kg6h3dlxevnur93tfj5drfrfg");
-  assert.equal(lower.intentAddress, "tark1qqhsre0ptn9r28d07wzrldc08shs5x7aqhj6lzy2vauyaulppg4qzz5cxf5gvhz3fdsaddljk5fq3cex7j7d75n7n0wx4sr7jelv64ff33247h");
-  assert.equal(lower.vaultAddress, "tark1qqhsre0ptn9r28d07wzrldc08shs5x7aqhj6lzy2vauyaulppg4qzma7eaav68cq20z97u925wy7z2dfa08gsmw6k4lcrm2fvuxuhxmtg8rjgd");
+  assert.equal(higher.intentAddress, "tark1qqhsre0ptn9r28d07wzrldc08shs5x7aqhj6lzy2vauyaulppg4qr4yz44dagy7hn454sgleay5wg62prfws7n2ajhurae5ev3a9lflue7nsta");
+  assert.equal(higher.vaultAddress, "tark1qqhsre0ptn9r28d07wzrldc08shs5x7aqhj6lzy2vauyaulppg4qrq04hgeue04c4pl88neasx8e69fahmf3pp9qpuce6kjdcaj78dp2nlh0ty");
+  assert.equal(lower.intentAddress, "tark1qqhsre0ptn9r28d07wzrldc08shs5x7aqhj6lzy2vauyaulppg4qza83ctpf3y586rkdnqpyn8vr5505a4ncxsunfxsk9uhehal4g68yqx378r");
+  assert.equal(lower.vaultAddress, "tark1qqhsre0ptn9r28d07wzrldc08shs5x7aqhj6lzy2vauyaulppg4qr54nurjnyzg3mfjlwkyffp0fp0ncy9fktcnh6x966k8hzcmc98rkm4davj");
   const bcn = bindBeacon({
     id: beacon,
     domain: new TextEncoder().encode("BTCUSD-FIX"),

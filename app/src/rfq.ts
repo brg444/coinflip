@@ -4,16 +4,15 @@ import { asset } from "@arkade-os/sdk";
 
 import { beaconIdOf } from "../../protocol/beacon-id.ts";
 import {
+  BEACON_READ_FEE,
   EXIT,
   PAIR,
   PREDICT_FALLBACK_DELAY,
   PREDICT_FINAL_EXIT_DELAY,
-  PREDICT_READ_FEE,
   PREDICT_VOID_AFTER,
   type PredictKind,
 } from "../../protocol/constants.ts";
 import { bindContracts } from "../../protocol/contracts.ts";
-import { DIA_PUBKEY } from "../../protocol/dia.ts";
 import { bytesToHex, hexToBytes, xOnly } from "../../protocol/hex.ts";
 import { isPredictQuote, payoutRefusal, type RfqQuote, type RfqRefusal, type RfqRequest } from "../../protocol/messages.ts";
 import { payoutMultiplier } from "../../protocol/pricing.ts";
@@ -24,11 +23,6 @@ import { writerBinding } from "./fund.ts";
 
 export function quoteMatchesBeacon(beaconTxid: string, beaconGidx: number, status: unknown = LIVE_BEACON_STATUS): boolean {
   return parseOracleBeacon(status, beaconTxid, beaconGidx).ok;
-}
-
-export function oracleKeyMatches(quoteOraclePk: string, expected: string = bytesToHex(DIA_PUBKEY)): boolean {
-  const candidate = quoteOraclePk.trim().toLowerCase();
-  return /^10(02|03)[0-9a-f]{64}$/.test(candidate) && candidate === expected.trim().toLowerCase();
 }
 
 export function backupKeyMatches(
@@ -70,7 +64,6 @@ export type PredictQuote = {
   deadline: number;
   exit: number;
   deskPkHex: string;
-  oraclePkHex: string;
   backupPkHex: string;
   voidAfter: number;
   fallbackDelay: number;
@@ -141,10 +134,10 @@ export async function requestPredictQuotes(input: {
     if (quote.profile.void_after !== Number(PREDICT_VOID_AFTER)) continue;
     if (quote.profile.fallback_delay !== Number(PREDICT_FALLBACK_DELAY)) continue;
     if (quote.profile.final_exit_delay !== Number(PREDICT_FINAL_EXIT_DELAY)) continue;
-    if (!oracleKeyMatches(quote.profile.oracle_pubkey)) continue;
-    if (!backupKeyMatches(quote.profile.backup_pubkey, quote.profile.writer_pubkey, profile.emulatorKey, input.backupPubkey ?? null)) continue;
+    if (!quoteMatchesBeacon(quote.profile.beacon_txid, quote.profile.beacon_gidx)) continue;
+    if (!backupKeyMatches(quote.profile.backup_pubkey, quote.profile.writer_pubkey, profile.emulatorKey, input.backupPubkey ?? null, profile.network)) continue;
     const payout = BigInt(quote.to_amount);
-    if (payoutRefusal(payout, input.stake, PREDICT_READ_FEE)) continue;
+    if (payoutRefusal(payout, input.stake, BEACON_READ_FEE)) continue;
     let bound;
     try {
       bound = bindContracts({
@@ -158,12 +151,12 @@ export async function requestPredictQuotes(input: {
         writerPk: hexToBytes(quote.profile.writer_pubkey),
         holderPk: profile.signerKey ?? profile.payoutKey,
         holderPayoutKey: profile.signerKey ? undefined : profile.payoutKey,
-        oraclePk: hexToBytes(quote.profile.oracle_pubkey),
         backupPk: hexToBytes(quote.profile.backup_pubkey),
         voidAfter: BigInt(quote.profile.void_after),
         fallbackDelay: BigInt(quote.profile.fallback_delay),
         finalExitDelay: BigInt(quote.profile.final_exit_delay),
-        readFee: PREDICT_READ_FEE,
+        beacon: beaconIdOf(asset.AssetId.create(quote.profile.beacon_txid, quote.profile.beacon_gidx)),
+        readFee: BEACON_READ_FEE,
         serverKey: profile.serverKey,
         emulatorKey: profile.emulatorKey,
       });
@@ -182,13 +175,12 @@ export async function requestPredictQuotes(input: {
       deadline: quote.profile.deadline,
       exit: quote.profile.exit,
       deskPkHex: quote.profile.writer_pubkey,
-      oraclePkHex: quote.profile.oracle_pubkey,
       backupPkHex: quote.profile.backup_pubkey,
       voidAfter: quote.profile.void_after,
       fallbackDelay: quote.profile.fallback_delay,
       finalExitDelay: quote.profile.final_exit_delay,
-      beaconTxid: quote.profile.beacon_txid ?? "",
-      beaconGidx: quote.profile.beacon_gidx ?? 0,
+      beaconTxid: quote.profile.beacon_txid,
+      beaconGidx: quote.profile.beacon_gidx,
       intentAddress: quote.profile.intent_address,
       vaultAddress: quote.profile.vault_address,
     });

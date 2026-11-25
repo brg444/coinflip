@@ -1,8 +1,7 @@
 import { asset } from "@arkade-os/sdk";
 
 import { beaconIdOf } from "../protocol/beacon-id.ts";
-import { DIA_PUBKEY, intentSigned, type DiaIntent } from "../protocol/dia.ts";
-import { bytesToHex, hexToBytes } from "../protocol/hex.ts";
+import { bytesToHex } from "../protocol/hex.ts";
 
 /**
  * The oracle's public status. Settlement needs the beacon constructor from
@@ -57,7 +56,6 @@ export function serviceOrigin(raw: string): string {
 }
 
 export type OracleSample = { price: string; time: number };
-export type SignedOracleSample = OracleSample & { intent: DiaIntent };
 
 /** Samples from `GET /api/prices`. Rows that are not a price and a time are skipped. */
 export async function fetchOraclePrices(origin: string, from: number, to: number, signal?: AbortSignal): Promise<OracleSample[]> {
@@ -72,41 +70,6 @@ export async function fetchOraclePrices(origin: string, from: number, to: number
     if (typeof sample.price !== "string" || !/^[0-9]+$/.test(sample.price)) continue;
     if (typeof sample.time !== "number" || !Number.isSafeInteger(sample.time)) continue;
     samples.push({ price: sample.price, time: sample.time });
-  }
-  return samples;
-}
-
-/** Verified signed DIA intents from `GET /api/prices?signed=1`. */
-export async function fetchSignedOraclePrices(
-  origin: string,
-  from: number,
-  to: number,
-  oraclePk: Uint8Array = DIA_PUBKEY,
-  signal?: AbortSignal,
-): Promise<SignedOracleSample[]> {
-  const res = await fetch(`${origin}/api/prices?from=${from}&to=${to}&limit=200&signed=1`, { signal });
-  if (!res.ok) throw new Error(`oracle prices ${res.status}`);
-  const body = await res.json() as { samples?: unknown };
-  if (!body || typeof body !== "object" || !Array.isArray(body.samples)) throw new Error("oracle prices");
-  const samples: SignedOracleSample[] = [];
-  for (const row of body.samples) {
-    if (!row || typeof row !== "object") continue;
-    const s = row as Record<string, unknown>;
-    if (typeof s.price !== "string" || !/^[0-9]+$/.test(s.price)) continue;
-    if (typeof s.time !== "number" || !Number.isSafeInteger(s.time)) continue;
-    if (typeof s.raw !== "string" || !/^[0-9]+$/.test(s.raw)) continue;
-    if (typeof s.nonce !== "string" || !/^[0-9]+$/.test(s.nonce)) continue;
-    if (typeof s.intentExpiry !== "number" || !Number.isSafeInteger(s.intentExpiry)) continue;
-    if (typeof s.sig !== "string" || !/^[0-9a-f]{128}$/i.test(s.sig)) continue;
-    const intent: DiaIntent = {
-      price: BigInt(s.raw),
-      time: s.time,
-      nonce: BigInt(s.nonce),
-      intentExpiry: s.intentExpiry,
-      sig: hexToBytes(s.sig),
-    };
-    if (!intentSigned(intent, oraclePk)) continue;
-    samples.push({ price: s.price, time: s.time, intent });
   }
   return samples;
 }

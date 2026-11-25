@@ -8,7 +8,6 @@ export const PREDICT_VAULT_PROGRAM_ID = "PredictVaultV2";
 export const EXIT = 2048n;
 export const DUST_SATS = 330n;
 export const BEACON_READ_FEE = 1_000n;
-export const PREDICT_READ_FEE = 0n;
 export const QUOTE_TTL_S = 30;
 export const LOCK_S = 180;
 export const ARK_URL = "https://mutinynet.arkade.sh";

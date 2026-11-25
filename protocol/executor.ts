@@ -21,6 +21,19 @@ export function compressedEvenKeyHex(xOnlyKey: Uint8Array): string {
   return `02${bytesToHex(xOnly(xOnlyKey))}`;
 }
 
+// executord rejects composite ScriptPubKey constructor inputs; flatten them to .program (bytes32) + .version (int).
+export function executorArtifact(artifact: arkade.ContractArtifact): Record<string, unknown> {
+  const raw = artifact as unknown as { constructorInputs?: { name: string; type: string }[] };
+  return {
+    ...raw,
+    constructorInputs: (raw.constructorInputs ?? []).flatMap((input) => (
+      input.type === "ScriptPubKey"
+        ? [{ name: `${input.name}.program`, type: "bytes32" }, { name: `${input.name}.version`, type: "int" }]
+        : [input]
+    )),
+  };
+}
+
 export function cancelIntentTemplate(artifactId: string) {
   return {
     format: "template/v1",
@@ -85,7 +98,9 @@ export function reboardVaultTemplate(artifactId: string, renewalWindowSeconds = 
       collateral: "int",
       stake: "int",
       expiry: "int",
-      oracle_pk: "bytes",
+      beacon_txid: "bytes32",
+      beacon_gidx: "int",
+      read_fee: "int",
       backup_pk: "pubkey",
       void_after: "int",
       fallback_delay: "int",
@@ -108,7 +123,9 @@ export function reboardVaultTemplate(artifactId: string, renewalWindowSeconds = 
             collateral: "<collateral>",
             stake: "<stake>",
             expiry: "<expiry>",
-            oraclePk: "<oracle_pk>",
+            beaconTxid: "<beacon_txid>",
+            beaconGidx: "<beacon_gidx>",
+            readFee: "<read_fee>",
             backupPk: "<backup_pk>",
             voidAfter: "<void_after>",
             fallbackDelay: "<fallback_delay>",
@@ -164,7 +181,9 @@ export function reboardVaultDelegation(templateId: string, bound: Bound): Delega
       collateral: scriptNumHex(bound.vault.collateral as bigint),
       stake: scriptNumHex(bound.vault.stake as bigint),
       expiry: scriptNumHex(bound.vault.expiry as bigint),
-      oracle_pk: bytesToHex(bound.vault.oraclePk as Uint8Array),
+      beacon_txid: bytesToHex(bound.vault.beaconTxid as Uint8Array),
+      beacon_gidx: scriptNumHex(bound.vault.beaconGidx as bigint),
+      read_fee: scriptNumHex(bound.vault.readFee as bigint),
       backup_pk: compressedEvenKeyHex(bound.vault.backupPk as Uint8Array),
       void_after: scriptNumHex(bound.vault.voidAfter as bigint),
       fallback_delay: scriptNumHex(bound.vault.fallbackDelay as bigint),
@@ -194,18 +213,27 @@ export class Executor {
     if (!clean) return undefined;
     try {
       const res = await fetch(`${clean}/v1/info`, { signal: signal ?? AbortSignal.timeout(5_000) });
-      if (!res.ok) return undefined;
+      if (!res.ok) {
+        console.warn(`[executor] info ${res.status} from ${clean}`);
+        return undefined;
+      }
       const info = (await res.json()) as Record<string, string | undefined>;
       const tail = (key = "") => key.trim().toLowerCase().slice(-64);
-      if (tail(info.serverPubkey) !== bytesToHex(xOnly(keys.serverKey))) return undefined;
-      if (tail(info.emulatorPubkey) !== bytesToHex(xOnly(keys.emulatorKey))) return undefined;
+      if (tail(info.serverPubkey) !== bytesToHex(xOnly(keys.serverKey))) {
+        console.warn("[executor] server pubkey mismatch, skipping");
+        return undefined;
+      }
+      if (tail(info.emulatorPubkey) !== bytesToHex(xOnly(keys.emulatorKey))) {
+        console.warn("[executor] emulator pubkey mismatch, skipping");
+        return undefined;
+      }
       return new Executor(clean);
-    } catch {
+    } catch (err) {
+      console.warn("[executor] connect failed:", err instanceof Error ? err.message : String(err));
       return undefined;
     }
   }
 
-  /** Idempotently registers artifact + template on executord and caches the returned template id. */
   async ensureTemplate(
     name: string,
     artifact: arkade.ContractArtifact,
@@ -217,10 +245,13 @@ export class Executor {
       const aRes = await fetch(`${this.url}/v1/artifact`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ document: JSON.stringify(artifact) }),
+        body: JSON.stringify({ document: JSON.stringify(executorArtifact(artifact)) }),
         signal: AbortSignal.timeout(8_000),
       });
-      if (!aRes.ok) return null;
+      if (!aRes.ok) {
+        console.warn(`[executor] artifact ${name} ${aRes.status}:`, await aRes.text().catch(() => ""));
+        return null;
+      }
       const aBody = (await aRes.json()) as { artifact?: { id?: string }; id?: string };
       const artifactId = aBody.artifact?.id ?? aBody.id;
       if (!artifactId) return null;
@@ -230,13 +261,17 @@ export class Executor {
         body: JSON.stringify({ document: JSON.stringify(buildTemplate(artifactId)) }),
         signal: AbortSignal.timeout(8_000),
       });
-      if (!tRes.ok) return null;
+      if (!tRes.ok) {
+        console.warn(`[executor] template ${name} ${tRes.status}:`, await tRes.text().catch(() => ""));
+        return null;
+      }
       const tBody = (await tRes.json()) as { template?: { id?: string }; id?: string };
       const templateId = tBody.template?.id ?? tBody.id;
       if (!templateId) return null;
       this.templates.set(name, templateId);
       return templateId;
-    } catch {
+    } catch (err) {
+      console.warn(`[executor] ensureTemplate ${name} failed:`, err instanceof Error ? err.message : String(err));
       return null;
     }
   }
@@ -249,8 +284,13 @@ export class Executor {
         body: JSON.stringify(delegation),
         signal: AbortSignal.timeout(8_000),
       });
-      return res.ok;
-    } catch {
+      if (!res.ok) {
+        console.warn(`[executor] delegate ${delegation.templateId} ${res.status}:`, await res.text().catch(() => ""));
+        return false;
+      }
+      return true;
+    } catch (err) {
+      console.warn(`[executor] delegate ${delegation.templateId} failed:`, err instanceof Error ? err.message : String(err));
       return false;
     }
   }

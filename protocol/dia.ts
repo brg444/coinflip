@@ -251,45 +251,6 @@ export async function fetchPinnedIntent(signal?: AbortSignal, oraclePk: Uint8Arr
   throw new Error("no pinned DIA intent");
 }
 
-/** Find the newest pinned DIA intent inside `[expiry, expiry + expiryLag]` directly from Lasernet logs. */
-export async function findWindowIntent(
-  expiry: number,
-  expiryLag = 60,
-  oraclePk: Uint8Array = DIA_PUBKEY,
-  signal?: AbortSignal,
-): Promise<DiaIntent | null> {
-  const head = Number(await rpc("eth_blockNumber", [], signal));
-  const now = Math.floor(Date.now() / 1000);
-  // Lasernet produces ~3.3 blocks/s; cover back past expiry with margin, capped to a reasonable RPC range.
-  const ageBlocks = Math.max(0, now - expiry) * 4 + 2_000;
-  const fromBlock = Math.max(0, head - Math.min(ageBlocks, 500_000));
-  const filter = intentRegisteredFilter();
-  const logs = await rpc("eth_getLogs", [{
-    address: filter.address,
-    fromBlock: `0x${fromBlock.toString(16)}`,
-    toBlock: "latest",
-    topics: filter.topics,
-  }], signal);
-  if (!Array.isArray(logs)) return null;
-  const want = ethAddressOf(oraclePk);
-  const hi = expiry + expiryLag;
-  for (let i = logs.length - 1; i >= 0; i--) {
-    const log = logs[i] as { data?: string; topics?: string[] };
-    const data = (log.data ?? "").replace(/^0x/, "");
-    if (data.length < 128) continue;
-    const stamp = Number(BigInt(`0x${data.slice(0, 64)}`));
-    if (stamp > hi) continue;
-    if (stamp < expiry) break;
-    const signer = data.slice(64 + 24, 128).toLowerCase();
-    if (signer !== want) continue;
-    const hash = log.topics?.[1];
-    if (!hash) continue;
-    const intent = await intentByHash(hash, signal);
-    if (intent.time >= expiry && intent.time <= hi && accepts(intent, oraclePk)) return intent;
-  }
-  return null;
-}
-
 /** Topic of `IntentRegistered` for symbol `BTC/USD`. Indexed string is keccak256 of the bytes. */
 export function intentRegisteredFilter(): { address: string; topics: [string, null, string] } {
   const event = keccak_256(new TextEncoder().encode("IntentRegistered(bytes32,string,uint256,uint256,address)"));

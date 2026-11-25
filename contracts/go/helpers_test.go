@@ -1,6 +1,7 @@
 package contractstest
 
 import (
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -10,16 +11,16 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/arkade-os/arkd/pkg/ark-lib/asset"
+	"github.com/arkade-os/arkd/pkg/ark-lib/extension"
 	scriptlib "github.com/arkade-os/arkd/pkg/ark-lib/script"
 	"github.com/arkade-os/emulator/pkg/arkade"
 	"github.com/btcsuite/btcd/btcec/v2"
-	"github.com/btcsuite/btcd/btcec/v2/ecdsa"
 	"github.com/btcsuite/btcd/btcec/v2/schnorr"
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/psbt/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
-	"golang.org/x/crypto/sha3"
 )
 
 type artifactFile struct {
@@ -76,14 +77,6 @@ func privKeyFromByte(b byte) *btcec.PrivateKey {
 
 func xOnlyPub(priv *btcec.PrivateKey) []byte {
 	return schnorr.SerializePubKey(priv.PubKey())
-}
-
-func mustHex(s string) []byte {
-	b, err := hex.DecodeString(s)
-	if err != nil {
-		panic(err)
-	}
-	return b
 }
 
 func p2trScript(xOnlyKey []byte) []byte {
@@ -305,55 +298,75 @@ func execArkadeLeaf(
 	return parsed.Execute(tx, prevOuts, inputIdx, opts...)
 }
 
-func keccak256(parts ...[]byte) []byte {
-	h := sha3.NewLegacyKeccak256()
-	for _, p := range parts {
-		h.Write(p)
+type beaconSlot struct {
+	expiry     int64
+	priceCents int64
+	sampleTime int64
+}
+
+func encodeBeaconState(round uint64, slots []beaconSlot) []byte {
+	buf := make([]byte, 329)
+	buf[0] = 0x01
+	binary.LittleEndian.PutUint64(buf[1:9], round)
+	for i, slot := range slots {
+		if i >= 8 {
+			break
+		}
+		off := 9 + i*40
+		binary.LittleEndian.PutUint64(buf[off:off+8], uint64(slot.expiry))
+		binary.LittleEndian.PutUint64(buf[off+8:off+16], uint64(slot.priceCents))
+		binary.LittleEndian.PutUint64(buf[off+16:off+24], uint64(slot.sampleTime))
 	}
-	return h.Sum(nil)
+	return buf
 }
 
-func wordBE32(n *big.Int) []byte {
-	out := make([]byte, 32)
-	b := n.Bytes()
-	copy(out[32-len(b):], b)
-	return out
-}
-
-var (
-	diaDomain     = mustHex("f57d55f057fd4aba6b1a7f8bccb6a3e826cf71fd34971f22a39d7ffd6e620fb3")
-	diaTypehash   = mustHex("24e574fa7512cc24e9109b981256e33759d91bc2ee9b74a2bf633e013c0620b5")
-	diaIntentType = mustHex("ef9b6324ed493183babb66ed98fcf36e9bcb0243ae4c5a29fcd99184b08f1899")
-	diaVersion    = mustHex("e6bbd6277e1bf288eed5e8d1780f9a50b239e86b153736bceebccf4ea79d90b3")
-	diaSymbol     = mustHex("ee62665949c883f9e0f6f002eac32e00bd59dfe6c34e92a91c37d6a8322d6489")
-	diaSource     = mustHex("f5a695b63ab16fd8278cb1cf7d29f274a9574b64e0b894750e08c990fc8891bc")
-	diaScale      = new(big.Int).Exp(big.NewInt(10), big.NewInt(16), nil)
-)
-
-func diaOraclePk(priv *btcec.PrivateKey) []byte {
-	return append([]byte{0x10}, priv.PubKey().SerializeCompressed()...)
-}
-
-func signDiaCents(priv *btcec.PrivateKey, cents, sampleTime, nonce, intentExpiry int64) (*big.Int, []byte) {
-	rawPrice := new(big.Int).Mul(big.NewInt(cents), diaScale)
-	body := make([]byte, 0, 320)
-	for _, chunk := range [][]byte{
-		diaTypehash,
-		diaIntentType,
-		diaVersion,
-		wordBE32(big.NewInt(1050)),
-		wordBE32(big.NewInt(nonce)),
-		wordBE32(big.NewInt(intentExpiry)),
-		diaSymbol,
-		wordBE32(rawPrice),
-		wordBE32(big.NewInt(sampleTime)),
-		diaSource,
-	} {
-		body = append(body, chunk...)
+func beaconPrevTx(t *testing.T, beaconScript []byte, state []byte) *wire.MsgTx {
+	t.Helper()
+	ext, err := extension.NewExtensionFromPackets(extension.UnknownPacket{PacketType: 32, Data: state})
+	if err != nil {
+		t.Fatalf("beacon state ext: %v", err)
 	}
-	digest := keccak256([]byte{0x19, 0x01}, diaDomain, keccak256(body))
-	compact := ecdsa.SignCompact(priv, digest, true)
-	return rawPrice, compact[1:]
+	extOut, err := ext.TxOut()
+	if err != nil {
+		t.Fatalf("beacon state txout: %v", err)
+	}
+	prev := wire.NewMsgTx(3)
+	prev.AddTxIn(wire.NewTxIn(&wire.OutPoint{}, nil, nil))
+	prev.AddTxOut(wire.NewTxOut(330, beaconScript))
+	prev.AddTxOut(extOut)
+	return prev
+}
+
+func beaconTransferExtTxOut(t *testing.T, beaconTxid [32]byte, beaconGidx uint16, state []byte) *wire.TxOut {
+	t.Helper()
+	var hash chainhash.Hash
+	copy(hash[:], beaconTxid[:])
+	aid := &asset.AssetId{Txid: hash, Index: beaconGidx}
+	in, err := asset.NewAssetInput(1, 1)
+	if err != nil {
+		t.Fatalf("asset input: %v", err)
+	}
+	out, err := asset.NewAssetOutput(0, 1)
+	if err != nil {
+		t.Fatalf("asset output: %v", err)
+	}
+	grp, err := asset.NewAssetGroup(aid, nil, []asset.AssetInput{*in}, []asset.AssetOutput{*out}, nil)
+	if err != nil {
+		t.Fatalf("asset group: %v", err)
+	}
+	pkt, err := asset.NewPacket([]asset.AssetGroup{*grp})
+	if err != nil {
+		t.Fatalf("asset packet: %v", err)
+	}
+	ext, err := extension.NewExtensionFromPackets(pkt, extension.UnknownPacket{PacketType: 32, Data: state})
+	if err != nil {
+		t.Fatalf("transfer ext: %v", err)
+	}
+	txOut, err := ext.TxOut()
+	if err != nil {
+		t.Fatalf("transfer ext txout: %v", err)
+	}
+	return txOut
 }
 
 func dummyOutPoint(tag byte, vout uint32) wire.OutPoint {

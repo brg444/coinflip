@@ -118,7 +118,7 @@ export function duePositionExpiries(
   const allowed = opts.allowedPubkey?.toLowerCase();
   const byExpiry = new Map<number, OptionPosition[]>();
   for (const pos of positions) {
-    if (!pos.beacon_txid || pos.beacon_txid.toLowerCase() !== ourTxid || pos.beacon_gidx !== ourGidx) continue;
+    if (pos.beacon_txid.toLowerCase() !== ourTxid || pos.beacon_gidx !== ourGidx) continue;
     if (allowed && pos.writer_pubkey.toLowerCase() !== allowed && pos.holder_pubkey.toLowerCase() !== allowed) continue;
     if (pos.program_id !== vaultProgramId(pos.kind)) continue;
     if (BigInt(pos.collateral) < READ_FEE + DUST_SATS) continue;
@@ -403,6 +403,7 @@ export async function createOracle(deps: OracleDeps) {
 
   async function recordIntent(intent: DiaIntent) {
     if (!adminPk) throw new HttpError(400, "ORACLE_KEY is required");
+    if (!store.assetId) throw new HttpError(409, "not issued");
     let cents: bigint;
     try {
       cents = centsOf(intent.price);
@@ -634,7 +635,7 @@ export async function createOracle(deps: OracleDeps) {
   }
 
   async function takeSample() {
-    if (!deps.pull) return;
+    if (!deps.pull || !store.assetId) return;
     const intent = await deps.pull();
     if (!intent) return;
     await recordIntent(intent);
@@ -656,6 +657,7 @@ export async function createOracle(deps: OracleDeps) {
   const timer = deps.sampleEveryMs && deps.sampleEveryMs > 0 ? setInterval(minute, deps.sampleEveryMs) : undefined;
   if (timer) minute();
   async function ingestIntent(intent: DiaIntent) {
+    if (!store.assetId) return;
     await recordIntent(intent);
   }
 

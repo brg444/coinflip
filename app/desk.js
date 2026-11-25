@@ -25,11 +25,11 @@ import {
 import { requestPredictQuotes } from "./src/rfq.ts";
 import { btcUsdCents, deribitMultiplier, fetchSurface } from "../protocol/deribit.ts";
 import {
+  BEACON_READ_FEE,
   isPredict,
   PREDICT_GRID_S,
   PREDICT_LOCK_S,
   PREDICT_MIN_LEFT_S,
-  PREDICT_READ_FEE,
   PREDICT_VOID_AFTER,
   QUOTE_TTL_S,
   STAKE_MAX,
@@ -138,7 +138,6 @@ function persist() {
     settleCents: p.settleCents || "",
     fixCents: p.fixCents || "",
     deskPkHex: p.deskPkHex || "",
-    oraclePkHex: p.oraclePkHex || "",
     backupPkHex: p.backupPkHex || "",
     voidAfter: p.voidAfter || 0,
     fallbackDelay: p.fallbackDelay || 0,
@@ -380,7 +379,7 @@ function sendClock(node) {
 
 function canSettle(position) {
   if (position.status !== "filled") return false;
-  if (!position.vaultAddress || !position.deskPkHex) return false;
+  if (!position.vaultAddress || !position.deskPkHex || !position.beaconTxid) return false;
   const expiry = Number(position.expiry) || 0;
   if (!expiry || expiry > Math.floor(Date.now() / 1000)) return false;
   if (position.settleTxid && position.settleTxid !== position.closeTxid) return false;
@@ -497,7 +496,6 @@ async function fundRequest(position) {
     expiry: position.expiry,
     deadline: BigInt(position.deadline),
     writerPkHex: position.deskPkHex,
-    oraclePkHex: position.oraclePkHex || undefined,
     backupPkHex: position.backupPkHex || undefined,
     voidAfter: position.voidAfter ? BigInt(position.voidAfter) : undefined,
     fallbackDelay: position.fallbackDelay ? BigInt(position.fallbackDelay) : undefined,
@@ -662,7 +660,7 @@ function startWatch() {
   const watched = rows.map((position) => ({
     ...watchRow(position),
     register: async () => {
-      if (!position.deskPkHex) return "";
+      if (!position.deskPkHex || !position.beaconTxid) return "";
       return registerIntent(await fundRequest(position));
     },
   }));
@@ -1075,7 +1073,7 @@ const localTime = (unix) => new Date(Number(unix) * 1000).toLocaleTimeString(und
 const utcTime = (unix) => `${hhmm(new Date(Number(unix) * 1000))} UTC`;
 const usdCents = (cents) => `$${usdFromCents(BigInt(cents))}`;
 const timesX = (m) => `${m.toFixed(2)}×`;
-const won = (payout) => payout - PREDICT_READ_FEE;
+const won = (payout) => payout - BEACON_READ_FEE;
 const amount = (sats) => (sats < 100_000n ? `${int(sats)} sats` : `₿${fmtBtc(sats)}`);
 
 /** The next closes on the 5-minute grid, then the quarter hours after them. */
@@ -1762,14 +1760,9 @@ function renderBet() {
     $("bet-head").textContent = "This doesn’t beat your stake.";
     $("bet-sub").textContent = m == null
       ? "The desk doesn’t quote this line for this close."
-      : `It wins ${int(won(payout))} sats, not more than the ${int(t.stake)} you put in.`;
+      : `It wins ${int(won(payout))} sats after the 1,000-sat fee, not more than the ${int(t.stake)} you put in.`;
   }
-  const feeRow = $("bet-fee");
-  if (feeRow) {
-    feeRow.hidden = PREDICT_READ_FEE === 0n;
-    $("bet-fee-label").textContent = `Price-check fee at ${at}`;
-    $("bet-fee-amount").textContent = `−${int(PREDICT_READ_FEE)} sats`;
-  }
+  $("bet-fee-label").textContent = `Price-check fee at ${at}`;
   $("bet-rows-when").textContent = `If BTC at ${at} is`;
   const rows = [
     [`${capital(DIR[t.kind])} ${line}`, payout != null ? inUnit(won(payout)) : "—",
@@ -1887,7 +1880,6 @@ async function askBet() {
       holderAddress: state.address,
       holderPubkey: state.pubkey || undefined,
       writerPkHex: quote.deskPkHex,
-      oraclePkHex: quote.oraclePkHex,
       backupPkHex: quote.backupPkHex,
       voidAfter: BigInt(quote.voidAfter),
       fallbackDelay: BigInt(quote.fallbackDelay),
@@ -1938,7 +1930,6 @@ function placeBet() {
       deadline: quote.deadline,
       address: deposit.address,
       deskPkHex: quote.deskPkHex,
-      oraclePkHex: quote.oraclePkHex,
       backupPkHex: quote.backupPkHex,
       voidAfter: quote.voidAfter,
       fallbackDelay: quote.fallbackDelay,
@@ -2239,7 +2230,7 @@ function renderPrediction(p) {
     body.push(ledger([
       ["You staked", `${int(stake)} sats`],
       ["From the desk", `+${int(payout - stake)}`],
-      ...(payout > back ? [[`Price-check fee at ${at}`, `−${int(payout - back)}`, "minus"]] : []),
+      [`Price-check fee at ${at}`, `−${int(payout - back)}`, "minus"],
       ["Paid to you", `${int(back)} sats`, "tot"],
     ]));
     body.push(el("p", "sub", "Paid to your Arkade wallet. Nothing left to do."), ...again());
@@ -2319,7 +2310,7 @@ function renderPrediction(p) {
       body.push(ledger([
         ["You staked", `${int(stake)} sats`],
         ["From the desk", `+${int(payout - stake)}`],
-        ...(payout > won(payout) ? [[`Price-check fee at ${at}`, `−${int(payout - won(payout))}`, "minus"]] : []),
+        [`Price-check fee at ${at}`, `−${int(payout - won(payout))}`, "minus"],
         ["Paid to you", `${int(won(payout))} sats`, "tot"],
       ]));
       body.push(...again());

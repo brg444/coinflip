@@ -5,8 +5,7 @@ import { holderPayoff, settlementOutputs } from "../app/settle-math.js";
 import { beaconIdOf, bin2num, bindBeacon, decodeState, statePacketOf, type BeaconState } from "../protocol/beacon.ts";
 import { isPredict, PREDICT_VOID_AFTER, PRICE_MAX, type Kind } from "../protocol/constants.ts";
 import { bindContracts, type Terms } from "../protocol/contracts.ts";
-import { buildPredictSettle, buildRefund, buildSettle, refundOutputs, submit } from "../protocol/cospend.ts";
-import { centsOf, DIA_PUBKEY, intentSigned, type DiaIntent } from "../protocol/dia.ts";
+import { buildRefund, buildSettle, refundOutputs, submit } from "../protocol/cospend.ts";
 import { bytesToHex } from "../protocol/hex.ts";
 import { vaultProgramFor } from "../protocol/programs.ts";
 import type { BeaconSpec } from "./oracle.ts";
@@ -337,77 +336,6 @@ export async function refundQuote(env: {
     if (hex === writerHex) writer = output.amount;
   }
   return { result: "refunded", txid: submitted.txid, holder, writer };
-}
-
-/** Settle a direct-DIA PredictVault without a beacon coin or read fee. */
-export async function settlePredictQuote(env: {
-  chain: Chain;
-  serverKey: Uint8Array;
-  emulatorKey: Uint8Array;
-  emulator: Pick<EmulatorProvider, "submitTx">;
-  checkpoint: CSVMultisigTapscript.Type;
-  fillTxid?: string;
-  terms: Terms;
-  dia: DiaIntent;
-  expiryLag?: number;
-  now: number;
-}): Promise<SettleOutcome> {
-  if (!isPredict(env.terms.kind)) throw new Error("settlePredictQuote is only supported for PredictVault");
-  if (env.now < Number(env.terms.expiry)) return { result: "waiting", reason: "early" };
-  const lag = env.expiryLag ?? 60;
-  const expiryN = Number(env.terms.expiry);
-  if (env.dia.time < expiryN || env.dia.time > expiryN + lag) return { result: "unfixed" };
-  const oraclePk = env.terms.oraclePk ?? DIA_PUBKEY;
-  if (!intentSigned(env.dia, oraclePk)) return { result: "rejected" };
-
-  const bound = bindContracts(env.terms);
-  const vaultScript = bytesToHex(bound.vaultPkScript);
-  const live = await env.chain.getVtxos({ scripts: [vaultScript], spendableOnly: true });
-  const page = live.vtxos ?? [];
-  const vaults = page.filter((coin) => !spent(coin) && BigInt(coin.value) >= env.terms.collateral);
-  if (!vaults.length) {
-    const unrolled = spendTxid(page.find((coin) => coin.isUnrolled));
-    if (unrolled) return { result: "settled", txid: unrolled };
-    const history = await env.chain.getVtxos({ scripts: [vaultScript], spentOnly: true });
-    const prior = history.vtxos ?? [];
-    const gone = spendTxid(prior.find((coin) => coin.txid === env.fillTxid) ?? prior.find((coin) => spent(coin)));
-    if (gone) return { result: "settled", txid: gone };
-    return { result: "waiting", reason: "vault" };
-  }
-  const vaultCoin = vaults.find((coin) => coin.txid === env.fillTxid) ?? vaults[0]!;
-  const raws = await env.chain.getVirtualTxs([vaultCoin.txid]);
-  const vaultPrev = txById(raws.txs ?? [], vaultCoin.txid);
-  if (!vaultPrev) return { result: "waiting", reason: "vault" };
-
-  const price = centsOf(env.dia.price);
-  const locked = BigInt(vaultCoin.value);
-  const ph = holderPayoff(env.terms.kind, price, env.terms.strike, env.terms.collateral);
-  const holderWins = ph > 0n;
-  const payout = holderWins
-    ? { script: bound.holderPkScript, amount: locked }
-    : { script: bound.writerPkScript, amount: locked };
-
-  const script = new arkade.ArkadeProgramScript(vaultProgramFor(env.terms.kind), bound.vault, {
-    serverKey: env.serverKey,
-    emulatorKey: env.emulatorKey,
-  });
-  const built = buildPredictSettle({
-    vault: {
-      script,
-      coin: { txid: vaultCoin.txid, vout: vaultCoin.vout, value: vaultCoin.value, prevTx: vaultPrev.toBytes(true, true) },
-    },
-    dia: env.dia,
-    payout,
-    checkpoint: env.checkpoint,
-  });
-  const submitted = await submit(built, env.emulator as EmulatorProvider);
-  return {
-    result: "settled",
-    txid: submitted.txid,
-    price,
-    holder: holderWins ? locked : 0n,
-    writer: holderWins ? 0n : locked,
-  };
 }
 
 /** Reboard or renew a PredictVault into an offchain batch unchanged via its `reboard` leaf. */

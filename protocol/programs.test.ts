@@ -72,18 +72,15 @@ test("active contract programs load and bind expected functions and opcodes", ()
 
   const predict = predictVaultProgram();
   const predictAsm = predict.functions.settle?.arkadeScript?.asm ?? [];
-  assert.ok(predictAsm.includes("CHECKSIGFROMSTACK"));
-  assert.ok(predictAsm.includes("DIGEST"));
-  assert.ok(predictAsm.includes("DIV"));
-  assert.ok(predictAsm.includes("MOD"));
+  assert.ok(predictAsm.includes("INSPECTINASSETLOOKUP"));
+  assert.ok(predictAsm.includes("INSPECTINPUTPACKET"));
   assert.ok(predictAsm.includes("CHECKTIME"));
-  assert.ok(!predictAsm.includes("INSPECTINASSETLOOKUP"));
   assert.ok((predict.functions.refund?.arkadeScript?.asm ?? []).includes("CHECKTIME"));
   assert.ok((predict.functions.reboard?.arkadeScript?.asm ?? []).includes("TUNNEL"));
   assert.ok((predict.functions.reboard?.arkadeScript?.asm ?? []).includes("INSPECTINTENTMESSAGE"));
   assert.deepEqual(
     Object.keys(predict.functions).sort(),
-    ["close", "reboard", "refund", "refundBackup", "settle", "settleBackup", "unilateral"],
+    ["close", "reboard", "refund", "refundBackup", "settle", "unilateral"],
   );
   assert.deepEqual(Object.keys(beaconProgram().functions).sort(), ["attest", "migrate", "read", "unilateral"]);
 });

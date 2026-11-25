@@ -177,8 +177,7 @@ async function oracleUp(key) {
   }, "Starting the oracle…");
   setup.oracle.wallet = status.wallet;
   setup.oracle.balance = String(status.balance ?? "0");
-  // Predict settles directly from signed DIA intents, so beacon deployment is optional unless BEACON_DEPLOY=1.
-  if (process.env.BEACON_DEPLOY?.trim() !== "1" || (status.deployTxid && status.assetId)) return status;
+  if (status.deployTxid && status.assetId) return status;
 
   if (!status.issueTxid) {
     if (BigInt(status.balance ?? 0) < ORACLE_FUND) {
@@ -216,7 +215,7 @@ async function deskUp(key, beacon) {
   const backupPubkey = process.env.BACKUP_EMULATOR_PUBKEY?.trim().toLowerCase();
   start("desk", "desk/main.ts", {
     DESK_KEY: key.deskKey,
-    ...(beacon?.issueTxid ? { BEACON_TXID: beacon.issueTxid } : {}),
+    BEACON_TXID: beacon.issueTxid,
     ORACLE_URL: oracleUrl,
     ...(backupPubkey ? { BACKUP_EMULATOR_PUBKEY: backupPubkey } : {}),
     DESK_RATCHET_MARGIN_S: process.env.DESK_RATCHET_MARGIN_S?.trim() || String(5 * 86_400),
@@ -342,7 +341,6 @@ function servePage() {
           const value = url.searchParams.get(key);
           if (value != null && /^[0-9]{1,12}$/.test(value)) query.set(key, value);
         }
-        if (url.searchParams.get("signed") === "1") query.set("signed", "1");
         fetch(`${oracleUrl}/api/prices?${query}`, { signal: AbortSignal.timeout(8_000) })
           .then(async (upstream) => {
             res.writeHead(upstream.ok ? 200 : 502, { "content-type": "application/json", "cache-control": "no-store" });
