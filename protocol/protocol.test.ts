@@ -214,7 +214,8 @@ test("a wire message with the wrong pair is dropped", () => {
   assert.equal(beaconWindowRefusal(0n), "expiry lag");
   assert.equal(beaconWindowRefusal(null), "oracle");
   assert.equal(requestRefusal(request, 1_790_000_000), "expiry");
-  assert.equal(requestRefusal({ ...request, profile: { ...request.profile, expiry: 1_790_000_600 } }, 1_790_000_000), "");
+  assert.equal(requestRefusal({ ...request, profile: { ...request.profile, expiry: 1_790_000_700 } }, 1_790_000_000), "");
+  assert.equal(requestRefusal({ ...request, profile: { ...request.profile, expiry: 1_790_000_600 } }, 1_790_000_000), "expiry");
   assert.equal(requestRefusal({ ...request, profile: { ...request.profile, expiry: 1_790_000_060 } }, 1_790_000_000), "expiry");
   assert.equal(requestRefusal({ ...request, profile: { ...request.profile, expiry: 1_800_000_000 } }, 1_700_000_000), "");
 });
@@ -261,7 +262,7 @@ test("addresses and unilateral tapscript bytes stay identical at EXIT=2048", asy
     serverKey,
     emulatorKey,
   });
-  assert.equal(bcn.address, "tark1qqhsre0ptn9r28d07wzrldc08shs5x7aqhj6lzy2vauyaulppg4qzyu78dyhghlyswwd0na44wl2dxsfn0u5lum45tns2jageh5telrumydy6w");
+  assert.equal(bcn.address, "tark1qqhsre0ptn9r28d07wzrldc08shs5x7aqhj6lzy2vauyaulppg4qz2p6kdztalt7qqlq0ew768sfscyyp8lshqlql5vng4exnkgehkv659psn9");
   assert.equal(
     bytesToHex(bcn.script.functionByName("unilateral")!.tapLeafScript[1]),
     "03040040b2752079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798acc0",

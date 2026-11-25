@@ -96,7 +96,7 @@ Desk logs: one line per UTC hour, `hour N quotes, N filled, N premium paid, N co
 | `domain` | Hex of the ASCII string `BTCUSD-FIX`. It is mixed into the migrate signature. |
 | `expiryLag` | Seconds after the expiry before `attest` is allowed. `60` means a fixing waits until the close minute has ended. |
 | `readFee` | Sats added to the beacon on every `read`. The service uses `1000`, above the 330-sat dust line. The vault pays it out of its collateral. |
-| `adminPk` | X-only pubkey of `ORACLE_KEY`. It signs `migrate` and the unilateral exit. It does not sign prices. The beacon checks the pinned DIA key. |
+| `adminPk` | X-only pubkey of `ORACLE_KEY`. It co-signs `attest` (authorizing which valid DIA print inside `[expiry, expiry + 60]` is recorded, on the 5-minute grid and in strictly ascending close order) and signs `migrate` and the unilateral exit. It cannot invent a price because the beacon still checks the pinned DIA EIP-712 signature. |
 | `exit` | Seconds the admin must wait before a unilateral exit of the beacon coin to Bitcoin. `2048` is Mutinynet's `unilateralExitDelay`. |
 
 The status object omits `ctrlGidx` (it is `0`, the `0000` suffix on `assetId`).

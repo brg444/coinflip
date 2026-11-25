@@ -404,6 +404,7 @@ export function requestRefusal(message: RfqRequest, now: number): string {
   if (isPredictRequest(message.profile)) return predictRefusal(message.profile.expiry, BigInt(message.amount), now);
   const collateral = BigInt(message.amount);
   if (collateral < Q_MIN || collateral > Q_MAX) return "collateral";
+  if (message.profile.expiry % PREDICT_GRID_S !== 0) return "expiry";
   // Ten minutes is allowed. The open window (expiry − 1800) may already
   // have passed; the quote only has to finish before expiry.
   if (message.profile.expiry <= now + 60) return "expiry";

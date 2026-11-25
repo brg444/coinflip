@@ -204,10 +204,13 @@ export function buildAttest(input: {
   intentExpiry: bigint;
   /** 64-byte r||s of the DIA signature. */
   sig: Uint8Array;
+  /** 64-byte BIP340 Schnorr signature from `adminPk` over `attestDigest`. */
+  adminSig: Uint8Array;
   next: Uint8Array;
   checkpoint: CSVMultisigTapscript.Type;
 }): Built {
   if (input.sig.length !== 64) throw new Error("dia signature");
+  if (input.adminSig.length !== 64) throw new Error("admin signature");
   const callArgs: Record<string, bigint | Uint8Array> = {
     expiry: input.expiry,
     price: input.price,
@@ -215,6 +218,7 @@ export function buildAttest(input: {
     nonce: input.nonce,
     intentExpiry: input.intentExpiry,
     sig: input.sig,
+    adminSig: input.adminSig,
   };
   return build(
     [{
@@ -225,6 +229,33 @@ export function buildAttest(input: {
     }],
     [{ script: input.beacon.script.pkScript, amount: BigInt(input.beacon.coin.value) }],
     [unitTransfer(input.beacon.id, 0, 0), statePacket(input.next)],
+    input.checkpoint,
+  );
+}
+
+/** Migrate the beacon coin to a new Taproot script while preserving its identity asset and state packet. */
+export function buildMigrate(input: {
+  beacon: BeaconCoin;
+  nextProgram: Uint8Array;
+  nextPkScript: Uint8Array;
+  opSig: Uint8Array;
+  checkpoint: CSVMultisigTapscript.Type;
+}): Built {
+  if (input.nextProgram.length !== 32) throw new Error("nextProgram must be 32 bytes");
+  if (input.opSig.length !== 64) throw new Error("op signature");
+  return build(
+    [{
+      script: input.beacon.script,
+      fn: "migrate",
+      callArgs: {
+        "next.program": input.nextProgram,
+        "next.version": 1n,
+        opSig: input.opSig,
+      },
+      coin: input.beacon.coin,
+    }],
+    [{ script: input.nextPkScript, amount: BigInt(input.beacon.coin.value) }],
+    [unitTransfer(input.beacon.id, 0, 0), statePacket(input.beacon.state)],
     input.checkpoint,
   );
 }

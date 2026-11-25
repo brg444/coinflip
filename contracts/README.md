@@ -42,11 +42,11 @@ Constructor: `kind`, `writerPk`, `holderPk`, `writerScript`, `holderScript`, `st
 
 ## AttestationBeacon
 
-`attestation_beacon.ark`. A price registry holding the eight newest fixings. The vault reads it by spending it in the same transaction. A signature names this beacon and one expiry, so a print for one expiry cannot fill another.
+`attestation_beacon.ark`. A price registry holding the eight newest 5-minute closes. The vault reads it by spending it in the same transaction. Each `attest` requires **both** the pinned DIA EIP-712 signature and an `adminPk` Schnorr signature over `(domain, "attest", ctrlTxid, ctrlGidx, round, expiry, cents, time)`, enforces `expiry % 300 == 0` and strictly advancing close times (`expiry > lastExpiry`) so nobody can front-run a close or flush and overwrite an earlier fixing, and never allows the oracle to invent a price.
 
 | Function | |
 | --- | --- |
-| `attest(expiry, price, time, nonce, intentExpiry, sig)` | Writes one fixing. `price` is the DIA 18-decimal integer. The script checks the EIP-712 signature, stores USD cents, and requires the timestamp in `[expiry, expiry + expiryLag]`. |
+| `attest(expiry, price, time, nonce, intentExpiry, sig, adminSig)` | Writes one fixing. `price` is the DIA 18-decimal integer. Verifies both the pinned DIA EIP-712 signature and `adminPk`'s Schnorr signature, requires `expiry % 300 == 0`, `expiry > lastExpiry`, and `time` in `[expiry, expiry + expiryLag]`, and stores USD cents. |
 | `read(selfIndex)` | Carries the state forward and adds `readFee`. No signature. |
 | `migrate(next, opSig)` | `adminPk` moves the coin to another script. |
 | `unilateral(adminSig)` | `adminPk`, after `exit`. |

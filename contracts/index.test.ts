@@ -85,7 +85,7 @@ test("the two artifacts publish the vault and beacon functions", () => {
       "exit",
     ],
     functions: [
-      { name: "attest", inputs: ["expiry", "price", "time", "nonce", "intentExpiry", "sig"] },
+      { name: "attest", inputs: ["expiry", "price", "time", "nonce", "intentExpiry", "sig", "adminSig"] },
       { name: "read", inputs: ["selfIndex"] },
       { name: "migrate", inputs: ["next", "opSig"] },
       { name: "unilateral", inputs: ["adminSig"] },

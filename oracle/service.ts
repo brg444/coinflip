@@ -4,11 +4,12 @@ import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { schnorr } from "@noble/curves/secp256k1.js";
 import { asset, ArkAddress, SingleKey, Transaction, type CSVMultisigTapscript, type EmulatorProvider } from "@arkade-os/sdk";
 import { base64 } from "@scure/base";
 
-import { beaconIdOf, bindBeacon, decodeState, genesisOutputs, nextState, priceValue, statePacketOf } from "../protocol/beacon.ts";
-import { BEACON_READ_FEE, DUST_SATS, EXIT, isPredict, PRICE_MAX, vaultProgramId } from "../protocol/constants.ts";
+import { attestDigest, BEACON_GRID_S, beaconIdOf, bindBeacon, decodeState, genesisOutputs, nextState, priceValue, statePacketOf } from "../protocol/beacon.ts";
+import { BEACON_READ_FEE, DUST_SATS, EXIT, PRICE_MAX, vaultProgramId } from "../protocol/constants.ts";
 import { bindContracts } from "../protocol/contracts.ts";
 import { buildAttest, submit } from "../protocol/cospend.ts";
 import { centsOf, intentSigned, type DiaIntent } from "../protocol/dia.ts";
@@ -19,8 +20,9 @@ import { chooseSample as pickSample, loadStore, pruneSamples, saveStore, type St
 
 /**
  * Testnet publisher. It keeps a day of DIA OracleUpdate intents and spends
- * the beacon once per expiry. The coin checks the DIA signature. This
- * process does not sign the price.
+ * the beacon once per 5-minute close. The coin checks both the pinned DIA
+ * signature and this service's adminPk signature so only the oracle's chosen
+ * DIA print can be attested.
  */
 
 const DOMAIN = new TextEncoder().encode("BTCUSD-FIX");
@@ -100,9 +102,11 @@ export const MAX_ANNOUNCE_AGE_S = 3_600;
 const PREDICT_GRID_S = 300;
 const MAX_PUBLISH_PER_PASS = 4;
 
-/** Announced expiries whose close minute has passed and that are not published yet. */
+/** Announced 5-minute closes whose close minute has passed and that are not published yet. */
 export function dueExpiries(expiries: Iterable<number>, now: number, done: ReadonlySet<number>, lag = 60): number[] {
-  return [...new Set(expiries)].filter((expiry) => !done.has(expiry) && now >= expiry + lag).sort((a, b) => a - b);
+  return [...new Set(expiries)]
+    .filter((expiry) => !done.has(expiry) && expiry % PREDICT_GRID_S === 0 && now >= expiry + lag)
+    .sort((a, b) => a - b);
 }
 
 export function duePositionExpiries(
@@ -125,13 +129,14 @@ export function duePositionExpiries(
     if (opts.done.has(pos.expiry)) continue;
     if (opts.now < pos.expiry + lag) continue;
     if (opts.now - pos.expiry > maxAge) continue;
-    if (isPredict(pos.kind) && pos.expiry % PREDICT_GRID_S !== 0) continue;
+    if (pos.expiry % PREDICT_GRID_S !== 0) continue;
     const list = byExpiry.get(pos.expiry);
     if (list) list.push(pos);
     else byExpiry.set(pos.expiry, [pos]);
   }
+  // Publish oldest due close first so monotonic beacon expiry order never blocks an earlier close.
   return [...byExpiry.entries()]
-    .sort((a, b) => b[0] - a[0])
+    .sort((a, b) => a[0] - b[0])
     .slice(0, limit)
     .map(([expiry, list]) => ({ expiry, positions: list }));
 }
@@ -475,6 +480,7 @@ export async function createOracle(deps: OracleDeps) {
     try {
       const expiry = whole(body.expiry, "expiry");
       if (expiry <= 1800n) throw new HttpError(400, "expiry");
+      if (expiry % BEACON_GRID_S !== 0n) throw new HttpError(400, "expiry grid");
       if (!Number.isSafeInteger(Number(expiry))) throw new HttpError(400, "expiry");
       const expiryN = Number(expiry);
       if (BigInt(now()) < expiry + EXPIRY_LAG) throw new HttpError(400, "before expiry time");
@@ -498,14 +504,29 @@ export async function createOracle(deps: OracleDeps) {
       const prev = fetched.txs.map((raw) => Transaction.fromPSBT(base64.decode(raw))).find((tx) => tx.id === coin.txid);
       if (!prev) throw new HttpError(400, "creating tx missing");
       const state = statePacketOf(prev);
-      if (decodeState(state).slots.some((slot) => slot.expiry === expiry)) throw new HttpError(409, "already a fixing");
+      const decoded = decodeState(state);
+      if (decoded.slots.some((slot) => slot.expiry === expiry)) throw new HttpError(409, "already a fixing");
+      const lastExpiry = decoded.slots[0]?.expiry ?? 0n;
+      if (expiry <= lastExpiry) throw new HttpError(409, "expiry order");
       const next = nextState(state, expiry, priceValue(cents, time));
+      const assetId = asset.AssetId.fromString(store.assetId);
+      const adminSig = schnorr.sign(
+        attestDigest({
+          domain: DOMAIN,
+          id: beaconIdOf(assetId),
+          round: decoded.round,
+          expiry,
+          cents,
+          time,
+        }),
+        deps.oracleKey,
+      );
       const built = buildAttest({
         beacon: {
           script: script.script,
           coin: { txid: coin.txid, vout: coin.vout, value: coin.value, prevTx: prev.toBytes(true, true) },
           state,
-          id: asset.AssetId.fromString(store.assetId),
+          id: assetId,
         },
         expiry,
         price: raw,
@@ -513,6 +534,7 @@ export async function createOracle(deps: OracleDeps) {
         nonce: BigInt(chosen.nonce),
         intentExpiry: BigInt(chosen.intentExpiry),
         sig: hexToBytes(chosen.sig),
+        adminSig,
         next,
         checkpoint: deps.wallet.serverUnrollScript,
       });
@@ -626,6 +648,10 @@ export async function createOracle(deps: OracleDeps) {
         if (err instanceof HttpError && err.status === 409 && message === "already a fixing") {
           publishedExpiries.add(item.expiry);
           deps.onPublishedExpiry?.(item.expiry);
+          continue;
+        }
+        if (err instanceof HttpError && err.status === 409 && message === "expiry order") {
+          publishedExpiries.add(item.expiry);
           continue;
         }
         if (skippedPublish(message)) continue;

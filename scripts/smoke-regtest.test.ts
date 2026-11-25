@@ -156,7 +156,7 @@ test("option intent fills, cancels, and settles at the strike on local arkade re
     console.log("beacon", parsed.beacon.assetId, status.deployTxid);
 
     const now = BigInt(Math.floor(Date.now() / 1000));
-    const expiry = now + 120n;
+    const expiry = nextGridExpiry(now);
     const writerPk = await writer.xOnlyPublicKey();
     const holderPk = await desk.xOnlyPublicKey();
     const beacon = beaconIdOf(asset.AssetId.fromString(parsed.beacon.assetId));
@@ -328,7 +328,7 @@ test("a prediction fills from the desk float, pays the bettor above the line, an
     const stake = 20_000n;
     const payout = 38_000n;
     const now = BigInt(Math.floor(Date.now() / 1000));
-    const expiry = now + 150n;
+    const expiry = nextGridExpiry(now);
     const serverKey = deskClient.serverKey;
     const deskPk = await desk.xOnlyPublicKey();
     // The page pays the bettor at the taproot key of their own Arkade address.
@@ -660,6 +660,11 @@ async function fetchWindowIntent(expiry: number, expiryLag: number) {
     await new Promise((resolve) => setTimeout(resolve, 3_000));
   }
   throw new Error("DIA timestamp is outside the expiry window");
+}
+
+function nextGridExpiry(now: bigint, minLeft = 100n): bigint {
+  const first = ((now / 300n) + 1n) * 300n;
+  return first - now >= minLeft ? first : first + 300n;
 }
 
 async function sleepUntil(unix: number, label: string) {
