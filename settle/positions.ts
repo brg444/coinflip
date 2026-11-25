@@ -124,7 +124,7 @@ export function publishOutcome(status: number, error?: string): "published" | "f
   return "failed";
 }
 
-export function termsFor(position: WatchPosition, serverKey: Uint8Array, emulatorKey: Uint8Array, readFee = 0n): Terms {
+export function termsFor(position: WatchPosition, serverKey: Uint8Array, emulatorKey: Uint8Array, readFee = 0n, hrp?: string): Terms {
   return {
     kind: position.kind,
     strike: position.strike,
@@ -145,5 +145,6 @@ export function termsFor(position: WatchPosition, serverKey: Uint8Array, emulato
     voidAfter: position.voidAfter,
     fallbackDelay: position.fallbackDelay,
     finalExitDelay: position.finalExitDelay,
+    ...(hrp ? { hrp } : {}),
   };
 }

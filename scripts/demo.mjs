@@ -30,22 +30,30 @@ const home = path.resolve(process.env.COINFLIP_DEMO_DIR?.trim() || path.join(os.
 const args = new Set(process.argv.slice(2));
 /** On a server the page is the only port anyone reaches; the services stay on loopback. */
 const server = args.has("--server");
+const rawNetwork = (process.env.NETWORK?.trim() || "mutinynet").toLowerCase();
+const netId = rawNetwork === "mainnet" ? "bitcoin" : rawNetwork;
+const isMainnet = netId === "bitcoin";
+if (!["bitcoin", "mutinynet", "regtest", "testnet", "signet"].includes(netId)) {
+  throw new Error(`Unsupported NETWORK=${rawNetwork}`);
+}
+const NET_LABEL = isMainnet ? "Bitcoin" : netId === "regtest" ? "Regtest" : "Mutinynet";
+const WALLET_HOME = isMainnet ? "https://arkade.money" : "https://mutinynet.arkade.money";
 const PORTS = { oracle: 8789, desk: 8788, settler: 8790, page: Number(process.env.PAGE_PORT?.trim() || 4173) };
 /** The oracle issues and deploys the beacon from this. Deploy keeps 330 sats on the beacon. */
 const ORACLE_FUND = 10_000n;
-/** The desk funds whole payouts. One 0.0005 BTC bet at 1.90x locks 95,000 sats. */
-const DESK_FUND = 1_000_000n;
+/** The desk funds whole payouts. */
+const DESK_FUND = isMainnet ? 500_000n : 1_000_000n;
 const oracleUrl = `http://127.0.0.1:${PORTS.oracle}`;
 const deskUrl = `http://127.0.0.1:${PORTS.desk}`;
 
 const children = [];
 let stopping = false;
-/** What the page shows while the demo sets itself up. Served at /demo.json. */
+/** What the page shows while the demo sets itself up. Served at /demo.json (minimal healthcheck on mainnet). */
 const setup = {
   stage: "starting",
   oracle: { wallet: "", balance: "0", need: ORACLE_FUND.toString() },
   desk: { address: "", balance: "0", need: DESK_FUND.toString() },
-  wallet: "https://mutinynet.arkade.money",
+  wallet: WALLET_HOME,
 };
 
 function say(line = "") {
@@ -60,6 +68,7 @@ function die(line) {
 function stop(code = 0) {
   if (stopping) return;
   stopping = true;
+  if (children.length === 0) process.exit(code);
   for (const child of children) child.kill("SIGTERM");
   setTimeout(() => process.exit(code), 400);
 }
@@ -76,8 +85,25 @@ function preflight() {
   for (const dir of ["", "oracle", "desk", "settler", "logs", "site"]) mkdirSync(path.join(home, dir), { recursive: true });
 }
 
-/** Keys are made once and kept with the demo data, never in the repo. */
+/** On mainnet, all secrets must come from env vars (fail closed). On Mutinynet, auto-generate once in data dir. */
 function keys() {
+  const envOracle = process.env.ORACLE_KEY?.trim().toLowerCase() || "";
+  const envDesk = process.env.DESK_KEY?.trim().toLowerCase() || "";
+  const envAdmin = process.env.ORACLE_ADMIN?.trim() || "";
+  if (isMainnet) {
+    if (!/^[0-9a-f]{64}$/.test(envOracle)) die("Bitcoin mainnet requires a 64-hex ORACLE_KEY env var.");
+    if (!/^[0-9a-f]{64}$/.test(envDesk)) die("Bitcoin mainnet requires a 64-hex DESK_KEY env var.");
+    if (envOracle === envDesk) die("ORACLE_KEY and DESK_KEY must be distinct keys on Bitcoin mainnet.");
+    if (envAdmin.length < 16) die("Bitcoin mainnet requires ORACLE_ADMIN (>= 16 chars).");
+    const backup = process.env.BACKUP_EMULATOR_PUBKEY?.trim().toLowerCase() || "";
+    if (!/^[0-9a-f]{64}$/.test(backup)) die("Bitcoin mainnet requires a 64-hex x-only BACKUP_EMULATOR_PUBKEY env var.");
+    const deskPub = getPublicKey(Uint8Array.from(Buffer.from(envDesk, "hex")));
+    if (backup === deskPub) die("BACKUP_EMULATOR_PUBKEY must differ from DESK_KEY pubkey.");
+    return { oracleKey: envOracle, deskKey: envDesk, admin: envAdmin };
+  }
+  if (envOracle && envDesk && envAdmin) {
+    return { oracleKey: envOracle, deskKey: envDesk, admin: envAdmin };
+  }
   const file = path.join(home, "keys.json");
   if (existsSync(file)) return JSON.parse(readFileSync(file, "utf8"));
   const made = {
@@ -87,6 +113,15 @@ function keys() {
   };
   writeFileSync(file, JSON.stringify(made, null, 2), { mode: 0o600 });
   return made;
+}
+
+function networkEnv() {
+  const extra = { NETWORK: netId };
+  for (const name of ["ARK_URL", "EMULATOR_URL", "EXECUTOR_URL", "RELAYS"]) {
+    const val = process.env[name]?.trim();
+    if (val) extra[name] = val;
+  }
+  return extra;
 }
 
 function start(name, script, env) {
@@ -164,6 +199,7 @@ async function oracleUp(key) {
     logLevel: "warning",
   });
   start("oracle", "oracle/main.ts", {
+    ...networkEnv(),
     ORACLE_KEY: key.oracleKey,
     ORACLE_ADMIN: key.admin,
     DESK_PUBKEY: getPublicKey(Uint8Array.from(Buffer.from(key.deskKey, "hex"))),
@@ -183,7 +219,7 @@ async function oracleUp(key) {
     if (BigInt(status.balance ?? 0) < ORACLE_FUND) {
       setup.stage = "fund-oracle";
       say("");
-      say(`Fund the oracle: send at least ${sats(ORACLE_FUND)} Mutinynet sats to`);
+      say(`Fund the oracle: send at least ${sats(ORACLE_FUND)} ${NET_LABEL} sats to`);
       say(`  ${status.wallet}`);
       say("The page shows this too. This waits until they arrive.");
       status = await until(async () => {
@@ -213,8 +249,10 @@ async function oracleUp(key) {
 
 async function deskUp(key, beacon) {
   const backupPubkey = process.env.BACKUP_EMULATOR_PUBKEY?.trim().toLowerCase();
-  start("desk", "desk/main.ts", {
+  const deskEnv = {
+    ...networkEnv(),
     DESK_KEY: key.deskKey,
+    DESK_ADMIN: process.env.DESK_ADMIN?.trim() || key.admin,
     BEACON_TXID: beacon.issueTxid,
     ORACLE_URL: oracleUrl,
     ...(backupPubkey ? { BACKUP_EMULATOR_PUBKEY: backupPubkey } : {}),
@@ -223,7 +261,12 @@ async function deskUp(key, beacon) {
     DESK_LINE_MODE: process.env.DESK_LINE_MODE?.trim() || "window",
     DATA_DIR: path.join(home, "desk"),
     PORT: String(PORTS.desk),
-  });
+  };
+  for (const name of ["DESK_DRAIN", "DESK_STAKE_MAX", "DESK_STRIKE_CAP", "DESK_TOTAL_CAP", "DESK_EDGE", "DESK_VOL"]) {
+    const val = process.env[name]?.trim();
+    if (val) deskEnv[name] = val;
+  }
+  start("desk", "desk/main.ts", deskEnv);
   setup.stage = "desk";
   const status = await until(async () => {
     const body = (await json(`${deskUrl}/status`)).body;
@@ -233,7 +276,7 @@ async function deskUp(key, beacon) {
   setup.desk.balance = String(status.balance ?? "0");
   if (BigInt(status.balance ?? 0) < DESK_FUND / 4n) {
     say("");
-    say(`Fund the desk: it pays out every winning bet, so send about ${sats(DESK_FUND)} Mutinynet sats to`);
+    say(`Fund the desk: it pays out every winning prediction, so send about ${sats(DESK_FUND)} ${NET_LABEL} sats to`);
     say(`  ${status.address}`);
     say("The page shows this too. The desk refuses quotes it can't cover until the float lands.");
     setup.stage = "fund-desk";
@@ -246,6 +289,7 @@ async function deskUp(key, beacon) {
 
 function settlerUp(key) {
   start("settler", "settle/main.ts", {
+    ...networkEnv(),
     ORACLE_URL: oracleUrl,
     ORACLE_ADMIN: key.admin,
     DATA_DIR: path.join(home, "settler"),
@@ -265,13 +309,24 @@ function buildPage(key, beacon) {
     : null;
   const pubkey = getPublicKey(Uint8Array.from(Buffer.from(key.deskKey, "hex")));
   const backupPubkey = process.env.BACKUP_EMULATOR_PUBKEY?.trim().toLowerCase();
+  const stakeMax = process.env.DESK_STAKE_MAX?.trim();
   writeFileSync(
     config,
-    JSON.stringify({ desks: [{ name: "Demo desk", pubkey }], beacon: status, setup: true, ...(backupPubkey ? { backupPubkey } : {}) }, null, 2),
+    JSON.stringify({
+      network: netId,
+      desks: [{ name: isMainnet ? "COINFLIP" : "Demo desk", pubkey }],
+      beacon: status,
+      setup: !isMainnet,
+      ...(backupPubkey ? { backupPubkey } : {}),
+      ...(stakeMax ? { stakeMax } : {}),
+      ...(process.env.ARK_URL?.trim() ? { arkUrl: process.env.ARK_URL.trim() } : {}),
+      ...(process.env.EMULATOR_URL?.trim() ? { emulatorUrl: process.env.EMULATOR_URL.trim() } : {}),
+      ...(process.env.EXECUTOR_URL?.trim() ? { executorUrl: process.env.EXECUTOR_URL.trim() } : {}),
+    }, null, 2),
   );
   const built = spawnSync(process.execPath, [path.join(root, "scripts/build.mjs")], {
     cwd: root,
-    env: { ...process.env, COINFLIP_DEMO: config, OUT_DIR: path.join(home, "site") },
+    env: { ...process.env, NETWORK: netId, COINFLIP_DEMO: config, OUT_DIR: path.join(home, "site") },
     encoding: "utf8",
   });
   if (built.status !== 0) die(`The page did not build:\n${built.stderr || built.stdout}`);
@@ -291,7 +346,8 @@ function servePage() {
       const url = new URL(req.url ?? "/", "http://localhost");
       if (url.pathname === "/demo.json") {
         res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
-        res.end(JSON.stringify(setup));
+        const body = isMainnet ? { ok: true, network: netId, stage: setup.stage } : setup;
+        res.end(JSON.stringify(body));
         return;
       }
       // The wallet's return, relayed: a home-screen app opens the wallet in Safari and the return lands
@@ -450,7 +506,7 @@ async function watchSetup() {
 
 preflight();
 const key = keys();
-say(`COINFLIP demo · Mutinynet · state in ${home}`);
+say(`COINFLIP · ${NET_LABEL} · state in ${home}`);
 buildPage(key, null);
 await servePage();
 const publicUrl = server || args.has("--no-tunnel") ? null : await tunnel();
@@ -471,7 +527,7 @@ say("");
 say("The demo is running.");
 say(server ? `  Page      port ${PORTS.page}` : `  Page      http://127.0.0.1:${PORTS.page}/#/predict`);
 if (publicUrl) say(`  Public    ${publicUrl}/#/predict`);
-say(`  Oracle    ${oracleUrl}/  (admin token in ${path.join(home, "keys.json")})`);
+say(isMainnet ? `  Oracle    ${oracleUrl}/` : `  Oracle    ${oracleUrl}/  (admin token in ${path.join(home, "keys.json")})`);
 say(`  Desk      ${deskUrl}/status  (float ${desk.address})`);
 say(`  Settler   http://127.0.0.1:${PORTS.settler}/status`);
 say(`  Logs      ${path.join(home, "logs")}`);

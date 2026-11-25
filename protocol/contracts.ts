@@ -38,6 +38,8 @@ export type Terms = {
   voidAfter?: bigint;
   fallbackDelay?: bigint;
   finalExitDelay?: bigint;
+  /** Bech32m address HRP ("ark" on Bitcoin mainnet, "tark" on Mutinynet/regtest). */
+  hrp?: string;
 };
 
 export type Bound = {
@@ -59,9 +61,9 @@ export type Bound = {
 };
 
 /** Arkd refuses a vtxo whose shortest exit leaf is under this delay. */
-export async function assertServerExit(url = ARK_URL) {
+export async function assertServerExit(url = ARK_URL, expectedExit: bigint = EXIT) {
   const delay = BigInt((await new RestArkProvider(url).getInfo()).unilateralExitDelay);
-  if (delay !== EXIT) throw new Error(`server unilateralExitDelay is ${delay}; contracts use ${EXIT}`);
+  if (delay !== expectedExit) throw new Error(`server unilateralExitDelay is ${delay}; contracts use ${expectedExit}`);
 }
 
 export function payoutVtxo(pubKey: Uint8Array, serverKey: Uint8Array, exit: bigint = EXIT) {
@@ -101,8 +103,12 @@ export function directPayout(key: Uint8Array): { tweakedPublicKey: Uint8Array; p
   return { tweakedPublicKey, pkScript };
 }
 
-export function addressOf(script: { address: (hrp: string, server: Uint8Array) => { encode: () => string } }, serverKey: Uint8Array) {
-  return script.address(networks.mutinynet.hrp, xOnly(serverKey)).encode();
+export function addressOf(
+  script: { address: (hrp: string, server: Uint8Array) => { encode: () => string } },
+  serverKey: Uint8Array,
+  hrp: string = networks.mutinynet.hrp,
+) {
+  return script.address(hrp, xOnly(serverKey)).encode();
 }
 
 /**
@@ -192,9 +198,10 @@ export function bindContracts(terms: Terms): Bound {
   };
   const intentScript = new arkade.ArkadeProgramScript(intentProgram(), intentArgs, keys);
 
+  const hrp = terms.hrp ?? networks.mutinynet.hrp;
   return {
-    intentAddress: addressOf(intentScript, serverKey),
-    vaultAddress: addressOf(vaultScript, serverKey),
+    intentAddress: addressOf(intentScript, serverKey, hrp),
+    vaultAddress: addressOf(vaultScript, serverKey, hrp),
     writerPkScript: writer.pkScript,
     holderPkScript: holder.pkScript,
     userPkScript: user.program.pkScript,

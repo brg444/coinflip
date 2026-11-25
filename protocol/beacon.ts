@@ -63,6 +63,17 @@ function sha256(...parts: Uint8Array[]): Uint8Array {
 
 const ASCII_ATTEST = new TextEncoder().encode("attest");
 const ASCII_MIGRATE = new TextEncoder().encode("migrate");
+const ASCII_REBOARD = new TextEncoder().encode("reboard");
+const ASCII_RESEED = new TextEncoder().encode("reseed");
+
+/** Internal 32-byte little-endian txid from 64-hex display txid. */
+export function internalTxid(displayHex: string): Uint8Array {
+  const clean = displayHex.trim().toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(clean)) throw new Error("txid must be 64-hex");
+  const out = new Uint8Array(32);
+  for (let i = 0; i < 32; i++) out[31 - i] = Number.parseInt(clean.slice(i * 2, i * 2 + 2), 16);
+  return out;
+}
 
 /** SHA-256 digest `adminPk` signs to authorize `AttestationBeacon.attest`. */
 export function attestDigest(input: {
@@ -101,6 +112,58 @@ export function migrateDigest(input: {
     num2bin(input.round, 8),
     input.nextProgram,
   );
+}
+
+/** SHA-256 digest `adminPk` signs to authorize `AttestationBeacon.reboard` for one VTXO outpoint. */
+export function reboardDigest(input: {
+  domain: Uint8Array;
+  id: BeaconId;
+  outpoint: { txid: Uint8Array; vout: number };
+}): Uint8Array {
+  if (input.outpoint.txid.length !== 32) throw new Error("outpoint txid must be 32 bytes");
+  return sha256(
+    input.domain,
+    ASCII_REBOARD,
+    input.id.txid,
+    num2bin(input.id.gidx, 4),
+    input.outpoint.txid,
+    num2bin(BigInt(input.outpoint.vout), 4),
+  );
+}
+
+/** SHA-256 digest `adminPk` signs to authorize `AttestationBeacon.reseed` on a renewed VTXO without STATE. */
+export function reseedDigest(input: {
+  domain: Uint8Array;
+  id: BeaconId;
+  outpoint: { txid: Uint8Array; vout: number };
+  round: bigint;
+  lastExpiry: bigint;
+}): Uint8Array {
+  if (input.outpoint.txid.length !== 32) throw new Error("outpoint txid must be 32 bytes");
+  return sha256(
+    input.domain,
+    ASCII_RESEED,
+    input.id.txid,
+    num2bin(input.id.gidx, 4),
+    input.outpoint.txid,
+    num2bin(BigInt(input.outpoint.vout), 4),
+    num2bin(input.round, 8),
+    num2bin(input.lastExpiry, 8),
+  );
+}
+
+/** Empty-slot state after batch renewal: preserves `round` and monotonic `lastExpiry` with zeroed values. */
+export function reseedState(round: bigint, lastExpiry: bigint): Uint8Array {
+  if (round < 0n) throw new Error("round must be non-negative");
+  if (lastExpiry < 0n || lastExpiry % BEACON_GRID_S !== 0n) throw new Error("lastExpiry must sit on 5-minute grid");
+  return encodeState({
+    version: 1,
+    round,
+    slots: [
+      { expiry: lastExpiry, value: new Uint8Array(32) },
+      ...Array.from({ length: SLOT_COUNT - 1 }, () => ({ expiry: 0n, value: new Uint8Array(32) })),
+    ],
+  });
 }
 
 export function encodeState(state: BeaconState): Uint8Array {
@@ -166,6 +229,7 @@ export type BeaconArgs = {
   readFee: bigint;
   adminPk: Uint8Array;
   exit?: bigint;
+  hrp?: string;
   serverKey: Uint8Array;
   emulatorKey: Uint8Array;
 };
@@ -196,7 +260,7 @@ export function bindBeacon(input: BeaconArgs): Bound {
     emulatorKey: input.emulatorKey,
   });
   return {
-    address: addressOf(script, serverKey),
+    address: addressOf(script, serverKey, input.hrp),
     pkScript: script.pkScript,
     program: script.tweakedPublicKey,
     args,

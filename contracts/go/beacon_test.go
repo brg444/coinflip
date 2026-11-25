@@ -9,6 +9,7 @@ import (
 
 	"github.com/arkade-os/arkd/pkg/ark-lib/asset"
 	"github.com/arkade-os/arkd/pkg/ark-lib/extension"
+	"github.com/arkade-os/emulator/pkg/arkade"
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcec/v2/schnorr"
 	"github.com/btcsuite/btcd/chainhash/v2"
@@ -95,6 +96,62 @@ func beaconMigrateDigest(domain []byte, ctrlTxid []byte, ctrlGidx uint32, round 
 	return h.Sum(nil)
 }
 
+func beaconReboardDigest(domain []byte, ctrlTxid []byte, ctrlGidx uint32, opTxid []byte, opVout uint32) []byte {
+	h := sha256.New()
+	h.Write(domain)
+	h.Write([]byte("reboard"))
+	h.Write(ctrlTxid)
+	h.Write(leUint32(ctrlGidx))
+	h.Write(opTxid)
+	h.Write(leUint32(opVout))
+	return h.Sum(nil)
+}
+
+func beaconReseedDigest(domain []byte, ctrlTxid []byte, ctrlGidx uint32, opTxid []byte, opVout uint32, round uint64, lastExpiry int64) []byte {
+	h := sha256.New()
+	h.Write(domain)
+	h.Write([]byte("reseed"))
+	h.Write(ctrlTxid)
+	h.Write(leUint32(ctrlGidx))
+	h.Write(opTxid)
+	h.Write(leUint32(opVout))
+	h.Write(leUint64(round))
+	h.Write(leUint64(uint64(lastExpiry)))
+	return h.Sum(nil)
+}
+
+func beaconAssetOnlyExt(t *testing.T, beaconTxid [32]byte, inIdx uint16) *wire.TxOut {
+	t.Helper()
+	var hash chainhash.Hash
+	copy(hash[:], beaconTxid[:])
+	aid := &asset.AssetId{Txid: hash, Index: 0}
+	in, err := asset.NewAssetInput(inIdx, 1)
+	if err != nil {
+		t.Fatalf("asset input: %v", err)
+	}
+	out, err := asset.NewAssetOutput(0, 1)
+	if err != nil {
+		t.Fatalf("asset output: %v", err)
+	}
+	grp, err := asset.NewAssetGroup(aid, nil, []asset.AssetInput{*in}, []asset.AssetOutput{*out}, nil)
+	if err != nil {
+		t.Fatalf("asset group: %v", err)
+	}
+	pkt, err := asset.NewPacket([]asset.AssetGroup{*grp})
+	if err != nil {
+		t.Fatalf("asset packet: %v", err)
+	}
+	ext, err := extension.NewExtensionFromPackets(pkt)
+	if err != nil {
+		t.Fatalf("beacon asset ext: %v", err)
+	}
+	txOut, err := ext.TxOut()
+	if err != nil {
+		t.Fatalf("beacon asset ext txout: %v", err)
+	}
+	return txOut
+}
+
 func mustBigInt(s string) *big.Int {
 	v, ok := new(big.Int).SetString(s, 10)
 	if !ok {
@@ -155,7 +212,7 @@ func TestAttestationBeaconScriptParityWithTS(t *testing.T) {
 	}
 	art := loadArtifact(t, "attestation_beacon.artifact.json")
 	beacon := compileArtifact(t, art, beaconArgs(ctrlTxid, admin.PubKey()), keys)
-	want := "5120283ab344befd7e003e07e5ded1e098608409ff0b83e0fd193457269d919bd99a"
+	want := "51201e1ed57ce75940b544f6ee68d1996bee0688f19fb9bebbd722a363aff0fe1aae"
 	if got := hex.EncodeToString(beacon.pkScript); got != want {
 		t.Fatalf("beacon pkScript mismatch:\ngot  %s\nwant %s", got, want)
 	}
@@ -336,5 +393,135 @@ func TestAttestationBeaconReadAndMigrate(t *testing.T) {
 		nextProg,
 	}); err == nil {
 		t.Fatal("beacon migrate with wrong signer must fail")
+	}
+}
+
+func TestAttestationBeaconReboardAndReseed(t *testing.T) {
+	admin := privKeyFromByte(81)
+	stranger := privKeyFromByte(82)
+	server := privKeyFromByte(83)
+	emulator := privKeyFromByte(84)
+	keys := contractKeys{serverKey: server.PubKey(), emulatorKey: emulator.PubKey()}
+
+	var ctrlTxid [32]byte
+	ctrlTxid[0] = 0x07
+	art := loadArtifact(t, "attestation_beacon.artifact.json")
+	beacon := compileArtifact(t, art, beaconArgs(ctrlTxid[:], admin.PubKey()), keys)
+	domain := []byte("BTCUSD-FIX")
+
+	// reboard(opSig) succeeds on v2 register/delete intent with adminPk signature bound to outpoint.
+	op0 := dummyOutPoint(21, 0)
+	op1 := dummyOutPoint(22, 0)
+	txReboard := wire.NewMsgTx(2)
+	txReboard.AddTxIn(wire.NewTxIn(&op0, nil, nil))
+	txReboard.AddTxIn(wire.NewTxIn(&op1, nil, nil))
+	txReboard.AddTxOut(wire.NewTxOut(330, beacon.pkScript))
+	txReboard.AddTxOut(beaconAssetOnlyExt(t, ctrlTxid, 1))
+	prevReboard := &mockPrevOuts{
+		outputs: map[wire.OutPoint]*wire.TxOut{
+			op0: {Value: 0, PkScript: beacon.pkScript},
+			op1: {Value: 330, PkScript: beacon.pkScript},
+		},
+	}
+	rbDigest := beaconReboardDigest(domain, ctrlTxid[:], 0, op1.Hash[:], op1.Index)
+	adminRbSig, err := schnorr.Sign(admin, rbDigest)
+	if err != nil {
+		t.Fatalf("sign reboard: %v", err)
+	}
+	strangerRbSig, err := schnorr.Sign(stranger, rbDigest)
+	if err != nil {
+		t.Fatalf("sign stranger reboard: %v", err)
+	}
+	if err := execArkadeLeaf(t, beacon, "reboard", "reboard", emulator.PubKey(), txReboard, 1, prevReboard, wire.TxWitness{adminRbSig.Serialize()},
+		arkade.WithIntentMessage(`{"type":"register","onchain_output_indexes":[]}`),
+	); err != nil {
+		t.Fatalf("valid beacon reboard register should succeed: %v", err)
+	}
+	if err := execArkadeLeaf(t, beacon, "reboard", "reboard", emulator.PubKey(), txReboard, 1, prevReboard, wire.TxWitness{adminRbSig.Serialize()},
+		arkade.WithIntentMessage(`{"type":"delete"}`),
+	); err != nil {
+		t.Fatalf("valid beacon reboard delete should succeed: %v", err)
+	}
+	if err := execArkadeLeaf(t, beacon, "reboard", "reboard", emulator.PubKey(), txReboard, 1, prevReboard, wire.TxWitness{strangerRbSig.Serialize()},
+		arkade.WithIntentMessage(`{"type":"register","onchain_output_indexes":[]}`),
+	); err == nil {
+		t.Fatal("beacon reboard without adminPk signature must fail")
+	}
+	if err := execArkadeLeaf(t, beacon, "reboard", "reboard", emulator.PubKey(), txReboard, 1, prevReboard, wire.TxWitness{adminRbSig.Serialize()},
+		arkade.WithIntentMessage(`{"type":"register","onchain_output_indexes":[0]}`),
+	); err == nil {
+		t.Fatal("beacon reboard with onchain output must fail")
+	}
+
+	// reseed(round, lastExpiry, opSig) succeeds ONLY when input lacks STATE and all slot values are zero.
+	unseededPrev := wire.NewMsgTx(3)
+	unseededPrev.AddTxOut(wire.NewTxOut(330, beacon.pkScript))
+	reseedOp := dummyOutPoint(23, 0)
+	reseedState := encodeBeaconState(4, []beaconSlot{{recordedDia1.expiry, 0, 0}})
+	txReseed := wire.NewMsgTx(3)
+	txReseed.AddTxIn(wire.NewTxIn(&reseedOp, nil, nil))
+	txReseed.AddTxOut(wire.NewTxOut(330, beacon.pkScript))
+	txReseed.AddTxOut(beaconSelfTransferExt(t, ctrlTxid, 0, reseedState))
+	prevReseed := &mockPrevOuts{
+		outputs: map[wire.OutPoint]*wire.TxOut{reseedOp: {Value: 330, PkScript: beacon.pkScript}},
+		arkTxs:  map[wire.OutPoint]*wire.MsgTx{reseedOp: unseededPrev},
+	}
+	rsDigest := beaconReseedDigest(domain, ctrlTxid[:], 0, reseedOp.Hash[:], reseedOp.Index, 4, recordedDia1.expiry)
+	adminRsSig, err := schnorr.Sign(admin, rsDigest)
+	if err != nil {
+		t.Fatalf("sign reseed: %v", err)
+	}
+	if err := execArkadeLeaf(t, beacon, "reseed", "reseed", emulator.PubKey(), txReseed, 0, prevReseed, wire.TxWitness{
+		adminRsSig.Serialize(),
+		int64Bytes(recordedDia1.expiry),
+		int64Bytes(4),
+	}); err != nil {
+		t.Fatalf("valid reseed on unseeded beacon should succeed: %v", err)
+	}
+
+	// reseed on an already-seeded beacon coin must fail.
+	seededPrev := beaconPrevTx(t, beacon.pkScript, encodeBeaconState(3, []beaconSlot{{recordedDia1.expiry, recordedDia1.cents, recordedDia1.sampleTime}}))
+	prevAlreadySeeded := &mockPrevOuts{
+		outputs: map[wire.OutPoint]*wire.TxOut{reseedOp: {Value: 330, PkScript: beacon.pkScript}},
+		arkTxs:  map[wire.OutPoint]*wire.MsgTx{reseedOp: seededPrev},
+	}
+	if err := execArkadeLeaf(t, beacon, "reseed", "reseed", emulator.PubKey(), txReseed, 0, prevAlreadySeeded, wire.TxWitness{
+		adminRsSig.Serialize(),
+		int64Bytes(recordedDia1.expiry),
+		int64Bytes(4),
+	}); err == nil {
+		t.Fatal("reseed on already-seeded beacon coin must fail")
+	}
+
+	// reseed attempting to inject a non-zero price in slot 0 must fail.
+	forgedPriceState := encodeBeaconState(4, []beaconSlot{{recordedDia1.expiry, recordedDia1.cents, recordedDia1.sampleTime}})
+	txForgedPrice := wire.NewMsgTx(3)
+	txForgedPrice.AddTxIn(wire.NewTxIn(&reseedOp, nil, nil))
+	txForgedPrice.AddTxOut(wire.NewTxOut(330, beacon.pkScript))
+	txForgedPrice.AddTxOut(beaconSelfTransferExt(t, ctrlTxid, 0, forgedPriceState))
+	if err := execArkadeLeaf(t, beacon, "reseed", "reseed", emulator.PubKey(), txForgedPrice, 0, prevReseed, wire.TxWitness{
+		adminRsSig.Serialize(),
+		int64Bytes(recordedDia1.expiry),
+		int64Bytes(4),
+	}); err == nil {
+		t.Fatal("reseed injecting a non-zero price must fail")
+	}
+
+	// reseed replaying signature onto a different outpoint must fail.
+	otherOp := dummyOutPoint(24, 0)
+	txReplay := wire.NewMsgTx(3)
+	txReplay.AddTxIn(wire.NewTxIn(&otherOp, nil, nil))
+	txReplay.AddTxOut(wire.NewTxOut(330, beacon.pkScript))
+	txReplay.AddTxOut(beaconSelfTransferExt(t, ctrlTxid, 0, reseedState))
+	prevReplay := &mockPrevOuts{
+		outputs: map[wire.OutPoint]*wire.TxOut{otherOp: {Value: 330, PkScript: beacon.pkScript}},
+		arkTxs:  map[wire.OutPoint]*wire.MsgTx{otherOp: unseededPrev},
+	}
+	if err := execArkadeLeaf(t, beacon, "reseed", "reseed", emulator.PubKey(), txReplay, 0, prevReplay, wire.TxWitness{
+		adminRsSig.Serialize(),
+		int64Bytes(recordedDia1.expiry),
+		int64Bytes(4),
+	}); err == nil {
+		t.Fatal("reseed signature replay onto different outpoint must fail")
 	}
 }

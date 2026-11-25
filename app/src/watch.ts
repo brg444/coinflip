@@ -2,12 +2,11 @@ import { ArkAddress, RestIndexerProvider, Transaction } from "@arkade-os/sdk";
 import { base64 } from "@scure/base";
 
 import { statePacketOf } from "../../protocol/beacon.ts";
-import { ARK_URL } from "../../protocol/constants.ts";
 import { bytesToHex } from "../../protocol/hex.ts";
 import { classifyIntent, psbtView, type CoinView, type IntentPhase, type TxOutput } from "../../protocol/intent-state.ts";
 import { virtualTxsById } from "../../protocol/virtual-txs.ts";
 import { slotPrice } from "../../settle/vault.ts";
-import { intentCoins, onContractEvent } from "./fund.ts";
+import { ACTIVE_ARK_URL, intentCoins, onContractEvent } from "./fund.ts";
 import { settlementTxid, splitPayouts } from "./position-status.ts";
 
 export type WatchRow = {
@@ -35,7 +34,7 @@ export type PhaseUpdate = {
   unrolled?: boolean;
 };
 
-const indexer = new RestIndexerProvider(ARK_URL);
+const indexer = new RestIndexerProvider(ACTIVE_ARK_URL);
 const vtxoReads = new Map<string, Promise<{ txid: string; value: number; spentBy: string; createdAt: Date }[]>>();
 
 export function pkScriptOf(address: string): string {

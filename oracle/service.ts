@@ -5,13 +5,13 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { schnorr } from "@noble/curves/secp256k1.js";
-import { asset, ArkAddress, SingleKey, Transaction, type CSVMultisigTapscript, type EmulatorProvider } from "@arkade-os/sdk";
+import { asset, ArkAddress, SingleKey, Transaction, type ArkProvider, type CSVMultisigTapscript, type EmulatorProvider, type Network } from "@arkade-os/sdk";
 import { base64 } from "@scure/base";
 
-import { attestDigest, BEACON_GRID_S, beaconIdOf, bindBeacon, decodeState, genesisOutputs, nextState, priceValue, statePacketOf } from "../protocol/beacon.ts";
+import { attestDigest, BEACON_GRID_S, beaconIdOf, bindBeacon, decodeState, genesisOutputs, internalTxid, nextState, priceValue, reboardDigest, reseedDigest, statePacketOf } from "../protocol/beacon.ts";
 import { BEACON_READ_FEE, DUST_SATS, EXIT, PRICE_MAX, vaultProgramId } from "../protocol/constants.ts";
 import { bindContracts } from "../protocol/contracts.ts";
-import { buildAttest, submit } from "../protocol/cospend.ts";
+import { buildAttest, buildReseed, reboardBeacon, submit } from "../protocol/cospend.ts";
 import { centsOf, intentSigned, type DiaIntent } from "../protocol/dia.ts";
 import { bytesToHex, hexToBytes } from "../protocol/hex.ts";
 import type { OptionPosition } from "../protocol/messages.ts";
@@ -82,7 +82,13 @@ export type OracleDeps = {
   emulatorKey: Uint8Array;
   wallet?: OracleWallet;
   indexer?: OracleIndexer;
-  emulator?: Pick<EmulatorProvider, "submitTx">;
+  emulator?: Pick<EmulatorProvider, "submitTx"> & Partial<Pick<EmulatorProvider, "submitIntent">>;
+  arkProvider?: ArkProvider;
+  sdkNetwork?: Network;
+  exit?: bigint;
+  hrp?: string;
+  network?: string;
+  deprecatedSigners?: readonly { pubkey: string; cutoffDate: string }[];
   /** Latest DIA OracleUpdate. Null when the feed has not answered. */
   pull?: () => Promise<DiaIntent | null>;
   /** How often to sample. Unset means the process only records prices it is given. */
@@ -232,6 +238,9 @@ export async function createOracle(deps: OracleDeps) {
     if (!authorized(req.headers.authorization, deps.adminToken)) throw new HttpError(401, "unauthorized");
   }
 
+  const exitDelay = deps.exit ?? EXIT;
+  const hrp = deps.hrp;
+
   async function bound() {
     if (!store.assetId || !deps.wallet || !adminPk) return null;
     const id = asset.AssetId.fromString(store.assetId);
@@ -241,7 +250,8 @@ export async function createOracle(deps: OracleDeps) {
       expiryLag: EXPIRY_LAG,
       readFee: READ_FEE,
       adminPk,
-      exit: EXIT,
+      exit: exitDelay,
+      hrp,
       serverKey: deps.wallet.arkServerPublicKey,
       emulatorKey: deps.emulatorKey,
     });
@@ -275,6 +285,7 @@ export async function createOracle(deps: OracleDeps) {
     const beaconExpiry = await beaconCoinExpiry(script);
     const latest = store.samples.reduce<StoredSample | null>((best, sample) => (!best || sample.time >= best.time ? sample : best), null);
     return {
+      network: deps.network ?? "mutinynet",
       assetId: store.assetId,
       issueTxid: store.issueTxid,
       deployTxid: store.deployTxid,
@@ -282,6 +293,7 @@ export async function createOracle(deps: OracleDeps) {
       balance: balance == null ? null : balance.toString(),
       address: script?.address ?? null,
       beaconExpiry,
+      deprecatedSigners: deps.deprecatedSigners ?? [],
       pubkeys: adminPk ? [bytesToHex(adminPk)] : [],
       args: {
         ctrlTxid: beacon ? bytesToHex(beacon.txid) : null,
@@ -289,7 +301,7 @@ export async function createOracle(deps: OracleDeps) {
         expiryLag: Number(EXPIRY_LAG),
         readFee: Number(READ_FEE),
         adminPk: adminPk ? bytesToHex(adminPk) : null,
-        exit: Number(EXIT),
+        exit: Number(exitDelay),
       },
       fixings: store.fixings,
       samples: store.samples.length,
@@ -557,6 +569,109 @@ export async function createOracle(deps: OracleDeps) {
     }
   }
 
+  /** Renew the beacon coin in a fresh Arkade batch and immediately reseed its monotonic state. */
+  async function renew() {
+    if (!deps.oracleKey || !adminPk) throw new HttpError(400, "ORACLE_KEY is required");
+    if (!store.deployTxid || !store.assetId) throw new HttpError(409, "not deployed");
+    if (!deps.wallet || !deps.indexer || !deps.emulator || !deps.arkProvider || !deps.sdkNetwork) {
+      throw new HttpError(400, "renewal requires arkProvider and sdkNetwork");
+    }
+    if (publishing) throw new HttpError(409, "publish in progress");
+    publishing = true;
+    try {
+      const script = await bound();
+      if (!script) throw new HttpError(400, "ORACLE_KEY is required");
+      const assetId = asset.AssetId.fromString(store.assetId);
+      const beaconId = beaconIdOf(assetId);
+      const found = await deps.indexer.getVtxos({ scripts: [bytesToHex(script.pkScript)], spendableOnly: true });
+      const coin = found.vtxos.find((vtxo) => !vtxo.isSpent && vtxo.assets?.some((item) => item.assetId === store.assetId && BigInt(item.amount) === 1n));
+      if (!coin) throw new HttpError(400, "beacon coin");
+      const fetched = await deps.indexer.getVirtualTxs([coin.txid]);
+      const prev = fetched.txs.map((raw) => Transaction.fromPSBT(base64.decode(raw))).find((tx) => tx.id === coin.txid);
+      if (!prev) throw new HttpError(400, "creating tx missing");
+
+      let nextRound: bigint;
+      let lastExpiry: bigint;
+      let needsReboard = true;
+      try {
+        const decoded = decodeState(statePacketOf(prev));
+        nextRound = decoded.round + 1n;
+        lastExpiry = decoded.slots[0]?.expiry ?? 0n;
+      } catch {
+        // Coin is already freshly reboarded (no STATE packet); recover by reseeding from store history.
+        needsReboard = false;
+        const maxFixing = store.fixings.reduce((max, row) => (row.expiry > max ? row.expiry : max), 0);
+        lastExpiry = BigInt(maxFixing);
+        nextRound = BigInt(store.fixings.length + 1);
+      }
+
+      let targetCoin = coin;
+      let targetPrev = prev;
+      let commitmentTxid = "";
+      if (needsReboard) {
+        const opSig = schnorr.sign(
+          reboardDigest({ domain: DOMAIN, id: beaconId, outpoint: { txid: internalTxid(coin.txid), vout: coin.vout } }),
+          deps.oracleKey,
+        );
+        const reboarded = await reboardBeacon({
+          arkProvider: deps.arkProvider,
+          emulator: deps.emulator as EmulatorProvider,
+          network: deps.sdkNetwork,
+          script: script.script,
+          address: script.address,
+          coin: {
+            txid: coin.txid,
+            vout: coin.vout,
+            value: Number(coin.value),
+            script: bytesToHex(script.pkScript),
+            prevTx: prev.toBytes(true, true),
+            assets: [{ assetId: store.assetId, amount: 1n }],
+          },
+          id: assetId,
+          opSig,
+        });
+        commitmentTxid = reboarded.commitmentTxid;
+        let renewedCoin: HeldCoin | undefined;
+        for (let attempt = 0; attempt < 30; attempt++) {
+          const poll = await deps.indexer.getVtxos({ scripts: [bytesToHex(script.pkScript)], spendableOnly: true });
+          renewedCoin = poll.vtxos.find((vtxo) => !vtxo.isSpent && vtxo.txid !== coin.txid && vtxo.assets?.some((item) => item.assetId === store.assetId && BigInt(item.amount) === 1n));
+          if (renewedCoin) break;
+          await new Promise((resolve) => setTimeout(resolve, 1_000));
+        }
+        if (!renewedCoin) throw new HttpError(500, "renewed beacon coin not indexed");
+        const renewedTxs = await deps.indexer.getVirtualTxs([renewedCoin.txid]);
+        const renewedPrev = renewedTxs.txs.map((raw) => Transaction.fromPSBT(base64.decode(raw))).find((tx) => tx.id === renewedCoin.txid);
+        if (!renewedPrev) throw new HttpError(500, "renewed creating tx missing");
+        targetCoin = renewedCoin;
+        targetPrev = renewedPrev;
+      }
+
+      const reseedBuilt = buildReseed({
+        beacon: {
+          script: script.script,
+          coin: { txid: targetCoin.txid, vout: targetCoin.vout, value: targetCoin.value, prevTx: targetPrev.toBytes(true, true) },
+          id: assetId,
+        },
+        round: nextRound,
+        lastExpiry,
+        sign: (outpoint) => schnorr.sign(
+          reseedDigest({ domain: DOMAIN, id: beaconId, outpoint, round: nextRound, lastExpiry }),
+          deps.oracleKey!,
+        ),
+        checkpoint: deps.wallet.serverUnrollScript,
+      });
+      const reseeded = await submit(reseedBuilt, deps.emulator as EmulatorProvider);
+      return {
+        commitmentTxid: commitmentTxid || null,
+        reseedTxid: reseeded.txid,
+        round: nextRound.toString(),
+        lastExpiry: lastExpiry.toString(),
+      };
+    } finally {
+      publishing = false;
+    }
+  }
+
   async function handle(req: http.IncomingMessage, res: http.ServerResponse) {
     const parsed = new URL(req.url ?? "/", "http://oracle");
     const url = parsed.pathname;
@@ -578,6 +693,11 @@ export async function createOracle(deps: OracleDeps) {
       if (req.method === "POST" && url === "/api/publish") {
         requireAdmin(req);
         return sendJson(res, 200, await publish(asRecord(await readBody(req, 4096))));
+      }
+      if (req.method === "POST" && url === "/api/renew") {
+        requireAdmin(req);
+        exact(asRecord(await readBody(req, 4096)), []);
+        return sendJson(res, 200, await renew());
       }
       sendJson(res, 404, { error: "not found" });
     } catch (err) {
@@ -607,7 +727,7 @@ export async function createOracle(deps: OracleDeps) {
       if (watched.collateral < READ_FEE + DUST_SATS) continue;
       let bound;
       try {
-        bound = bindContracts(termsFor(watched, deps.wallet.arkServerPublicKey, deps.emulatorKey, READ_FEE));
+        bound = bindContracts(termsFor(watched, deps.wallet.arkServerPublicKey, deps.emulatorKey, READ_FEE, hrp));
       } catch {
         continue;
       }

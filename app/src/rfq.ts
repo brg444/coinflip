@@ -5,11 +5,7 @@ import { asset } from "@arkade-os/sdk";
 import { beaconIdOf } from "../../protocol/beacon-id.ts";
 import {
   BEACON_READ_FEE,
-  EXIT,
   PAIR,
-  PREDICT_FALLBACK_DELAY,
-  PREDICT_FINAL_EXIT_DELAY,
-  PREDICT_VOID_AFTER,
   type PredictKind,
 } from "../../protocol/constants.ts";
 import { bindContracts } from "../../protocol/contracts.ts";
@@ -19,10 +15,10 @@ import { payoutMultiplier } from "../../protocol/pricing.ts";
 import { collectReplies } from "../../protocol/nostr.ts";
 import { parseOracleBeacon } from "../../settle/oracle.ts";
 import { LIVE_BEACON_STATUS } from "./beacon-status.ts";
-import { writerBinding } from "./fund.ts";
+import { ACTIVE_PROFILE, ACTIVE_Q_MAX, writerBinding } from "./fund.ts";
 
-export function quoteMatchesBeacon(beaconTxid: string, beaconGidx: number, status: unknown = LIVE_BEACON_STATUS): boolean {
-  return parseOracleBeacon(status, beaconTxid, beaconGidx).ok;
+export function quoteMatchesBeacon(beaconTxid: string, beaconGidx: number, status: unknown = LIVE_BEACON_STATUS, expectedHrp: string = ACTIVE_PROFILE.hrp): boolean {
+  return parseOracleBeacon(status, beaconTxid, beaconGidx, expectedHrp).ok;
 }
 
 export function backupKeyMatches(
@@ -130,14 +126,14 @@ export async function requestPredictQuotes(input: {
     if (quote.solver_pubkey !== incoming.from || quote.profile.writer_pubkey !== incoming.from) continue;
     if (quote.valid_until <= now || quote.profile.deadline < now + 15) continue;
     if (quote.profile.deadline > Number(input.expiry) - 30) continue;
-    if (quote.profile.exit !== Number(EXIT)) continue;
-    if (quote.profile.void_after !== Number(PREDICT_VOID_AFTER)) continue;
-    if (quote.profile.fallback_delay !== Number(PREDICT_FALLBACK_DELAY)) continue;
-    if (quote.profile.final_exit_delay !== Number(PREDICT_FINAL_EXIT_DELAY)) continue;
+    if (quote.profile.exit !== Number(ACTIVE_PROFILE.exit)) continue;
+    if (quote.profile.void_after !== Number(ACTIVE_PROFILE.voidAfter)) continue;
+    if (quote.profile.fallback_delay !== Number(ACTIVE_PROFILE.fallbackDelay)) continue;
+    if (quote.profile.final_exit_delay !== Number(ACTIVE_PROFILE.finalExitDelay)) continue;
     if (!quoteMatchesBeacon(quote.profile.beacon_txid, quote.profile.beacon_gidx)) continue;
     if (!backupKeyMatches(quote.profile.backup_pubkey, quote.profile.writer_pubkey, profile.emulatorKey, input.backupPubkey ?? null, profile.network)) continue;
     const payout = BigInt(quote.to_amount);
-    if (payoutRefusal(payout, input.stake, BEACON_READ_FEE)) continue;
+    if (payoutRefusal(payout, input.stake, BEACON_READ_FEE, ACTIVE_Q_MAX)) continue;
     let bound;
     try {
       bound = bindContracts({
@@ -147,7 +143,7 @@ export async function requestPredictQuotes(input: {
         premium: input.stake,
         expiry: input.expiry,
         deadline: BigInt(quote.profile.deadline),
-        exit: EXIT,
+        exit: ACTIVE_PROFILE.exit,
         writerPk: hexToBytes(quote.profile.writer_pubkey),
         holderPk: profile.signerKey ?? profile.payoutKey,
         holderPayoutKey: profile.signerKey ? undefined : profile.payoutKey,
@@ -159,6 +155,7 @@ export async function requestPredictQuotes(input: {
         readFee: BEACON_READ_FEE,
         serverKey: profile.serverKey,
         emulatorKey: profile.emulatorKey,
+        hrp: ACTIVE_PROFILE.hrp,
       });
     } catch {
       continue;

@@ -40,6 +40,7 @@ test("a Mutinynet address is saved and a key is refused", () => {
   clearAddress();
   assert.equal(readAddress(), null);
   assert.equal(readPubkey(), null);
+  assert.throws(() => parseWriterAddress(ADDRESS, "ark", "Bitcoin"), /Bitcoin.*ark/);
 });
 
 test("wallet connect signer pubkey verifies against DefaultVtxo and binds identical contracts across page and desk", async () => {

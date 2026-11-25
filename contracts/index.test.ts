@@ -88,6 +88,8 @@ test("the two artifacts publish the vault and beacon functions", () => {
       { name: "attest", inputs: ["expiry", "price", "time", "nonce", "intentExpiry", "sig", "adminSig"] },
       { name: "read", inputs: ["selfIndex"] },
       { name: "migrate", inputs: ["next", "opSig"] },
+      { name: "reboard", inputs: ["opSig"] },
+      { name: "reseed", inputs: ["round", "lastExpiry", "opSig"] },
       { name: "unilateral", inputs: ["adminSig"] },
     ],
   });
@@ -105,7 +107,7 @@ test("the import surface is the protocol bind and settle helpers", () => {
   assert.equal(settlePayouts, settlePayoutsFromSettle);
   assert.deepEqual(Object.keys(vaultProgram().functions).sort(), ["close", "settle", "unilateral"]);
   assert.deepEqual(Object.keys(predictVaultProgram().functions).sort(), ["close", "reboard", "refund", "refundBackup", "settle", "unilateral"]);
-  assert.deepEqual(Object.keys(beaconProgram().functions).sort(), ["attest", "migrate", "read", "unilateral"]);
+  assert.deepEqual(Object.keys(beaconProgram().functions).sort(), ["attest", "migrate", "read", "reboard", "reseed", "unilateral"]);
 });
 
 test("committed contract artifacts match compiled .ark sources", async () => {

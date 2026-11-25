@@ -226,7 +226,11 @@ test("the beacon leaves check what the design says", () => {
   assert.equal(count(read, "CHECKSIGFROMSTACK"), 0);
   assert.equal(count(beacon.functions.migrate?.arkadeScript?.asm, "CHECKSIGFROMSTACK"), 1);
   assert.equal(beacon.functions.migrate?.arkadeScript?.witness?.[0], "opSig");
-  assert.deepEqual(Object.keys(beacon.functions), ["attest", "read", "migrate", "unilateral"]);
+  assert.equal(count(beacon.functions.reboard?.arkadeScript?.asm, "CHECKSIGFROMSTACK"), 1);
+  assert.equal(count(beacon.functions.reboard?.arkadeScript?.asm, "TUNNEL"), 1);
+  assert.equal(count(beacon.functions.reseed?.arkadeScript?.asm, "CHECKSIGFROMSTACK"), 1);
+  assert.equal(count(beacon.functions.reseed?.arkadeScript?.asm, "INSPECTINPUTPACKET"), 1);
+  assert.deepEqual(Object.keys(beacon.functions), ["attest", "read", "migrate", "reboard", "reseed", "unilateral"]);
 });
 
 test("bindings are deterministic Mutinynet addresses", async () => {

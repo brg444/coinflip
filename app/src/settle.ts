@@ -1,12 +1,12 @@
 import { parseOracleBeacon } from "../../settle/oracle.ts";
 import { reboardPredictVault, refundQuote, settleQuote, type RefundOutcome, type SettleOutcome } from "../../settle/vault.ts";
 import { LIVE_BEACON_STATUS } from "./beacon-status.ts";
-import { openContract, type FundRequest } from "./fund.ts";
+import { ACTIVE_PROFILE, openContract, type FundRequest } from "./fund.ts";
 
 /** Settle a filled vault from the page using the canonical fixing committed in the beacon. */
 export async function settleFromPage(req: FundRequest & { fillTxid?: string }): Promise<SettleOutcome> {
   if (!req.beaconTxidHex) throw new Error("This position has no beacon.");
-  const parsed = parseOracleBeacon(LIVE_BEACON_STATUS, req.beaconTxidHex, req.beaconGidx ?? 0);
+  const parsed = parseOracleBeacon(LIVE_BEACON_STATUS, req.beaconTxidHex, req.beaconGidx ?? 0, ACTIVE_PROFILE.hrp);
   if (!parsed.ok) throw new Error(parsed.error);
   const { client, terms } = await openContract(req);
   return settleQuote({

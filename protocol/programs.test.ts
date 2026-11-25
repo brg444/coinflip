@@ -82,5 +82,5 @@ test("active contract programs load and bind expected functions and opcodes", ()
     Object.keys(predict.functions).sort(),
     ["close", "reboard", "refund", "refundBackup", "settle", "unilateral"],
   );
-  assert.deepEqual(Object.keys(beaconProgram().functions).sort(), ["attest", "migrate", "read", "unilateral"]);
+  assert.deepEqual(Object.keys(beaconProgram().functions).sort(), ["attest", "migrate", "read", "reboard", "reseed", "unilateral"]);
 });

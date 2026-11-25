@@ -9,9 +9,9 @@ import {
   RestIndexerProvider,
 } from "@arkade-os/sdk";
 
-import { ARK_URL, DEFAULT_RELAYS, EMULATOR_URL, isPredict, PREDICT_VOID_AFTER } from "../protocol/constants.ts";
+import { DEFAULT_RELAYS, isPredict, PREDICT_VOID_AFTER } from "../protocol/constants.ts";
 import { bytesToHex } from "../protocol/hex.ts";
-import { networkByName } from "../protocol/network.ts";
+import { assertNetworkMatch, networkProfile } from "../protocol/network.ts";
 import { bindContracts } from "../protocol/contracts.ts";
 import type { OptionPosition } from "../protocol/messages.ts";
 import { quoteRelay, watchPositions } from "../protocol/nostr.ts";
@@ -43,6 +43,8 @@ function required(name: string): string {
   return value;
 }
 
+const requestedNetwork = process.env.NETWORK?.trim();
+const defaults = networkProfile(requestedNetwork);
 const relayList = (process.env.RELAYS ?? DEFAULT_RELAYS.join(",")).split(",").map((item) => item.trim()).filter(Boolean);
 const relay = quoteRelay(relayList);
 const positionsFile = process.env.POSITIONS?.trim() || "";
@@ -50,14 +52,16 @@ const oracleUrl = serviceOrigin(required("ORACLE_URL"));
 const oracleAdmin = process.env.ORACLE_ADMIN?.trim() ?? "";
 const dataDir = process.env.DATA_DIR?.trim() || "data";
 const port = Number(process.env.PORT ?? "8790");
-const arkUrl = process.env.ARK_URL?.trim() || ARK_URL;
-const emulatorUrl = process.env.EMULATOR_URL?.trim() || EMULATOR_URL;
+const arkUrl = process.env.ARK_URL?.trim() || defaults.arkUrl;
+const emulatorUrl = process.env.EMULATOR_URL?.trim() || defaults.emulatorUrl;
 if (!Number.isInteger(port) || port < 1) throw new Error("PORT");
 
 const progress = await Progress.open(dataDir);
 const indexer = new RestIndexerProvider(arkUrl);
 const ark = new RestArkProvider(arkUrl);
-const network = networkByName((await ark.getInfo()).network);
+const arkInfo = await ark.getInfo();
+const profile = assertNetworkMatch(requestedNetwork, arkInfo.network);
+const network = profile.network;
 const client = await arkade.Arkade.connect({
   arkade: ark,
   indexer,
@@ -206,7 +210,7 @@ async function progressDue() {
 
   let parsed;
   try {
-    parsed = parseOracleBeacon(await fetchOracleStatus(oracleUrl, AbortSignal.timeout(10_000)));
+    parsed = parseOracleBeacon(await fetchOracleStatus(oracleUrl, AbortSignal.timeout(10_000)), undefined, 0, profile.hrp);
   } catch (err) {
     once("oracle-fetch", `oracle ${err instanceof Error ? err.message : err}`, true);
     return;
@@ -226,7 +230,7 @@ async function progressDue() {
       once(`beacon:${position.id}`, `skip ${position.rfqId} beacon mismatch`, true);
       continue;
     }
-    const terms = termsFor(position, client.serverKey, client.emulatorKey!, parsed.beacon.readFee);
+    const terms = termsFor(position, client.serverKey, client.emulatorKey!, parsed.beacon.readFee, profile.hrp);
     const bound = bindContracts(terms);
     if (bound.vaultAddress !== position.vaultAddress) {
       once(`addr:${position.id}`, `skip ${position.rfqId} vault address`, true);
@@ -332,6 +336,7 @@ const server = http.createServer((req, res) => {
   res.writeHead(200, { "content-type": "application/json", "access-control-allow-origin": "*" });
   res.end(JSON.stringify({
     commit: revision(),
+    network: profile.id,
     oracle: oracleUrl,
     relay,
     watching,
@@ -347,7 +352,7 @@ server.listen(port, () => {
 });
 
 try {
-  const initial = parseOracleBeacon(await fetchOracleStatus(oracleUrl, AbortSignal.timeout(10_000)));
+  const initial = parseOracleBeacon(await fetchOracleStatus(oracleUrl, AbortSignal.timeout(10_000)), undefined, 0, profile.hrp);
   if (initial.ok) updateBeaconFilter(initial.beacon.assetId);
 } catch {
   // Oracle may not be up yet; progressDue refreshes the beacon filter once reachable.
