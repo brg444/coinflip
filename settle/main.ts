@@ -9,16 +9,16 @@ import {
   RestIndexerProvider,
 } from "@arkade-os/sdk";
 
-import { ARK_URL, DEFAULT_RELAYS, EMULATOR_URL, isPredict, PREDICT_VOID_AFTER } from "../protocol/constants.ts";
+import { DEFAULT_RELAYS, isPredict, PREDICT_VOID_AFTER } from "../protocol/constants.ts";
 import { bytesToHex } from "../protocol/hex.ts";
-import { networkByName } from "../protocol/network.ts";
+import { assertNetworkMatch, networkProfile } from "../protocol/network.ts";
 import { bindContracts } from "../protocol/contracts.ts";
 import type { OptionPosition } from "../protocol/messages.ts";
 import { quoteRelay, watchPositions } from "../protocol/nostr.ts";
 import { revision } from "../protocol/sqlite-storage.ts";
 import { chooseSample } from "../oracle/store.ts";
 import { fetchOraclePrices, fetchOracleStatus, parseOracleBeacon, serviceOrigin } from "./oracle.ts";
-import { duePositions, manualPositions, publishOutcome, publishReady, settlementPositions, termsFor } from "./positions.ts";
+import { canAdvancePastFailedPublish, duePositions, manualPositions, publishOutcome, publishReady, settlementPositions, termsFor } from "./positions.ts";
 import { Progress } from "./progress.ts";
 import { refundQuote, settleQuote } from "./vault.ts";
 
@@ -43,6 +43,8 @@ function required(name: string): string {
   return value;
 }
 
+const requestedNetwork = process.env.NETWORK?.trim();
+const defaults = networkProfile(requestedNetwork);
 const relayList = (process.env.RELAYS ?? DEFAULT_RELAYS.join(",")).split(",").map((item) => item.trim()).filter(Boolean);
 const relay = quoteRelay(relayList);
 const positionsFile = process.env.POSITIONS?.trim() || "";
@@ -50,14 +52,16 @@ const oracleUrl = serviceOrigin(required("ORACLE_URL"));
 const oracleAdmin = process.env.ORACLE_ADMIN?.trim() ?? "";
 const dataDir = process.env.DATA_DIR?.trim() || "data";
 const port = Number(process.env.PORT ?? "8790");
-const arkUrl = process.env.ARK_URL?.trim() || ARK_URL;
-const emulatorUrl = process.env.EMULATOR_URL?.trim() || EMULATOR_URL;
+const arkUrl = process.env.ARK_URL?.trim() || defaults.arkUrl;
+const emulatorUrl = process.env.EMULATOR_URL?.trim() || defaults.emulatorUrl;
 if (!Number.isInteger(port) || port < 1) throw new Error("PORT");
 
 const progress = await Progress.open(dataDir);
 const indexer = new RestIndexerProvider(arkUrl);
 const ark = new RestArkProvider(arkUrl);
-const network = networkByName((await ark.getInfo()).network);
+const arkInfo = await ark.getInfo();
+const profile = assertNetworkMatch(requestedNetwork, arkInfo.network);
+const network = profile.network;
 const client = await arkade.Arkade.connect({
   arkade: ark,
   indexer,
@@ -88,20 +92,23 @@ function once(key: string, line: string, error = false) {
   else console.log(line);
 }
 
-const asked = new Map<number, { at: number; result: "published" | "fixed" | "failed" }>();
+type AskResult = { result: "published" | "fixed" | "failed"; status: number; error?: string };
+const asked = new Map<number, AskResult & { at: number }>();
 const PUBLISH_RETRY_MS = 15_000;
 
-/** Ask once a minute. "no sample" and other failures are logged. 409 still has to match the oracle's sample. */
-async function askPublish(expiry: number, nowMs: number): Promise<"published" | "fixed" | "failed"> {
+/** Ask the oracle to publish `expiry`. Retries every 15s on failure; 409 still verifies against oracle samples. */
+async function askPublish(expiry: number, nowMs: number): Promise<AskResult> {
   const prev = asked.get(expiry);
-  // Retry every 15s: a result is due the moment the window closes, and a miss used to cost a full minute.
-  if (prev && !publishReady(prev.at, nowMs, PUBLISH_RETRY_MS)) return prev.result;
+  if (prev && !publishReady(prev.at, nowMs, PUBLISH_RETRY_MS)) {
+    return { result: prev.result, status: prev.status, error: prev.error };
+  }
   if (!oracleAdmin) {
     once("oracle-admin", "ORACLE_ADMIN unset, so a missing fixing is not published", true);
-    asked.set(expiry, { at: nowMs, result: "failed" });
-    return "failed";
+    const out: AskResult = { result: "failed", status: 0, error: "oracle-admin unset" };
+    asked.set(expiry, { at: nowMs, ...out });
+    return out;
   }
-  let result: "published" | "fixed" | "failed" = "failed";
+  let out: AskResult = { result: "failed", status: 0 };
   try {
     const res = await fetch(`${oracleUrl}/api/publish`, {
       method: "POST",
@@ -110,13 +117,16 @@ async function askPublish(expiry: number, nowMs: number): Promise<"published" | 
       signal: AbortSignal.timeout(20_000),
     });
     const body = res.ok ? {} : (await res.json().catch(() => ({}))) as { error?: string };
-    result = publishOutcome(res.status, body.error);
+    const result = publishOutcome(res.status, body.error);
+    out = { result, status: res.status, error: body.error };
     if (result === "failed") console.error(`publish ${expiry} ${body.error ?? res.status}`);
   } catch (err) {
-    console.error(`publish ${expiry} ${err instanceof Error ? err.message : err}`);
+    const msg = err instanceof Error ? err.message : String(err);
+    out = { result: "failed", status: 0, error: msg };
+    console.error(`publish ${expiry} ${msg}`);
   }
-  asked.set(expiry, { at: nowMs, result });
-  return result;
+  asked.set(expiry, { at: nowMs, ...out });
+  return out;
 }
 
 async function loadManual() {
@@ -206,7 +216,7 @@ async function progressDue() {
 
   let parsed;
   try {
-    parsed = parseOracleBeacon(await fetchOracleStatus(oracleUrl, AbortSignal.timeout(10_000)));
+    parsed = parseOracleBeacon(await fetchOracleStatus(oracleUrl, AbortSignal.timeout(10_000)), undefined, 0, profile.hrp);
   } catch (err) {
     once("oracle-fetch", `oracle ${err instanceof Error ? err.message : err}`, true);
     return;
@@ -220,13 +230,15 @@ async function progressDue() {
 
   const lag = Number(parsed.beacon.expiryLag);
   const nowMs = Date.now();
+  let blockedExpiry: number | null = null;
   for (const position of due) {
     if (position.expiry + lag > now) continue;
+    if (blockedExpiry != null && position.expiry > blockedExpiry) break;
     if (!matchesOurBeacon(position.beaconTxid, position.beaconGidx)) {
       once(`beacon:${position.id}`, `skip ${position.rfqId} beacon mismatch`, true);
       continue;
     }
-    const terms = termsFor(position, client.serverKey, client.emulatorKey!, parsed.beacon.readFee);
+    const terms = termsFor(position, client.serverKey, client.emulatorKey!, parsed.beacon.readFee, profile.hrp);
     const bound = bindContracts(terms);
     if (bound.vaultAddress !== position.vaultAddress) {
       once(`addr:${position.id}`, `skip ${position.rfqId} vault address`, true);
@@ -240,11 +252,14 @@ async function progressDue() {
     let expected: { price: bigint; time: bigint } | undefined;
     if (hasLiveVault) {
       const published = await askPublish(position.expiry, nowMs);
-      if (published === "failed") {
+      if (published.result === "failed") {
         if (await tryVoid(position, terms, now)) return;
+        if (!canAdvancePastFailedPublish({ status: published.status, error: published.error, expiry: position.expiry, lag, now })) {
+          blockedExpiry = position.expiry;
+        }
         continue;
       }
-      if (published === "fixed") {
+      if (published.result === "fixed") {
         try {
           const samples = await fetchOraclePrices(
             oracleUrl,
@@ -332,6 +347,7 @@ const server = http.createServer((req, res) => {
   res.writeHead(200, { "content-type": "application/json", "access-control-allow-origin": "*" });
   res.end(JSON.stringify({
     commit: revision(),
+    network: profile.id,
     oracle: oracleUrl,
     relay,
     watching,
@@ -347,7 +363,7 @@ server.listen(port, () => {
 });
 
 try {
-  const initial = parseOracleBeacon(await fetchOracleStatus(oracleUrl, AbortSignal.timeout(10_000)));
+  const initial = parseOracleBeacon(await fetchOracleStatus(oracleUrl, AbortSignal.timeout(10_000)), undefined, 0, profile.hrp);
   if (initial.ok) updateBeaconFilter(initial.beacon.assetId);
 } catch {
   // Oracle may not be up yet; progressDue refreshes the beacon filter once reachable.

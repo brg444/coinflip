@@ -9,25 +9,23 @@ import {
   Wallet,
 } from "@arkade-os/sdk";
 
-import { ARK_URL, DEFAULT_RELAYS, EMULATOR_URL } from "../protocol/constants.ts";
+import { DEFAULT_RELAYS, PREDICT_VOID_AFTER } from "../protocol/constants.ts";
 import { bytesToHex, hexToBytes } from "../protocol/hex.ts";
 import type { OptionPosition } from "../protocol/messages.ts";
-import { networkByName } from "../protocol/network.ts";
+import { assertNetworkMatch, networkProfile } from "../protocol/network.ts";
 import { watchPositions } from "../protocol/nostr.ts";
 import { openSqliteStorage } from "../protocol/sqlite-storage.ts";
 import { startDiaFeed } from "./feed.ts";
-import { createOracle, MAX_ANNOUNCE_AGE_S, type OracleWallet } from "./service.ts";
+import { createOracle, type OracleWallet } from "./service.ts";
 
 /**
- *   ORACLE_KEY      optional 32-byte hex. Never generated. Wallet, issue, deploy, and exit.
- *   ORACLE_ADMIN    optional bearer. Unset disables /api/intent, /api/issue, /api/deploy, /api/recover, and /api/publish.
- *   SAMPLE_MS       how often to read the latest DIA OracleUpdate. Default 20000.
- *                   0 uses that same interval. Prints older than 24 hours are dropped.
- *                   Each tick also publishes each nostr filled-vault expiry once
- *                   expiry + 60 has passed and a DIA print sits in the window. It does not settle.
- *   DIA_WS          default wss://rpc.diadata.org. IntentRegistered, then getLatestIntentByType.
- *   ARK_URL        default https://mutinynet.arkade.sh
- *   EMULATOR_URL   default Mutinynet emulator
+ *   NETWORK        optional ("bitcoin" | "mutinynet" | "regtest"). Defaults to mutinynet.
+ *   ORACLE_KEY     optional 32-byte hex. Never generated. Wallet, issue, deploy, renew, and exit.
+ *   ORACLE_ADMIN   optional bearer. Unset disables admin endpoints (/api/intent, /api/issue, /api/deploy, /api/recover, /api/publish, /api/renew).
+ *   SAMPLE_MS      how often to read the latest DIA OracleUpdate. Default 20000.
+ *   DIA_WS         default wss://rpc.diadata.org. IntentRegistered, then getLatestIntentByType.
+ *   ARK_URL        default from NETWORK profile
+ *   EMULATOR_URL   default from NETWORK profile
  *   DATA_DIR       oracle.json + arkade.sqlite. Default ./data
  *   PORT           default 8789
  *   HOST           default 127.0.0.1. oracle/Dockerfile sets 0.0.0.0.
@@ -40,6 +38,8 @@ function optionalKey(name: string): Uint8Array | undefined {
   return hexToBytes(raw);
 }
 
+const requestedNetwork = process.env.NETWORK?.trim();
+const defaults = networkProfile(requestedNetwork);
 const oracleKey = optionalKey("ORACLE_KEY");
 const deskPubkeyRaw = process.env.DESK_PUBKEY?.trim().toLowerCase() || undefined;
 if (deskPubkeyRaw && !/^[0-9a-f]{64}$/.test(deskPubkeyRaw)) throw new Error("DESK_PUBKEY must be 32 bytes");
@@ -47,8 +47,8 @@ const adminToken = process.env.ORACLE_ADMIN?.trim() || undefined;
 const dataDir = process.env.DATA_DIR?.trim() || "data";
 const port = Number(process.env.PORT ?? "8789");
 const sampleEveryMs = Number(process.env.SAMPLE_MS ?? "20000");
-const arkUrl = process.env.ARK_URL?.trim() || ARK_URL;
-const emulatorUrl = process.env.EMULATOR_URL?.trim() || EMULATOR_URL;
+const arkUrl = process.env.ARK_URL?.trim() || defaults.arkUrl;
+const emulatorUrl = process.env.EMULATOR_URL?.trim() || defaults.emulatorUrl;
 if (!Number.isInteger(port) || port < 0) throw new Error("PORT");
 if (!Number.isInteger(sampleEveryMs) || sampleEveryMs < 0) throw new Error("SAMPLE_MS");
 const sampleInterval = sampleEveryMs > 0 ? sampleEveryMs : 20_000;
@@ -56,11 +56,18 @@ if (typeof EventSource === "undefined") {
   throw new Error("Contract events need Node's EventSource. Start the oracle with --experimental-eventsource.");
 }
 
+const arkProvider = new RestArkProvider(arkUrl);
+const arkInfo = await arkProvider.getInfo();
+const profile = assertNetworkMatch(requestedNetwork, arkInfo.network);
+if (BigInt(arkInfo.unilateralExitDelay) !== profile.exit) {
+  throw new Error(`server unilateralExitDelay is ${arkInfo.unilateralExitDelay}; ${profile.id} contracts use ${profile.exit}`);
+}
+
 const storage = await openSqliteStorage(dataDir);
 const wallet = oracleKey
   ? await Wallet.create({
       identity: SingleKey.fromHex(bytesToHex(oracleKey)),
-      arkProvider: new RestArkProvider(arkUrl),
+      arkProvider,
       indexerProvider: new RestIndexerProvider(arkUrl),
       settlementConfig: false,
       storage: {
@@ -89,10 +96,11 @@ if (wallet) {
 }
 
 const MAX_ANNOUNCED = 2_000;
+const TRACK_AGE_S = Number(PREDICT_VOID_AFTER);
 const announced = new Map<string, OptionPosition>();
 function pruneAnnounced(now = Math.floor(Date.now() / 1000)) {
   for (const [id, pos] of announced) {
-    if (now - pos.expiry > MAX_ANNOUNCE_AGE_S) announced.delete(id);
+    if (now - pos.expiry > TRACK_AGE_S) announced.delete(id);
   }
   while (announced.size > MAX_ANNOUNCED) {
     const oldest = announced.keys().next().value;
@@ -105,7 +113,7 @@ watchPositions({
   onPosition(position) {
     if (deskPubkeyRaw && position.writer_pubkey !== deskPubkeyRaw && position.holder_pubkey !== deskPubkeyRaw) return;
     const now = Math.floor(Date.now() / 1000);
-    if (now - position.expiry > MAX_ANNOUNCE_AGE_S) return;
+    if (now - position.expiry > TRACK_AGE_S) return;
     announced.set(position.rfq_id, position);
     pruneAnnounced(now);
   },
@@ -119,21 +127,25 @@ const oracle = await createOracle({
   host: process.env.HOST?.trim() || undefined,
   adminToken,
   oracleKey,
-  emulatorKey: hexToBytes(defaultEmulatorPubkey(networkByName((await new RestArkProvider(arkUrl).getInfo()).network))),
+  emulatorKey: hexToBytes(defaultEmulatorPubkey(profile.network)),
   wallet: wallet as unknown as OracleWallet | undefined,
   indexer: wallet?.indexerProvider,
   emulator: new RestEmulatorProvider(emulatorUrl),
+  arkProvider,
+  sdkNetwork: profile.network,
+  exit: profile.exit,
+  hrp: profile.hrp,
+  network: profile.id,
+  deprecatedSigners: (arkInfo.deprecatedSigners ?? []).map((item) => ({
+    pubkey: item.pubkey,
+    cutoffDate: item.cutoffDate.toString(),
+  })),
   pull: () => feed.latest(),
   sampleEveryMs: sampleInterval,
   allowedPubkey: deskPubkeyRaw,
   announcedPositions: () => {
     pruneAnnounced();
     return announced.values();
-  },
-  onPublishedExpiry: (expiry) => {
-    for (const [id, pos] of announced) {
-      if (pos.expiry === expiry) announced.delete(id);
-    }
   },
 });
 onDiaIntent = (intent) => {

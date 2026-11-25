@@ -869,3 +869,194 @@ test("duePositionExpiries restricts auto-publishing to allowedPubkey when config
   const filtered = duePositionExpiries(positions, { assetId, now: base + 1_200, done: new Set(), allowedPubkey: desk });
   assert.deepEqual(filtered.map((item) => item.expiry), [base + 300, base + 600]);
 });
+
+test("renew refuses with 409 live vault open while any filled position vault is unspent, and ignores unfunded announcements", async () => {
+  const expiry = 1_700_000_100;
+  const ourTxid = "ee".repeat(32);
+  const serverKey = await SingleKey.fromHex(hex.encode(secret(1))).xOnlyPublicKey();
+  const emulatorKey = await SingleKey.fromHex(hex.encode(secret(2))).compressedPublicKey();
+  const deskPk = await SingleKey.fromHex(hex.encode(secret(21))).xOnlyPublicKey();
+  const bettorPk = await SingleKey.fromHex(hex.encode(secret(22))).xOnlyPublicKey();
+  const beacon = beaconIdOf(asset.AssetId.create(ourTxid, 0));
+  const liveVault = bindContracts({
+    kind: 0,
+    strike: 8_000_000n,
+    collateral: 95_000n,
+    premium: 50_000n,
+    expiry: BigInt(expiry),
+    deadline: BigInt(expiry),
+    exit: EXIT,
+    writerPk: deskPk,
+    holderPk: bettorPk,
+    beacon,
+    readFee: BEACON_READ_FEE,
+    serverKey,
+    emulatorKey,
+  });
+  const fakeVault = bindContracts({
+    kind: 0,
+    strike: 8_500_000n,
+    collateral: 95_000n,
+    premium: 50_000n,
+    expiry: BigInt(expiry + 3_600),
+    deadline: BigInt(expiry + 3_600),
+    exit: EXIT,
+    writerPk: deskPk,
+    holderPk: bettorPk,
+    beacon,
+    readFee: BEACON_READ_FEE,
+    serverKey,
+    emulatorKey,
+  });
+  const liveScriptHex = bytesToHex(liveVault.vaultPkScript);
+  const fakeScriptHex = bytesToHex(fakeVault.vaultPkScript);
+  let clock = expiry - 60;
+  let vaultLive = true;
+  let assetId = "";
+  let creating: Transaction | undefined;
+  let reboardReached = false;
+  const announced: OptionPosition[] = [
+    {
+      v: 1,
+      type: "option_position",
+      program_id: OPTION_VAULT_PROGRAM_ID,
+      rfq_id: "cc".repeat(32),
+      pair: PAIR,
+      kind: 0,
+      collateral: "95000",
+      strike: "8000000",
+      expiry,
+      exit: Number(EXIT),
+      writer_pubkey: bytesToHex(deskPk),
+      writer_pk_script: bytesToHex(liveVault.writerPkScript),
+      holder_pubkey: bytesToHex(bettorPk),
+      beacon_txid: ourTxid,
+      beacon_gidx: 0,
+      vault_address: liveVault.vaultAddress,
+      fill_txid: "cc".repeat(32),
+    },
+    {
+      v: 1,
+      type: "option_position",
+      program_id: OPTION_VAULT_PROGRAM_ID,
+      rfq_id: "dd".repeat(32),
+      pair: PAIR,
+      kind: 0,
+      collateral: "95000",
+      strike: "8500000",
+      expiry: expiry + 3_600,
+      exit: Number(EXIT),
+      writer_pubkey: bytesToHex(deskPk),
+      writer_pk_script: bytesToHex(fakeVault.writerPkScript),
+      holder_pubkey: bytesToHex(bettorPk),
+      beacon_txid: ourTxid,
+      beacon_gidx: 0,
+      vault_address: fakeVault.vaultAddress,
+      fill_txid: "dd".repeat(32),
+    },
+  ];
+  const ctx = await boot({
+    now: () => clock,
+    announcedPositions: () => announced,
+    sdkNetwork: networks.mutinynet,
+    arkProvider: {} as unknown as OracleDeps["arkProvider"],
+    emulator: {
+      async submitTx(arkTx, checkpointTxs = []) {
+        return { signedArkTx: arkTx, signedCheckpointTxs: checkpointTxs };
+      },
+      async submitIntent() {
+        reboardReached = true;
+        throw new Error("reboard-sentinel");
+      },
+    },
+    indexer: {
+      async getVtxos(opts) {
+        if (opts.scripts.includes(liveScriptHex)) {
+          return { vtxos: vaultLive ? [{ txid: "cc".repeat(32), vout: 1, value: 95_000 }] : [] };
+        }
+        if (opts.scripts.includes(fakeScriptHex)) {
+          return { vtxos: [] };
+        }
+        const script = hex.decode(opts.scripts[0]!);
+        if (!creating) {
+          creating = new Transaction({ version: 3, allowUnknownOutputs: true });
+          creating.addInput({ txid: new Uint8Array(32).fill(8), index: 1 });
+          creating.addOutput({ script, amount: 330n });
+          creating.addOutput(Extension.create([statePacket(genesisState())]).txOut());
+        }
+        return { vtxos: [{ txid: creating.id, vout: 0, value: 330, assets: [{ assetId, amount: 1n }] }] };
+      },
+      async getVirtualTxs(txids) {
+        if (!creating || txids[0] !== creating.id) return { txs: [] };
+        return { txs: [base64.encode(creating.toPSBT())] };
+      },
+    },
+  });
+  try {
+    const issued = await call(ctx.oracle.url, "/api/issue", {}, "test-token");
+    assert.equal(issued.status, 200);
+    assetId = String(issued.json.assetId);
+    assert.equal((await call(ctx.oracle.url, "/api/deploy", {}, "test-token")).status, 200);
+
+    // Unexpired filled vault blocks renew.
+    const beforeExpiry = await call(ctx.oracle.url, "/api/renew", {}, "test-token");
+    assert.equal(beforeExpiry.status, 409);
+    assert.equal(beforeExpiry.json.error, "live vault open");
+    assert.equal(reboardReached, false);
+
+    // Expired/attested-but-unsettled vault still blocks renew.
+    clock = expiry + 600;
+    const afterExpiry = await call(ctx.oracle.url, "/api/renew", {}, "test-token");
+    assert.equal(afterExpiry.status, 409);
+    assert.equal(afterExpiry.json.error, "live vault open");
+    assert.equal(reboardReached, false);
+
+    // Once settled, renew passes the guard (ignoring the unfunded future announcement) and enters reboard.
+    vaultLive = false;
+    const afterSettle = await call(ctx.oracle.url, "/api/renew", {}, "test-token");
+    assert.equal(reboardReached, true);
+    assert.equal(afterSettle.status, 500);
+  } finally {
+    await ctx.close();
+  }
+});
+
+test("publishAnnounced does not leapfrog to a later close when an earlier close fails transiently", async () => {
+  const first = 1_700_000_100;
+  const second = first + 300;
+  let failOnce = true;
+  const submitted: string[] = [];
+  const ctx = await boot({
+    now: () => second + 120,
+    announcedExpiries: () => [second, first],
+    samples: [storedSample("9900000", first + 10), storedSample("10000000", second + 10)],
+    emulator: {
+      async submitTx(arkTx, checkpointTxs = []) {
+        if (failOnce) {
+          failOnce = false;
+          throw new Error("temporary emulator outage");
+        }
+        submitted.push(arkTx);
+        return { signedArkTx: arkTx, signedCheckpointTxs: checkpointTxs };
+      },
+    },
+  });
+  const log = console.error;
+  console.error = () => {};
+  try {
+    assert.equal((await call(ctx.oracle.url, "/api/issue", {}, "test-token")).status, 200);
+    assert.equal((await call(ctx.oracle.url, "/api/deploy", {}, "test-token")).status, 200);
+    await ctx.oracle.publishAnnounced();
+    // First close failed transiently; second close must NOT be published out of order.
+    assert.equal(submitted.length, 0);
+    assert.deepEqual((await call(ctx.oracle.url, "/api/status")).json.fixings, []);
+
+    // Next pass recovers and publishes both in strict chronological order.
+    await ctx.oracle.publishAnnounced();
+    const fixings = (await call(ctx.oracle.url, "/api/status")).json.fixings as { expiry: number }[];
+    assert.deepEqual(fixings.map((f) => f.expiry), [first, second]);
+  } finally {
+    console.error = log;
+    await ctx.close();
+  }
+});

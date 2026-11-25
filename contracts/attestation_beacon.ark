@@ -140,6 +140,45 @@ contract AttestationBeacon(
     require(tx.outputs[0].assets.lookup(AssetId { txid: ctrlTxid, gidx: ctrlGidx }) == 1, "identity asset");
   }
 
+  @allow(unsigned-spend-path, "authorized by adminPk checkSigFromStack over VTXO outpoint for batch renewal")
+  function reboard(signature opSig) {
+    require(tx.version == 2, "intent only");
+    bytes intentType = tx.intent.field(bytes("type"));
+    require(intentType == bytes("register") || intentType == bytes("delete"), "intent type");
+    if (intentType == bytes("register")) {
+      require(tx.intent.field(bytes("onchain_output_indexes")) == bytes("[]"), "onchain output");
+    }
+    require(this.activeInputIndex >= 1, "intent input");
+    let op = tx.input.current.outpoint;
+    let msg = sha256(domain + "reboard" + ctrlTxid + int2bytes(ctrlGidx, 4) + op.txid + int2bytes(op.vout, 4));
+    require(checkSigFromStack(opSig, adminPk, msg), "oracle service");
+    require(this.tunnel(this.activeInputIndex - 1), "same position");
+    require(tx.outputs[this.activeInputIndex - 1].assets.lookup(AssetId { txid: ctrlTxid, gidx: ctrlGidx }) == 1, "identity asset");
+  }
+
+  @allow(unsigned-spend-path, "authorized by adminPk checkSigFromStack over outpoint, round, and lastExpiry when STATE packet is absent")
+  function reseed(int round, int lastExpiry, signature opSig) {
+    require(this.activeInputIndex == 0, "beacon is input 0");
+    require(!tx.inputs[0].packet.has(STATE), "already seeded");
+    require(round >= 0, "round");
+    require(lastExpiry >= 0, "expiry");
+    require(lastExpiry % GRID == 0, "expiry grid");
+    let op = tx.input.current.outpoint;
+    let msg = sha256(
+      domain + "reseed" + ctrlTxid + int2bytes(ctrlGidx, 4)
+        + op.txid + int2bytes(op.vout, 4)
+        + int2bytes(round, 8) + int2bytes(lastExpiry, 8)
+    );
+    require(checkSigFromStack(opSig, adminPk, msg), "oracle service");
+    bytes next = tx.packet(STATE);
+    require(bytes2int(substr(next, 1, 8)) == round, "round");
+    require(substr(next, SLOTS, 8) == int2bytes(lastExpiry, 8), "last expiry");
+    require(substr(next, VALUE_AT, 32) == int2bytes(0, 32), "empty value");
+    require(substr(next, HISTORY_AT, HISTORY) == int2bytes(0, HISTORY), "empty history");
+    require(tx.outputs[0].value >= tx.input.current.value, "value");
+    continues(next);
+  }
+
   function unilateral(signature adminSig) tapscript {
     require(older(exit));
     require(checkSig(adminSig, adminPk));

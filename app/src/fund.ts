@@ -15,17 +15,43 @@ import {
 } from "@arkade-os/sdk";
 
 import { beaconIdOf } from "../../protocol/beacon-id.ts";
-import { ARK_URL, BEACON_READ_FEE, DUST_SATS, EMULATOR_URL, EXECUTOR_URL, EXIT, isPredict, type Kind } from "../../protocol/constants.ts";
+import { BEACON_READ_FEE, DUST_SATS, isPredict, type Kind } from "../../protocol/constants.ts";
 import { assertServerExit, bindContracts, payoutVtxo, type Terms } from "../../protocol/contracts.ts";
 import { cancelIntentDelegation, cancelIntentTemplate, Executor, reboardVaultDelegation, reboardVaultTemplate } from "../../protocol/executor.ts";
 import { bytesToHex, hexToBytes, xOnly } from "../../protocol/hex.ts";
-import { networkByName } from "../../protocol/network.ts";
+import { networkByName, networkProfile, type NetworkProfile } from "../../protocol/network.ts";
 import { intentProgram, vaultProgram, vaultProgramFor } from "../../protocol/programs.ts";
 import intentArtifact from "../../contracts/option_intent.artifact.json" with { type: "json" };
 import predictArtifact from "../../contracts/predict_vault.artifact.json" with { type: "json" };
 
-const NETWORK_NAME = "Mutinynet";
-export const WALLET_URL = "https://mutinynet.arkade.money";
+type DemoConfig = {
+  network?: string;
+  arkUrl?: string;
+  emulatorUrl?: string;
+  executorUrl?: string;
+  walletUrl?: string;
+  explorerTxUrl?: string;
+  stakeMax?: string;
+};
+
+declare const __COINFLIP_DEMO__: DemoConfig | null | undefined;
+declare const __COINFLIP_NETWORK__: string | undefined;
+
+const demoCfg: DemoConfig | null = typeof __COINFLIP_DEMO__ !== "undefined" && __COINFLIP_DEMO__ ? __COINFLIP_DEMO__ : null;
+const buildNetwork = typeof __COINFLIP_NETWORK__ !== "undefined" ? __COINFLIP_NETWORK__ : undefined;
+
+export const ACTIVE_PROFILE: NetworkProfile = networkProfile(demoCfg?.network ?? buildNetwork ?? "mutinynet");
+export const ACTIVE_ARK_URL = demoCfg?.arkUrl?.trim() || ACTIVE_PROFILE.arkUrl;
+export const ACTIVE_EMULATOR_URL = demoCfg?.emulatorUrl?.trim() || ACTIVE_PROFILE.emulatorUrl;
+export const ACTIVE_EXECUTOR_URL = demoCfg?.executorUrl?.trim() ?? ACTIVE_PROFILE.executorUrl;
+export const ACTIVE_STAKE_MAX = demoCfg?.stakeMax && /^[1-9][0-9]*$/.test(demoCfg.stakeMax)
+  ? BigInt(demoCfg.stakeMax)
+  : ACTIVE_PROFILE.stakeMax;
+export const ACTIVE_Q_MAX = ACTIVE_PROFILE.qMax;
+export const EXPLORER_TX_URL = demoCfg?.explorerTxUrl?.trim() || ACTIVE_PROFILE.explorerTxUrl;
+
+const NETWORK_NAME = ACTIVE_PROFILE.label;
+export const WALLET_URL = demoCfg?.walletUrl?.trim() || ACTIVE_PROFILE.walletUrl;
 
 /**
  * Options: the page is the writer. `collateral` is what it locks, `premium`
@@ -90,7 +116,7 @@ type Session = {
   network: string;
 };
 
-const indexer = new RestIndexerProvider(ARK_URL);
+const indexer = new RestIndexerProvider(ACTIVE_ARK_URL);
 const sessions = new Map<string, Promise<Session>>();
 let managerPromise: Promise<ContractManager> | null = null;
 
@@ -109,20 +135,21 @@ let operatorPromise: Promise<Session> | null = null;
 function operatorSession(): Promise<Session> {
   if (!operatorPromise) {
     operatorPromise = (async () => {
-      const ark = new RestArkProvider(ARK_URL);
+      const ark = new RestArkProvider(ACTIVE_ARK_URL);
       const info = await ark.getInfo();
-      if (info.network.trim().toLowerCase() !== "mutinynet") {
-        throw new Error("This page requires Mutinynet.");
+      const got = networkProfile(info.network);
+      if (got.id !== ACTIVE_PROFILE.id) {
+        throw new Error(`This page requires ${ACTIVE_PROFILE.label}.`);
       }
       const contractManager = await contracts();
       const client = await arkade.Arkade.connect({
         arkade: ark,
         indexer,
-        emulator: new RestEmulatorProvider(EMULATOR_URL),
+        emulator: new RestEmulatorProvider(ACTIVE_EMULATOR_URL),
         contractManager,
         network: networkByName(info.network),
       });
-      return { client, network: info.network.trim().toLowerCase() };
+      return { client, network: got.id };
     })();
     operatorPromise.catch(() => {
       operatorPromise = null;
@@ -131,28 +158,32 @@ function operatorSession(): Promise<Session> {
   return operatorPromise;
 }
 
-const ADDRESS_KEY = "arkade-options-address-v1";
-const PUBKEY_KEY = "arkade-options-pubkey-v1";
-const SESSION_KEY = "arkade-options-session-v1";
+const KEY_SUFFIX = ACTIVE_PROFILE.isMainnet ? "-mainnet-v1" : "-v1";
+const ADDRESS_KEY = `arkade-options-address${KEY_SUFFIX}`;
+const PUBKEY_KEY = `arkade-options-pubkey${KEY_SUFFIX}`;
+const SESSION_KEY = `arkade-options-session${KEY_SUFFIX}`;
 
 function openSession(identity: SingleKey): Promise<Session> {
   const id = identity.toHex();
   let pending = sessions.get(id);
   if (!pending) {
     pending = (async () => {
-      const ark = new RestArkProvider(ARK_URL);
+      const ark = new RestArkProvider(ACTIVE_ARK_URL);
       const info = await ark.getInfo();
-      const network = info.network.trim().toLowerCase();
+      const got = networkProfile(info.network);
+      if (got.id !== ACTIVE_PROFILE.id) {
+        throw new Error(`This page requires ${ACTIVE_PROFILE.label}.`);
+      }
       const contractManager = await contracts();
       const client = await arkade.Arkade.connect({
         arkade: ark,
         indexer,
-        emulator: new RestEmulatorProvider(EMULATOR_URL),
+        emulator: new RestEmulatorProvider(ACTIVE_EMULATOR_URL),
         identity,
         contractManager,
-        network: networkByName(network),
+        network: networkByName(info.network),
       });
-      return { client, network };
+      return { client, network: got.id };
     })();
     pending.catch(() => {
       sessions.delete(id);
@@ -178,17 +209,17 @@ function storedHex(name: string): string | null {
   return raw;
 }
 
-/** Canonical Mutinynet address, or an error the page can show. */
-export function parseWriterAddress(raw: string): string {
+/** Canonical address for the active network, or an error the page can show. */
+export function parseWriterAddress(raw: string, expectedHrp: string = ACTIVE_PROFILE.hrp, label: string = ACTIVE_PROFILE.label): string {
   const trimmed = raw.trim();
   let decoded: ArkAddress;
   try {
     decoded = ArkAddress.decode(trimmed);
   } catch {
-    throw new Error("Paste a Mutinynet Arkade address. It starts with tark.");
+    throw new Error(`Paste a ${label} Arkade address. It starts with ${expectedHrp}.`);
   }
-  if (decoded.hrp !== networks.mutinynet.hrp) {
-    throw new Error("Paste a Mutinynet address. It starts with tark.");
+  if (decoded.hrp !== expectedHrp) {
+    throw new Error(`Paste a ${label} address. It starts with ${expectedHrp}.`);
   }
   return decoded.encode();
 }
@@ -228,11 +259,11 @@ export function verifiedSignerKey(
   address: string,
   pubkey: string | undefined,
   serverKey: Uint8Array,
-  exit: bigint = EXIT,
+  exit: bigint = ACTIVE_PROFILE.exit,
 ): Uint8Array | undefined {
   const hex = pubkey?.trim().toLowerCase() ?? "";
   if (!/^[0-9a-f]{64}$/.test(hex) || hex === "0".repeat(64)) return undefined;
-  const decoded = ArkAddress.decode(parseWriterAddress(address));
+  const decoded = ArkAddress.decode(address.trim());
   const candidate = hexToBytes(hex);
   return bytesToHex(payoutVtxo(candidate, serverKey, exit).pkScript) === bytesToHex(decoded.pkScript)
     ? candidate
@@ -250,11 +281,11 @@ function sessionHex(): string {
   return hex;
 }
 
-export async function writerBinding(address: string, pubkey?: string, exit: bigint = EXIT): Promise<WriterBinding> {
+export async function writerBinding(address: string, pubkey?: string, exit: bigint = ACTIVE_PROFILE.exit): Promise<WriterBinding> {
   const decoded = ArkAddress.decode(parseWriterAddress(address));
   const { client, network } = await openSession(SingleKey.fromHex(sessionHex()));
   if (!client.emulatorKey) throw new Error("The emulator key is missing.");
-  await assertServerExit();
+  await assertServerExit(ACTIVE_ARK_URL, exit);
   if (bytesToHex(xOnly(client.serverKey)) !== bytesToHex(xOnly(decoded.serverPubKey))) {
     throw new Error("That address is for a different Arkade server.");
   }
@@ -274,7 +305,7 @@ export async function writerBinding(address: string, pubkey?: string, exit: bigi
 
 export async function deskPkScript(deskPkHex: string, exit?: bigint | number): Promise<string> {
   const { client } = await operatorSession();
-  return bytesToHex(payoutVtxo(hexToBytes(deskPkHex), client.serverKey, exit ? BigInt(exit) : EXIT).pkScript);
+  return bytesToHex(payoutVtxo(hexToBytes(deskPkHex), client.serverKey, exit ? BigInt(exit) : ACTIVE_PROFILE.exit).pkScript);
 }
 
 async function build(req: FundRequest) {
@@ -298,7 +329,7 @@ async function build(req: FundRequest) {
     identity = SingleKey.fromHex(req.writerHex);
     const { client } = await openSession(identity);
     if (!client.emulatorKey) throw new Error("The emulator key is missing.");
-    await assertServerExit();
+    await assertServerExit(ACTIVE_ARK_URL, req.exit ?? ACTIVE_PROFILE.exit);
     writerPk = await identity.xOnlyPublicKey();
     serverKey = client.serverKey;
     emulatorKey = client.emulatorKey;
@@ -309,7 +340,7 @@ async function build(req: FundRequest) {
   const holderPk = hexToBytes(req.holderPkHex);
   const beaconTxidHex = req.beaconTxidHex.toLowerCase();
   const beaconGidx = req.beaconGidx ?? 0;
-  const exit = req.exit ?? EXIT;
+  const exit = req.exit ?? ACTIVE_PROFILE.exit;
   const terms: Terms = {
     kind: req.kind,
     strike: req.strike,
@@ -325,6 +356,7 @@ async function build(req: FundRequest) {
     readFee: BEACON_READ_FEE,
     serverKey,
     emulatorKey,
+    hrp: ACTIVE_PROFILE.hrp,
   };
   const bound = bindContracts(terms);
   const intent = client.contract(intentProgram(), bound.intent);
@@ -341,7 +373,7 @@ async function buildPredict(req: FundRequest) {
     throw new Error("A prediction needs a desk quote that names the beacon.");
   }
   if (!req.holderAddress) throw new Error("Paste your Arkade address first.");
-  const exit = req.exit ?? EXIT;
+  const exit = req.exit ?? ACTIVE_PROFILE.exit;
   const binding = await writerBinding(req.holderAddress, req.holderPubkey, exit);
   const { client } = await openSession(SingleKey.fromHex(sessionHex()));
   const holderPk = binding.signerKey ?? binding.payoutKey;
@@ -360,13 +392,14 @@ async function buildPredict(req: FundRequest) {
     holderPk,
     holderPayoutKey: binding.signerKey ? undefined : binding.payoutKey,
     backupPk: req.backupPkHex ? hexToBytes(req.backupPkHex) : undefined,
-    voidAfter: req.voidAfter,
-    fallbackDelay: req.fallbackDelay,
-    finalExitDelay: req.finalExitDelay,
+    voidAfter: req.voidAfter ?? ACTIVE_PROFILE.voidAfter,
+    fallbackDelay: req.fallbackDelay ?? ACTIVE_PROFILE.fallbackDelay,
+    finalExitDelay: req.finalExitDelay ?? ACTIVE_PROFILE.finalExitDelay,
     beacon: beaconIdOf(asset.AssetId.create(beaconTxidHex, beaconGidx)),
     readFee: BEACON_READ_FEE,
     serverKey: binding.serverKey,
     emulatorKey: binding.emulatorKey,
+    hrp: ACTIVE_PROFILE.hrp,
   };
   const bound = bindContracts(terms);
   const intent = client.contract(intentProgram(), bound.intent);
@@ -449,8 +482,9 @@ export async function cancelIntent(req: FundRequest): Promise<string> {
 
 let cachedExecutor: Promise<Executor | undefined> | null = null;
 function connectExecutor(serverKey: Uint8Array, emulatorKey: Uint8Array): Promise<Executor | undefined> {
+  if (!ACTIVE_EXECUTOR_URL || ACTIVE_EXECUTOR_URL === "none") return Promise.resolve(undefined);
   if (!cachedExecutor) {
-    cachedExecutor = Executor.connect(EXECUTOR_URL, { serverKey, emulatorKey }).catch(() => undefined);
+    cachedExecutor = Executor.connect(ACTIVE_EXECUTOR_URL, { serverKey, emulatorKey }).catch(() => undefined);
   }
   return cachedExecutor;
 }

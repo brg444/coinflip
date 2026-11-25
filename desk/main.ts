@@ -1,3 +1,4 @@
+import { createHash, timingSafeEqual } from "node:crypto";
 import http from "node:http";
 
 import {
@@ -13,27 +14,20 @@ import {
 
 import { beaconIdOf } from "../protocol/beacon-id.ts";
 import {
-  ARK_URL,
   BEACON_READ_FEE,
   DEFAULT_RELAYS,
-  EMULATOR_URL,
-  EXECUTOR_URL,
-  EXIT,
   isPredict,
   LOCK_S,
   PAIR,
   PREDICT_EDGE,
-  PREDICT_FALLBACK_DELAY,
-  PREDICT_FINAL_EXIT_DELAY,
   PREDICT_LOCK_S,
-  PREDICT_VOID_AFTER,
   QUOTE_TTL_S,
   vaultProgramId,
 } from "../protocol/constants.ts";
 import { assertServerExit, bindContracts, directPayoutKey, payoutVtxo, type Terms } from "../protocol/contracts.ts";
 import { Executor, reboardVaultDelegation, reboardVaultTemplate } from "../protocol/executor.ts";
 import { bytesToHex, hexToBytes, xOnly } from "../protocol/hex.ts";
-import { networkByName } from "../protocol/network.ts";
+import { assertNetworkMatch, networkProfile } from "../protocol/network.ts";
 import { intentProgram } from "../protocol/programs.ts";
 import predictArtifact from "../contracts/predict_vault.artifact.json" with { type: "json" };
 import {
@@ -103,15 +97,19 @@ const oracleUrl = serviceOrigin(required("ORACLE_URL"));
 const secret = hexToBytes(deskKeyHex);
 if (secret.length !== 32) throw new Error("DESK_KEY must be 32 bytes");
 
+const requestedNetwork = process.env.NETWORK?.trim();
+const defaults = networkProfile(requestedNetwork);
 const dataDir = process.env.DATA_DIR?.trim() || "data";
 const port = Number(process.env.PORT ?? "8788");
-const arkUrl = process.env.ARK_URL?.trim() || ARK_URL;
-const emulatorUrl = process.env.EMULATOR_URL?.trim() || EMULATOR_URL;
+const arkUrl = process.env.ARK_URL?.trim() || defaults.arkUrl;
+const emulatorUrl = process.env.EMULATOR_URL?.trim() || defaults.emulatorUrl;
 const relays = (process.env.RELAYS ?? DEFAULT_RELAYS.join(",")).split(",").map((item) => item.trim()).filter(Boolean);
 const ratchetMargin = parseRatchetMargin(process.env.DESK_RATCHET_MARGIN_S);
+const deskAdmin = process.env.DESK_ADMIN?.trim() || process.env.ORACLE_ADMIN?.trim() || "";
+let draining = process.env.DESK_DRAIN === "1" || process.env.DESK_DRAIN?.trim().toLowerCase() === "true";
 const caps = {
-  perStrike: bigintEnv("DESK_STRIKE_CAP", 100_000_000n),
-  total: bigintEnv("DESK_TOTAL_CAP", 500_000_000n),
+  perStrike: bigintEnv("DESK_STRIKE_CAP", defaults.deskStrikeCap),
+  total: bigintEnv("DESK_TOTAL_CAP", defaults.deskTotalCap),
 };
 const volOverride = process.env.DESK_VOL?.trim() ? Number(process.env.DESK_VOL) : null;
 if (volOverride != null && !(volOverride > 0 && volOverride < 5)) {
@@ -218,7 +216,20 @@ async function readArkInfo() {
   throw last;
 }
 
-const network = networkByName((await readArkInfo()).network);
+const arkInfo = await readArkInfo();
+const netProfile = assertNetworkMatch(requestedNetwork, arkInfo.network);
+const network = netProfile.network;
+const serverMaxVtxo = arkInfo.vtxoMaxAmount;
+const qMax = serverMaxVtxo > 0n && serverMaxVtxo < netProfile.qMax ? serverMaxVtxo : netProfile.qMax;
+const stakeMax = bigintEnv("DESK_STAKE_MAX", netProfile.stakeMax);
+if (stakeMax < netProfile.stakeMin || stakeMax > qMax) {
+  throw new Error(`DESK_STAKE_MAX must be between ${netProfile.stakeMin} and ${qMax}`);
+}
+const quoteLimits = { qMax, stakeMin: netProfile.stakeMin, stakeMax };
+const deprecatedSigners = (arkInfo.deprecatedSigners ?? []).map((item) => ({
+  pubkey: item.pubkey,
+  cutoffDate: item.cutoffDate.toString(),
+}));
 // Leave settlement at the SDK default. VtxoManager renews coins before batch
 // expiry and its poll keeps doing that. Passing false disables both.
 const wallet = await Wallet.create({
@@ -242,10 +253,10 @@ const client = await arkade.Arkade.connect({
   network,
 });
 if (!client.emulatorKey) throw new Error("emulator key missing");
-await assertServerExit(arkUrl);
+await assertServerExit(arkUrl, netProfile.exit);
 
 const holderPk = await identity.xOnlyPublicKey();
-const deskScript: DefaultVtxo.Script = payoutVtxo(holderPk, client.serverKey, EXIT);
+const deskScript: DefaultVtxo.Script = payoutVtxo(holderPk, client.serverKey, netProfile.exit);
 const address = deskScript.address(network.hrp, client.serverKey).encode();
 if (bytesToHex(wallet.offchainTapscript.pkScript) !== bytesToHex(deskScript.pkScript)) {
   throw new Error("desk payout script is not the SDK wallet address");
@@ -255,15 +266,20 @@ if (address !== await wallet.getAddress()) {
 }
 const pubkey = nostrPubkey(secret);
 
-function backupPubkeyFromEnv(defaultKey: Uint8Array, deskKey: Uint8Array): string {
+function backupPubkeyFromEnv(defaultKey: Uint8Array, deskKey: Uint8Array, isMainnet: boolean): string {
   const raw = process.env.BACKUP_EMULATOR_PUBKEY?.trim().toLowerCase();
-  const hex = raw || bytesToHex(xOnly(defaultKey));
+  const primaryHex = bytesToHex(xOnly(defaultKey));
+  if (isMainnet) {
+    if (!raw) throw new Error("BACKUP_EMULATOR_PUBKEY is required on Bitcoin mainnet");
+    if (raw === primaryHex) throw new Error("BACKUP_EMULATOR_PUBKEY must differ from primary emulator key on Bitcoin mainnet");
+  }
+  const hex = raw || primaryHex;
   if (!/^[0-9a-f]{64}$/.test(hex)) throw new Error("BACKUP_EMULATOR_PUBKEY must be 64-hex x-only");
   if (hex === bytesToHex(xOnly(deskKey))) throw new Error("BACKUP_EMULATOR_PUBKEY must not match DESK_KEY");
   return hex;
 }
-const backupPubkeyHex = backupPubkeyFromEnv(client.emulatorKey, holderPk);
-const executorUrl = process.env.EXECUTOR_URL?.trim() ?? EXECUTOR_URL;
+const backupPubkeyHex = backupPubkeyFromEnv(client.emulatorKey, holderPk, netProfile.isMainnet);
+const executorUrl = process.env.EXECUTOR_URL?.trim() ?? netProfile.executorUrl;
 let executorPromise: Promise<Executor | undefined> | null = null;
 function deskExecutor(): Promise<Executor | undefined> {
   if (!executorUrl || executorUrl === "none") return Promise.resolve(undefined);
@@ -315,11 +331,12 @@ function termsFor(row: QuoteRow): Terms {
     readFee: BEACON_READ_FEE,
     serverKey: client.serverKey,
     emulatorKey: client.emulatorKey!,
+    hrp: netProfile.hrp,
     ...(predict ? {
       backupPk: hexToBytes(row.backupPubkey ?? backupPubkeyHex),
-      voidAfter: BigInt(row.voidAfter ?? Number(PREDICT_VOID_AFTER)),
-      fallbackDelay: BigInt(row.fallbackDelay ?? Number(PREDICT_FALLBACK_DELAY)),
-      finalExitDelay: BigInt(row.finalExitDelay ?? Number(PREDICT_FINAL_EXIT_DELAY)),
+      voidAfter: BigInt(row.voidAfter ?? Number(netProfile.voidAfter)),
+      fallbackDelay: BigInt(row.fallbackDelay ?? Number(netProfile.fallbackDelay)),
+      finalExitDelay: BigInt(row.finalExitDelay ?? Number(netProfile.finalExitDelay)),
     } : {}),
   };
 }
@@ -341,9 +358,9 @@ function quoteMessage(row: QuoteRow): RfqQuote {
         writer_pubkey: row.writerPubkey,
         writer_pk_script: bytesToHex(bound.writerPkScript),
         backup_pubkey: row.backupPubkey ?? backupPubkeyHex,
-        void_after: row.voidAfter ?? Number(PREDICT_VOID_AFTER),
-        fallback_delay: row.fallbackDelay ?? Number(PREDICT_FALLBACK_DELAY),
-        final_exit_delay: row.finalExitDelay ?? Number(PREDICT_FINAL_EXIT_DELAY),
+        void_after: row.voidAfter ?? Number(netProfile.voidAfter),
+        fallback_delay: row.fallbackDelay ?? Number(netProfile.fallbackDelay),
+        final_exit_delay: row.finalExitDelay ?? Number(netProfile.finalExitDelay),
         beacon_txid: row.beaconTxid,
         beacon_gidx: row.beaconGidx,
         deadline: row.deadline,
@@ -469,7 +486,7 @@ async function onPredict(message: RfqRequest & { profile: PredictRequestProfile 
   }
   const stake = BigInt(message.amount);
   const payout = predictPayout(stake, multiplier);
-  const bad = payoutRefusal(payout, stake, BEACON_READ_FEE);
+  const bad = payoutRefusal(payout, stake, BEACON_READ_FEE, qMax);
   if (bad) {
     await refuse(from, message.rfq_id, bad);
     return;
@@ -489,15 +506,15 @@ async function onPredict(message: RfqRequest & { profile: PredictRequestProfile 
     expiry: message.profile.expiry,
     deadline: now + PREDICT_LOCK_S,
     validUntil: now + QUOTE_TTL_S,
-    exit: Number(EXIT),
+    exit: Number(netProfile.exit),
     writerPubkey: bytesToHex(holderPk),
     writerPkScript: bytesToHex(deskScript.pkScript),
     holderPubkey: message.profile.holder_pubkey,
     holderPkScript: message.profile.holder_pk_script,
     backupPubkey: backupPubkeyHex,
-    voidAfter: Number(PREDICT_VOID_AFTER),
-    fallbackDelay: Number(PREDICT_FALLBACK_DELAY),
-    finalExitDelay: Number(PREDICT_FINAL_EXIT_DELAY),
+    voidAfter: Number(netProfile.voidAfter),
+    fallbackDelay: Number(netProfile.fallbackDelay),
+    finalExitDelay: Number(netProfile.finalExitDelay),
     beaconTxid: beaconDisplay.txid,
     beaconGidx: beaconDisplay.gidx,
     intentAddress: "",
@@ -529,7 +546,11 @@ async function onRequest(message: RfqRequest, from: string) {
     await transport.publish(from, quoteMessage(existing));
     return;
   }
-  const bad = requestRefusal(message, now);
+  if (draining) {
+    await refuse(from, message.rfq_id, "draining");
+    return;
+  }
+  const bad = requestRefusal(message, now, quoteLimits);
   if (bad) {
     await refuse(from, message.rfq_id, bad);
     return;
@@ -614,7 +635,7 @@ async function onRequest(message: RfqRequest, from: string) {
     expiry: profile.expiry,
     deadline,
     validUntil: now + QUOTE_TTL_S,
-    exit: Number(EXIT),
+    exit: Number(netProfile.exit),
     writerPubkey: profile.writer_pubkey,
     writerPkScript: profile.writer_pk_script,
     holderPubkey: bytesToHex(holderPk),
@@ -668,7 +689,7 @@ async function refreshOracleStatus(force = false) {
   if (!force && beaconExpiryLag != null && Date.now() - oracleStatusAt < 10_000) return;
   try {
     const body = await fetchOracleStatus(oracleUrl, AbortSignal.timeout(10_000));
-    const parsed = parseOracleBeacon(body, beaconDisplay.txid, beaconDisplay.gidx);
+    const parsed = parseOracleBeacon(body, beaconDisplay.txid, beaconDisplay.gidx, netProfile.hrp);
     if (parsed.ok) {
       beaconExpiryLag = parsed.beacon.expiryLag;
       beaconExpiry = parsed.beacon.beaconExpiry ?? null;
@@ -712,9 +733,9 @@ function filledPosition(row: QuoteRow): OptionPosition | null {
       holder_pk_script: row.holderPkScript,
       stake: row.premium,
       backup_pubkey: row.backupPubkey ?? backupPubkeyHex,
-      void_after: row.voidAfter ?? Number(PREDICT_VOID_AFTER),
-      fallback_delay: row.fallbackDelay ?? Number(PREDICT_FALLBACK_DELAY),
-      final_exit_delay: row.finalExitDelay ?? Number(PREDICT_FINAL_EXIT_DELAY),
+      void_after: row.voidAfter ?? Number(netProfile.voidAfter),
+      fallback_delay: row.fallbackDelay ?? Number(netProfile.fallbackDelay),
+      final_exit_delay: row.finalExitDelay ?? Number(netProfile.finalExitDelay),
     } : {}),
     beacon_txid: row.beaconTxid,
     beacon_gidx: row.beaconGidx,
@@ -1073,6 +1094,12 @@ function statusBody() {
   const page = pageQuotes(book.list(), { filter: "live", now, offset: 0, limit: QUOTE_PAGE });
   return JSON.stringify({
     commit: revision(),
+    network: netProfile.id,
+    draining,
+    exit: Number(netProfile.exit),
+    stakeMax: stakeMax.toString(),
+    qMax: qMax.toString(),
+    deprecatedSigners,
     pubkey,
     address,
     balance: balance.toString(),
@@ -1120,12 +1147,30 @@ function queryCount(value: string | null, fallback: number, max: number): number
   return Math.min(max, Number(value));
 }
 
+function deskAuthorized(header: string | undefined): boolean {
+  if (!deskAdmin) return false;
+  const presented = header?.startsWith("Bearer ") ? header.slice("Bearer ".length) : "";
+  const left = createHash("sha256").update(presented).digest();
+  const right = createHash("sha256").update(deskAdmin).digest();
+  return timingSafeEqual(left, right);
+}
+
 const server = http.createServer((req, res) => {
   const parsed = new URL(req.url ?? "/", "http://127.0.0.1");
   const path = parsed.pathname;
   let status = 200;
   let body: string;
-  if (path === "/" || path === "/status") body = statusBody();
+  if (req.method === "POST" && path === "/drain") {
+    if (!deskAuthorized(req.headers.authorization)) {
+      status = deskAdmin ? 401 : 404;
+      body = JSON.stringify({ error: deskAdmin ? "unauthorized" : "disabled" });
+    } else {
+      const mode = parsed.searchParams.get("enabled");
+      draining = mode == null ? true : mode !== "0" && mode !== "false";
+      console.log(`desk drain ${draining ? "enabled" : "disabled"}`);
+      body = JSON.stringify({ draining });
+    }
+  } else if (path === "/" || path === "/status") body = statusBody();
   else if (path === "/quotes") {
     const page = quotesBody(parsed.searchParams);
     status = page.status;

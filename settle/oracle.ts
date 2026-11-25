@@ -84,7 +84,7 @@ export async function fetchOracleStatus(origin: string, signal?: AbortSignal): P
  * Accept a deployed oracle `/api/status` body.
  * When `beaconTxid` is set, the body must be that identity asset.
  */
-export function parseOracleBeacon(body: unknown, beaconTxid?: string, gidx = 0): ParsedBeacon {
+export function parseOracleBeacon(body: unknown, beaconTxid?: string, gidx = 0, expectedHrp?: string): ParsedBeacon {
   const root = record(body);
   if (!root) return { ok: false, error: "oracle status" };
   const issue = typeof root.issueTxid === "string" ? root.issueTxid.toLowerCase() : "";
@@ -100,7 +100,9 @@ export function parseOracleBeacon(body: unknown, beaconTxid?: string, gidx = 0):
   }
   if (bytesToHex(parsed.txid) !== issue) return { ok: false, error: "oracle asset" };
   if (expected && Number(parsed.groupIndex) !== gidx) return { ok: false, error: "oracle beacon" };
-  if (typeof root.address !== "string" || !root.address.startsWith("tark1")) return { ok: false, error: "oracle address" };
+  const addr = typeof root.address === "string" ? root.address : "";
+  const validAddr = expectedHrp ? addr.startsWith(`${expectedHrp}1`) : (addr.startsWith("ark1") || addr.startsWith("tark1"));
+  if (!validAddr) return { ok: false, error: "oracle address" };
   const args = record(root.args);
   if (!args) return { ok: false, error: "oracle args" };
   const ctrl = typeof args.ctrlTxid === "string" ? args.ctrlTxid.toLowerCase() : "";
@@ -120,7 +122,7 @@ export function parseOracleBeacon(body: unknown, beaconTxid?: string, gidx = 0):
     ok: true,
     beacon: {
       assetId: parsed.toString(),
-      address: root.address,
+      address: addr,
       domain,
       expiryLag,
       readFee,

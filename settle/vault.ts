@@ -198,6 +198,7 @@ export async function settleQuote(env: {
     readFee: env.beacon.readFee,
     adminPk: env.beacon.adminPk,
     exit: env.beacon.exit,
+    hrp: env.terms.hrp,
     serverKey: env.serverKey,
     emulatorKey: env.emulatorKey,
   });

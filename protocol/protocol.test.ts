@@ -262,9 +262,91 @@ test("addresses and unilateral tapscript bytes stay identical at EXIT=2048", asy
     serverKey,
     emulatorKey,
   });
-  assert.equal(bcn.address, "tark1qqhsre0ptn9r28d07wzrldc08shs5x7aqhj6lzy2vauyaulppg4qz2p6kdztalt7qqlq0ew768sfscyyp8lshqlql5vng4exnkgehkv659psn9");
+  assert.equal(bcn.address, "tark1qqhsre0ptn9r28d07wzrldc08shs5x7aqhj6lzy2vauyaulppg4qz8s7647wwk2qk4z0dmng6xvkhmsx3rcelwd7h0tj9gmr4lc0ux4wg03fce");
   assert.equal(
     bytesToHex(bcn.script.functionByName("unilateral")!.tapLeafScript[1]),
     "03040040b2752079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798acc0",
   );
+});
+
+test("Bitcoin mainnet network profile derives ark1 addresses with 7-day exit and conservative launch limits", async () => {
+  const { assertNetworkMatch, MAINNET_EXIT, MAINNET_FALLBACK_DELAY, MAINNET_FINAL_EXIT_DELAY, MAINNET_Q_MAX, MAINNET_STAKE_MAX, networkProfile } = await import("./network.ts");
+  const { parseOracleBeacon } = await import("../settle/oracle.ts");
+  const { predictRefusal, payoutRefusal } = await import("./messages.ts");
+
+  const main = networkProfile("bitcoin");
+  assert.equal(main.id, "bitcoin");
+  assert.equal(main.isMainnet, true);
+  assert.equal(main.hrp, "ark");
+  assert.equal(main.exit, MAINNET_EXIT);
+  assert.equal(main.fallbackDelay, MAINNET_FALLBACK_DELAY);
+  assert.equal(main.finalExitDelay, MAINNET_FINAL_EXIT_DELAY);
+  assert.equal(main.qMax, MAINNET_Q_MAX);
+  assert.equal(main.stakeMax, MAINNET_STAKE_MAX);
+  assert.equal(networkProfile("mainnet").id, "bitcoin");
+  assert.equal(assertNetworkMatch("bitcoin", "bitcoin").id, "bitcoin");
+  assert.throws(() => assertNetworkMatch("bitcoin", "mutinynet"), /does not match/);
+
+  const writerPk = await key(1).xOnlyPublicKey();
+  const holderPk = await key(2).xOnlyPublicKey();
+  const backupPk = await key(3).xOnlyPublicKey();
+  const serverKey = await key(8).xOnlyPublicKey();
+  const emulatorKey = await key(9).compressedPublicKey();
+  const assetId = asset.AssetId.create("ab".repeat(32), 0);
+  const beacon = beaconIdOf(assetId);
+  const bound = bindContracts({
+    kind: 2,
+    strike: 10_000_000n,
+    collateral: 190_000n,
+    premium: 100_000n,
+    expiry: 1_800_000_300n,
+    deadline: 1_800_000_060n,
+    exit: main.exit,
+    voidAfter: main.voidAfter,
+    fallbackDelay: main.fallbackDelay,
+    finalExitDelay: main.finalExitDelay,
+    backupPk,
+    writerPk,
+    holderPk,
+    beacon,
+    readFee: BEACON_READ_FEE,
+    serverKey,
+    emulatorKey,
+    hrp: main.hrp,
+  });
+  assert.ok(bound.intentAddress.startsWith("ark1"));
+  assert.ok(bound.vaultAddress.startsWith("ark1"));
+
+  const bcn = bindBeacon({
+    id: beacon,
+    domain: new TextEncoder().encode("BTCUSD-FIX"),
+    expiryLag: 60n,
+    readFee: BEACON_READ_FEE,
+    adminPk: writerPk,
+    exit: main.exit,
+    hrp: main.hrp,
+    serverKey,
+    emulatorKey,
+  });
+  assert.ok(bcn.address.startsWith("ark1"));
+  const status = {
+    assetId: assetId.toString(),
+    issueTxid: "ab".repeat(32),
+    address: bcn.address,
+    args: {
+      ctrlTxid: bytesToHex(beacon.txid),
+      domain: bytesToHex(new TextEncoder().encode("BTCUSD-FIX")),
+      expiryLag: 60,
+      readFee: Number(BEACON_READ_FEE),
+      adminPk: bytesToHex(writerPk),
+      exit: Number(main.exit),
+    },
+  };
+  assert.equal(parseOracleBeacon(status, "ab".repeat(32), 0, "ark").ok, true);
+  assert.equal(parseOracleBeacon(status, "ab".repeat(32), 0, "tark").ok, false);
+
+  const now = 1_800_000_000;
+  assert.equal(predictRefusal(now + 300, 100_000n, now, { stakeMax: main.stakeMax, qMax: main.qMax }), "");
+  assert.equal(predictRefusal(now + 300, 100_001n, now, { stakeMax: main.stakeMax, qMax: main.qMax }), "stake");
+  assert.equal(payoutRefusal(50_000_001n, 100_000n, BEACON_READ_FEE, main.qMax), "payout");
 });

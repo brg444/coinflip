@@ -1,9 +1,12 @@
 import {
+  ACTIVE_PROFILE,
+  ACTIVE_STAKE_MAX as STAKE_MAX,
   btcAmount,
   cancelIntent,
   clearAddress,
   depositAddress,
   deskPkScript,
+  EXPLORER_TX_URL,
   paymentUri,
   readAddress,
   readPubkey,
@@ -32,7 +35,6 @@ import {
   PREDICT_MIN_LEFT_S,
   PREDICT_VOID_AFTER,
   QUOTE_TTL_S,
-  STAKE_MAX,
   STAKE_MIN,
 } from "../protocol/constants.ts";
 import { predictPayout } from "../protocol/pricing.ts";
@@ -43,7 +45,7 @@ import { settlementKnown, usdFromCents } from "./src/position-status.ts";
 import { reboardVaultFromPage, refundVaultFromPage } from "./src/settle.ts";
 import { addressBalance, pkScriptOf, readIntent, readKept, watchIntents } from "./src/watch.ts";
 
-const STORE = "arkade-options-desk-v1";
+const STORE = ACTIVE_PROFILE.isMainnet ? "arkade-options-desk-mainnet-v1" : "arkade-options-desk-v1";
 const REFRESH_MS = 18_000;
 const WALLET_ASK = "arkade-options-wallet";
 
@@ -62,7 +64,7 @@ const state = {
   selected: null,
   bet: {
     kind: 2,
-    stake: 50_000n,
+    stake: STAKE_MAX < 50_000n ? STAKE_MAX : 50_000n,
     unit: readUnit(),
     usd: 25,
     step: 0,
@@ -432,7 +434,7 @@ function txLink(label, txid) {
   if (!/^[0-9a-f]{64}$/.test(txid || "")) return null;
   const row = el("p", "tx-link");
   const link = el("a", "", `${txid.slice(0, 8)}…${txid.slice(-4)}`);
-  link.href = `https://explorer.mutinynet.arkade.sh/tx/${txid}`;
+  link.href = `${EXPLORER_TX_URL}${txid}`;
   link.target = "_blank";
   link.rel = "noopener";
   row.append(el("span", "", label), link);
@@ -2976,7 +2978,7 @@ function renderSetup(next) {
       done: deskDone,
     }),
   );
-  const open = el("a", "textbtn", "Open your Mutinynet wallet");
+  const open = el("a", "textbtn", `Open your ${ACTIVE_PROFILE.label} wallet`);
   open.href = next.wallet || WALLET_URL;
   open.target = "_blank";
   open.rel = "noopener";

@@ -238,7 +238,7 @@ function parseQuote(body: Record<string, unknown>): RfqQuote | null {
   if (!hex64(body.rfq_id) || body.pair !== PAIR || !amount(body.from_amount) || !amount(body.to_amount)) return null;
   if (!hex64(body.solver_pubkey) || !int(body.valid_until, 4_000_000_000)) return null;
   if (!hex64(profile.beacon_txid) || !int(profile.beacon_gidx, 65_535)) return null;
-  if (!int(profile.deadline, 4_000_000_000) || profile.exit !== Number(EXIT)) return null;
+  if (!int(profile.deadline, 4_000_000_000) || !bip68Delay(profile.exit, 512)) return null;
   if (!address(profile.intent_address) || !address(profile.vault_address)) return null;
   const binding = {
     beacon_txid: profile.beacon_txid,
@@ -399,11 +399,18 @@ export function beaconWindowRefusal(expiryLag: bigint | null): string {
   return "";
 }
 
+export type QuoteLimits = {
+  qMax?: bigint;
+  stakeMin?: bigint;
+  stakeMax?: bigint;
+};
+
 /** Why a parsed request is not quotable. Empty string means the desk may price it. */
-export function requestRefusal(message: RfqRequest, now: number): string {
-  if (isPredictRequest(message.profile)) return predictRefusal(message.profile.expiry, BigInt(message.amount), now);
+export function requestRefusal(message: RfqRequest, now: number, limits?: QuoteLimits): string {
+  if (isPredictRequest(message.profile)) return predictRefusal(message.profile.expiry, BigInt(message.amount), now, limits);
   const collateral = BigInt(message.amount);
-  if (collateral < Q_MIN || collateral > Q_MAX) return "collateral";
+  const qMax = limits?.qMax ?? Q_MAX;
+  if (collateral < Q_MIN || collateral > qMax) return "collateral";
   if (message.profile.expiry % PREDICT_GRID_S !== 0) return "expiry";
   // Ten minutes is allowed. The open window (expiry − 1800) may already
   // have passed; the quote only has to finish before expiry.
@@ -421,8 +428,10 @@ export function premiumRefusal(sats: bigint, collateral?: bigint): string {
  * A predict close is on the 5-minute grid, far enough out that the stake can
  * arrive and the window still has a minute to run, and at most an hour away.
  */
-export function predictRefusal(expiry: number, stake: bigint, now: number): string {
-  if (stake < STAKE_MIN || stake > STAKE_MAX) return "stake";
+export function predictRefusal(expiry: number, stake: bigint, now: number, limits?: QuoteLimits): string {
+  const stakeMin = limits?.stakeMin ?? STAKE_MIN;
+  const stakeMax = limits?.stakeMax ?? STAKE_MAX;
+  if (stake < stakeMin || stake > stakeMax) return "stake";
   if (expiry % PREDICT_GRID_S !== 0) return "expiry";
   if (expiry < now + PREDICT_LOCK_S + PREDICT_MIN_LEFT_S) return "expiry";
   if (expiry > now + PREDICT_MAX_AHEAD_S) return "expiry";
@@ -430,8 +439,8 @@ export function predictRefusal(expiry: number, stake: bigint, now: number): stri
 }
 
 /** A payout the vault can hold that still wins more than the stake after the read fee. */
-export function payoutRefusal(payout: bigint, stake: bigint, readFee: bigint): string {
-  if (payout > Q_MAX) return "payout";
+export function payoutRefusal(payout: bigint, stake: bigint, readFee: bigint, qMax: bigint = Q_MAX): string {
+  if (payout > qMax) return "payout";
   if (payout - readFee <= stake) return "payout";
   return "";
 }

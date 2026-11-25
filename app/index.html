@@ -137,6 +137,9 @@
 
         <h2>What the multiple means</h2>
         <p>The multiple is what you get back for every sat you stake if you are right. It comes from how likely the price is to finish on your side, read from Deribit’s Bitcoin options, less the desk’s 5% edge, so an even call pays 1.90×. A 1,000-sat fee for the price check comes out of the payout.</p>
+
+        <h2>If settlement stalls</h2>
+        <p>If a prediction cannot settle within 24 hours of the close, it voids and anyone can trigger a refund of your stake from the vault. If Arkade itself stays offline for more than 7 days, a separate backup recovery key (held independently of the desk) can spend an unsettled vault on Bitcoin L1 to issue that refund—you are trusting that backup key custodian to sign only valid refunds after 7 days.</p>
         </div>
         <div class="how-side">
         <h2>Three steps</h2>
@@ -212,6 +215,11 @@
         <details class="how-more">
           <summary>If the desk doesn’t take it</summary>
           <p>If the desk doesn’t fund the vault in time, your stake stays yours: take it back from Positions. There are no partial payouts, only all or nothing at the close.</p>
+        </details>
+
+        <details class="how-more">
+          <summary>If settlement stalls</summary>
+          <p>If a vault cannot settle within 24 hours of the close, it voids and refunds your stake. If Arkade stays offline past 7 days, a separate backup recovery key (independent of the desk) can move an unsettled vault on Bitcoin L1 to issue that refund—you trust that custodian to sign only valid refunds.</p>
         </details>
 
         <button type="button" class="btn go cta" id="how-start">Make a prediction</button>

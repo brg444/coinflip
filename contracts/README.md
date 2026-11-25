@@ -22,7 +22,9 @@ Cash-settled options and short-window binary predictions on Arkade. The compiler
 
 Constructor: `kind`, `writerPk`, `holderPk`, `writerScript`, `holderScript`, `strike`, `collateral`, `stake`, `expiry`, `beaconTxid`, `beaconGidx`, `readFee`, `backupPk`, `voidAfter`, `fallbackDelay`, `finalExitDelay`.
 
-> **Mainnet note:** On Mutinynet, if `BACKUP_EMULATOR_PUBKEY` / `PINNED_BACKUP_PUBKEY` is unset, the desk and page fall back to the primary emulator key as a placeholder. On Bitcoin mainnet, the page refuses quotes unless an independent backup emulator pubkey is explicitly pinned.
+> **Mainnet note:** On Mutinynet, if `BACKUP_EMULATOR_PUBKEY` / `PINNED_BACKUP_PUBKEY` is unset, the desk and page fall back to the primary emulator key as a placeholder. On Bitcoin mainnet (`NETWORK=bitcoin`), both the desk and page fail closed unless an independent backup emulator pubkey is explicitly configured, and `exit` / `fallbackDelay` / `finalExitDelay` scale to mainnet `arkd`'s 7-day `unilateralExitDelay` (`605,184s` / `605,184s` / `691,200s`). See `docs/mainnet-runbook.md`.
+>
+> **Tier-2 L1 trust model:** Because Bitcoin L1 does not execute the Arkade VM, the `refundBackup` tapscript leaf enforces only `older(fallbackDelay)` and a Schnorr signature from the script-tweaked `backupPk` (`scripts/backup-refund.ts` signs with that plain key). After `fallbackDelay` (7 days on mainnet), the backup key custodian can spend any still-unsettled vault on L1 and is trusted to sign only valid void refunds.
 
 ## OptionVault
 
@@ -49,6 +51,8 @@ Constructor: `kind`, `writerPk`, `holderPk`, `writerScript`, `holderScript`, `st
 | `attest(expiry, price, time, nonce, intentExpiry, sig, adminSig)` | Writes one fixing. `price` is the DIA 18-decimal integer. Verifies both the pinned DIA EIP-712 signature and `adminPk`'s Schnorr signature, requires `expiry % 300 == 0`, `expiry > lastExpiry`, and `time` in `[expiry, expiry + expiryLag]`, and stores USD cents. |
 | `read(selfIndex)` | Carries the state forward and adds `readFee`. No signature. |
 | `migrate(next, opSig)` | `adminPk` moves the coin to another script. |
+| `reboard(opSig)` | `adminPk` renews the beacon VTXO in an Arkade batch round (v2 intent proof, outpoint-bound `opSig`, `this.tunnel` + identity asset preserved). |
+| `reseed(round, lastExpiry, opSig)` | `adminPk` restores a zero-value 329-byte `STATE` packet (`round`, monotonic `lastExpiry`, zeroed slot values) strictly when the renewed input has no `STATE` packet (`!tx.inputs[0].packet.has(STATE)`). Cannot invent prices or run on an already-seeded beacon. |
 | `unilateral(adminSig)` | `adminPk`, after `exit`. |
 
 Constructor: `ctrlTxid`, `ctrlGidx`, `domain`, `expiryLag`, `readFee`, `adminPk`, `exit`. The DIA signer key is pinned in the script.
