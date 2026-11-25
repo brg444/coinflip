@@ -52,11 +52,11 @@ test("derived intent and vault addresses stay pinned", async () => {
   const bound = bindContracts(terms);
   assert.equal(
     bound.intentAddress,
-    "tark1qqhsre0ptn9r28d07wzrldc08shs5x7aqhj6lzy2vauyaulppg4qzs5s5dnywzz2gv0wtfx0yfz8g6k6dngved0jud0h6ufak8dc3a8wktq9tp",
+    "tark1qqhsre0ptn9r28d07wzrldc08shs5x7aqhj6lzy2vauyaulppg4qzweca6vgu82rs9k2eue2upuz2pv07f6fftatpf795pzvcfrhprxz4szxe4",
   );
   assert.equal(
     bound.vaultAddress,
-    "tark1qqhsre0ptn9r28d07wzrldc08shs5x7aqhj6lzy2vauyaulppg4qr59m6ts5fmdgfu6sy5jnxg4wxqs0fgl360g3xekhkc3a20wpml6rl0ydz7",
+    "tark1qqhsre0ptn9r28d07wzrldc08shs5x7aqhj6lzy2vauyaulppg4qrls8jcf3cehkrdldzu3qxnp2tfknjaph80z7ytzk2dvtq0y3t02znwnx0j",
   );
   assert.equal(bytesToHex(bound.writerPkScript), "51203d002da23716b1975b89b46563d89040a3c71d017593934bfb751b68a7cae991");
   assert.deepEqual(bindContracts(terms).intentPkScript, bound.intentPkScript);
@@ -214,7 +214,8 @@ test("a wire message with the wrong pair is dropped", () => {
   assert.equal(beaconWindowRefusal(0n), "expiry lag");
   assert.equal(beaconWindowRefusal(null), "oracle");
   assert.equal(requestRefusal(request, 1_790_000_000), "expiry");
-  assert.equal(requestRefusal({ ...request, profile: { ...request.profile, expiry: 1_790_000_600 } }, 1_790_000_000), "");
+  assert.equal(requestRefusal({ ...request, profile: { ...request.profile, expiry: 1_790_000_700 } }, 1_790_000_000), "");
+  assert.equal(requestRefusal({ ...request, profile: { ...request.profile, expiry: 1_790_000_600 } }, 1_790_000_000), "expiry");
   assert.equal(requestRefusal({ ...request, profile: { ...request.profile, expiry: 1_790_000_060 } }, 1_790_000_000), "expiry");
   assert.equal(requestRefusal({ ...request, profile: { ...request.profile, expiry: 1_800_000_000 } }, 1_700_000_000), "");
 });
@@ -243,14 +244,14 @@ test("addresses and unilateral tapscript bytes stay identical at EXIT=2048", asy
   const put = bindContracts({ ...common, kind: 1 });
   const higher = bindContracts({ ...common, kind: 2 });
   const lower = bindContracts({ ...common, kind: 3 });
-  assert.equal(call.intentAddress, "tark1qqhsre0ptn9r28d07wzrldc08shs5x7aqhj6lzy2vauyaulppg4qrhf4q68m8kehskxuwtqapxt84nm0sfv0wd4w0aayf0y9lgnqna96sa6yt2");
-  assert.equal(call.vaultAddress, "tark1qqhsre0ptn9r28d07wzrldc08shs5x7aqhj6lzy2vauyaulppg4qzgxz7ta4z7f7ecyd9rgjzp24ve3hyjecugsxrdc20tf92jacmm2s0utxtd");
-  assert.equal(put.intentAddress, "tark1qqhsre0ptn9r28d07wzrldc08shs5x7aqhj6lzy2vauyaulppg4qr59rnth7x3xual5d3d7skjjusxc5dgynja7ny25wzyp5n3qat6g6aprt24");
-  assert.equal(put.vaultAddress, "tark1qqhsre0ptn9r28d07wzrldc08shs5x7aqhj6lzy2vauyaulppg4qz5nxvwlwvds6ale3cjzl0xr4hc3gf5wdul2ggkz2xw6ux9l7akghz2ftv6");
-  assert.equal(higher.intentAddress, "tark1qqhsre0ptn9r28d07wzrldc08shs5x7aqhj6lzy2vauyaulppg4qrelnnrqynrhkf0lz93s0rwwscynqylh4wsrdx3asrtmfj6867dey94g0zd");
-  assert.equal(higher.vaultAddress, "tark1qqhsre0ptn9r28d07wzrldc08shs5x7aqhj6lzy2vauyaulppg4qzjs3zlz6nf7vljhg7f5np93q9rl8e9hvezdrqj975r6m5zm2yztrafedxw");
-  assert.equal(lower.intentAddress, "tark1qqhsre0ptn9r28d07wzrldc08shs5x7aqhj6lzy2vauyaulppg4qzm2wc28wv3uvzvfm74hltfhgwa9n9zq7tyknz0547su6kytxnyrnk5y8cx");
-  assert.equal(lower.vaultAddress, "tark1qqhsre0ptn9r28d07wzrldc08shs5x7aqhj6lzy2vauyaulppg4qr4v02dtkf9cns28tpw2yzm3y86gsv40t02ank38j9pfmkfe6k79gywl6qq");
+  assert.equal(call.intentAddress, "tark1qqhsre0ptn9r28d07wzrldc08shs5x7aqhj6lzy2vauyaulppg4qzu2qvg9lr9kgk2mndht7yup40vgswzgsz7ggxwgksq5lky9ts643l6a3m6");
+  assert.equal(call.vaultAddress, "tark1qqhsre0ptn9r28d07wzrldc08shs5x7aqhj6lzy2vauyaulppg4qrdm35e6fry9e8qt2xnrr34lt3hfh7vr7n7p5zdr52g3g04hk23dy9766w4");
+  assert.equal(put.intentAddress, "tark1qqhsre0ptn9r28d07wzrldc08shs5x7aqhj6lzy2vauyaulppg4qrxna9s74zq3kvfwkvdms3hqd8mmdfnrj93ec93akm8mull0j06y23fwgrz");
+  assert.equal(put.vaultAddress, "tark1qqhsre0ptn9r28d07wzrldc08shs5x7aqhj6lzy2vauyaulppg4qzxssap5m5k74dhu7qazfl5u46t9xdtzdpqqy0kan7nk7wqgmx3pn0g5938");
+  assert.equal(higher.intentAddress, "tark1qqhsre0ptn9r28d07wzrldc08shs5x7aqhj6lzy2vauyaulppg4qr4yz44dagy7hn454sgleay5wg62prfws7n2ajhurae5ev3a9lflue7nsta");
+  assert.equal(higher.vaultAddress, "tark1qqhsre0ptn9r28d07wzrldc08shs5x7aqhj6lzy2vauyaulppg4qrq04hgeue04c4pl88neasx8e69fahmf3pp9qpuce6kjdcaj78dp2nlh0ty");
+  assert.equal(lower.intentAddress, "tark1qqhsre0ptn9r28d07wzrldc08shs5x7aqhj6lzy2vauyaulppg4qza83ctpf3y586rkdnqpyn8vr5505a4ncxsunfxsk9uhehal4g68yqx378r");
+  assert.equal(lower.vaultAddress, "tark1qqhsre0ptn9r28d07wzrldc08shs5x7aqhj6lzy2vauyaulppg4qr54nurjnyzg3mfjlwkyffp0fp0ncy9fktcnh6x966k8hzcmc98rkm4davj");
   const bcn = bindBeacon({
     id: beacon,
     domain: new TextEncoder().encode("BTCUSD-FIX"),
@@ -261,7 +262,7 @@ test("addresses and unilateral tapscript bytes stay identical at EXIT=2048", asy
     serverKey,
     emulatorKey,
   });
-  assert.equal(bcn.address, "tark1qqhsre0ptn9r28d07wzrldc08shs5x7aqhj6lzy2vauyaulppg4qz52dwnd7ltf88hxqj7rwd8vx7852gvnyysawwq80cp94gjeaqdk6kz7vmz");
+  assert.equal(bcn.address, "tark1qqhsre0ptn9r28d07wzrldc08shs5x7aqhj6lzy2vauyaulppg4qz2p6kdztalt7qqlq0ew768sfscyyp8lshqlql5vng4exnkgehkv659psn9");
   assert.equal(
     bytesToHex(bcn.script.functionByName("unilateral")!.tapLeafScript[1]),
     "03040040b2752079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798acc0",

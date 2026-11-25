@@ -221,8 +221,8 @@ test("price history keeps one day", () => {
 });
 
 test("status, admin order, deploy change, and a print that becomes a fixing", async () => {
-  const expiry = 1_700_000_000n;
-  const ctx = await boot({ samples: [storedSample("10000000", Number(expiry + 60n))] });
+  const expiry = 1_700_000_100n;
+  const ctx = await boot({ now: () => Number(expiry + 60n), samples: [storedSample("10000000", Number(expiry + 60n))] });
   try {
     const home = await fetch(ctx.oracle.url + "/");
     assert.equal(home.headers.get("content-security-policy"), "default-src 'none'; script-src 'self'; connect-src 'self'; style-src 'self'; frame-ancestors 'none'");
@@ -315,6 +315,9 @@ test("status, admin order, deploy change, and a print that becomes a fixing", as
     assert.equal(published.status, 200, JSON.stringify(published.json));
     assert.equal(published.json.price, "10000000");
     assert.equal(ctx.submitted.length, 1);
+    const offGrid = await call(ctx.oracle.url, "/api/publish", { expiry: Number(expiry) + 60 }, "test-token");
+    assert.equal(offGrid.status, 400);
+    assert.equal(offGrid.json.error, "expiry grid");
     const again = await call(ctx.oracle.url, "/api/publish", { expiry: Number(expiry) }, "test-token");
     assert.equal(again.status, 409);
     const after = await call(ctx.oracle.url, "/api/status");
@@ -334,8 +337,8 @@ test("status, admin order, deploy change, and a print that becomes a fixing", as
 });
 
 test("admin backdate publishes a sample inside a closed window", async () => {
-  const expiry = 1_791_821_976;
-  const sampleTime = 1_791_822_006;
+  const expiry = 1_791_822_000;
+  const sampleTime = 1_791_822_030;
   const price = "8277570";
   const ctx = await boot({
     now: () => expiry + 120,
@@ -362,7 +365,7 @@ test("admin backdate publishes a sample inside a closed window", async () => {
 });
 
 test("a print before the expiry is rejected and a print inside the minute is accepted", async () => {
-  const expiry = 1_700_000_000;
+  const expiry = 1_700_000_100;
   const early = await boot({ now: () => expiry + 120, samples: [storedSample("10000000", expiry - 1)] });
   try {
     assert.equal((await call(early.oracle.url, "/api/issue", {}, "test-token")).status, 200);
@@ -389,9 +392,9 @@ test("a print before the expiry is rejected and a print inside the minute is acc
   }
 });
 
-test("an evicted expiry is rewritten with the same price and time", async () => {
-  const base = 1_700_000_000;
-  const now = () => base + 800 + 60;
+test("evicted or earlier closes cannot be rewritten once the beacon advances", async () => {
+  const base = 1_700_000_100;
+  const now = () => base + 8 * 300 + 60;
   const ctx = await boot({ now, samples: [storedSample("111", base + 10)] });
   let restarted: Awaited<ReturnType<typeof createOracle>> | null = null;
   try {
@@ -403,7 +406,7 @@ test("an evicted expiry is rewritten with the same price and time", async () => 
     await ctx.oracle.close();
     const file = await loadStore(ctx.dir);
     file.samples.push(storedSample("999", base + 50));
-    for (let i = 1; i <= 8; i += 1) file.samples.push(storedSample(String(2_000 + i), base + i * 100 + 10));
+    for (let i = 1; i <= 8; i += 1) file.samples.push(storedSample(String(2_000 + i), base + i * 300 + 10));
     await saveStore(ctx.dir, file);
     restarted = await createOracle({
       dataDir: ctx.dir,
@@ -416,19 +419,13 @@ test("an evicted expiry is rewritten with the same price and time", async () => 
       now,
     });
     for (let i = 1; i <= 8; i += 1) {
-      const expiry = base + i * 100;
+      const expiry = base + i * 300;
       const published = await call(restarted.url, "/api/publish", { expiry }, "test-token");
       assert.equal(published.status, 200, JSON.stringify(published.json));
     }
-    const again = await call(restarted.url, "/api/publish", { expiry: base }, "test-token");
-    assert.equal(again.status, 200, JSON.stringify(again.json));
-    assert.equal(again.json.price, "111");
-    assert.equal(again.json.time, base + 10);
-    const tx = Transaction.fromPSBT(base64.decode(ctx.submitted.at(-1)!));
-    const decoded = decodeState(statePacketOf(tx));
-    assert.equal(decoded.slots[0]?.expiry, BigInt(base));
-    assert.deepEqual(decoded.slots[0]?.value, priceValue(111n, BigInt(base + 10)));
-    assert.equal(decoded.slots.some((item) => item.expiry === BigInt(base + 100)), false);
+    const replay = await call(restarted.url, "/api/publish", { expiry: base }, "test-token");
+    assert.equal(replay.status, 409);
+    assert.equal(replay.json.error, "expiry order");
   } finally {
     await ctx.oracle.close().catch(() => {});
     await restarted?.close().catch(() => {});
@@ -527,10 +524,10 @@ test("a print before the expiry or after the close is skipped on the minute pass
   assert.equal(skippedPublish("sample before expiry"), true);
   assert.equal(skippedPublish("sample after close"), true);
   assert.equal(skippedPublish("beacon coin"), false);
-  const expiry = 1_700_000_000;
-  const later = expiry + 80;
+  const expiry = 1_700_000_100;
+  const later = expiry + 300;
   const ctx = await boot({
-    now: () => expiry + 200,
+    now: () => later + 200,
     announcedExpiries: () => [expiry, later],
     samples: [storedSample("10000000", expiry - 1), storedSample("10000000", later + 61)],
   });
@@ -553,16 +550,16 @@ test("a print before the expiry or after the close is skipped on the minute pass
 });
 
 test("only a closed announced expiry is published, and a missing sample is skipped", () => {
-  const expiry = 1_700_000_000;
-  const done = new Set<number>([expiry - 10]);
-  assert.deepEqual(dueExpiries([expiry + 86_400, expiry, expiry, expiry - 10], expiry + 60, done), [expiry]);
+  const expiry = 1_700_000_100;
+  const done = new Set<number>([expiry - 300]);
+  assert.deepEqual(dueExpiries([expiry + 86_400, expiry, expiry, expiry - 300, expiry - 10], expiry + 60, done), [expiry]);
   assert.deepEqual(dueExpiries([expiry], expiry + 59, done), []);
 });
 
 test("the minute pass publishes an announced expiry once a sample exists", async () => {
-  const expiry = 1_700_000_000;
+  const expiry = 1_700_000_100;
   const later = expiry + 86_400;
-  const missed = expiry - 120;
+  const missed = expiry - 300;
   const announced = new Set<number>([later, expiry, missed]);
   const empty = await boot({ now: () => expiry + 60, announcedExpiries: () => announced });
   try {
@@ -595,7 +592,7 @@ test("the minute pass publishes an announced expiry once a sample exists", async
   }
 });
 
-test("duePositionExpiries filters by beacon, freshness, predict grid, newest-first, and cap", () => {
+test("duePositionExpiries filters by beacon, freshness, 5-minute grid, oldest-first, and cap", () => {
   const ourTxid = "ee".repeat(32);
   const assetId = asset.AssetId.create(ourTxid, 0).toString();
   const base = 1_700_000_100;
@@ -631,13 +628,14 @@ test("duePositionExpiries filters by beacon, freshness, predict grid, newest-fir
     make({ rfq_id: "07".repeat(32), expiry: base + 600 }),
     make({ rfq_id: "08".repeat(32), expiry: base + 900 }),
     make({ rfq_id: "09".repeat(32), expiry: base + 1_200 }),
-    make({ rfq_id: "0a".repeat(32), expiry: base + 1_800 }),
+    make({ rfq_id: "0a".repeat(32), kind: 0, program_id: OPTION_VAULT_PROGRAM_ID, expiry: base + 1_500 }),
+    make({ rfq_id: "0b".repeat(32), expiry: base + 1_800 }),
   ];
   const due = duePositionExpiries(positions, { assetId, now, done: new Set() });
-  assert.deepEqual(due.map((item) => item.expiry), [base + 1_200, base + 900, base + 600, base + 300]);
-  const done = new Set([base + 1_200]);
+  assert.deepEqual(due.map((item) => item.expiry), [base + 300, base + 600, base + 900, base + 1_200]);
+  const done = new Set([base + 300]);
   const next = duePositionExpiries(positions, { assetId, now, done });
-  assert.deepEqual(next.map((item) => item.expiry), [base + 900, base + 600, base + 300, base + 60]);
+  assert.deepEqual(next.map((item) => item.expiry), [base + 600, base + 900, base + 1_200, base + 1_500]);
 });
 
 test("publishAnnounced requires a derived vault address funded to at least collateral", async () => {
@@ -649,7 +647,7 @@ test("publishAnnounced requires a derived vault address funded to at least colla
   const bettorPk = await SingleKey.fromHex(hex.encode(secret(22))).xOnlyPublicKey();
   const beacon = beaconIdOf(asset.AssetId.create(ourTxid, 0));
   const derive = (exp: number) => bindContracts({
-    kind: 2,
+    kind: 0,
     strike: 8_000_000n,
     collateral: 95_000n,
     premium: 50_000n,
@@ -658,7 +656,6 @@ test("publishAnnounced requires a derived vault address funded to at least colla
     exit: EXIT,
     writerPk: deskPk,
     holderPk: bettorPk,
-    holderPayoutKey: bettorPk,
     beacon,
     readFee: BEACON_READ_FEE,
     serverKey,
@@ -677,10 +674,10 @@ test("publishAnnounced requires a derived vault address funded to at least colla
   const makePos = (rfqByte: string, exp: number, bound: ReturnType<typeof derive>, vaultAddress: string): OptionPosition => ({
     v: 1,
     type: "option_position",
-    program_id: PREDICT_VAULT_PROGRAM_ID,
+    program_id: OPTION_VAULT_PROGRAM_ID,
     rfq_id: rfqByte.repeat(32),
     pair: PAIR,
-    kind: 2,
+    kind: 0,
     collateral: "95000",
     strike: "8000000",
     expiry: exp,
@@ -688,12 +685,6 @@ test("publishAnnounced requires a derived vault address funded to at least colla
     writer_pubkey: bytesToHex(deskPk),
     writer_pk_script: bytesToHex(bound.writerPkScript),
     holder_pubkey: bytesToHex(bettorPk),
-    holder_pk_script: bytesToHex(bound.holderPkScript),
-    stake: "50000",
-    backup_pubkey: bytesToHex(emulatorKey.subarray(1)),
-    void_after: Number(PREDICT_VOID_AFTER),
-    fallback_delay: Number(PREDICT_FALLBACK_DELAY),
-    final_exit_delay: Number(PREDICT_FINAL_EXIT_DELAY),
     beacon_txid: ourTxid,
     beacon_gidx: 0,
     vault_address: vaultAddress,
@@ -782,7 +773,7 @@ test("an intent is stored only when the pinned DIA key signed it", async () => {
   }
 });
 
-test("ingestIntent stores distinct DIA intents immediately and skips before issue", async () => {
+test("ingestIntent stores distinct DIA intents immediately, skips before issue, and exposes signed samples", async () => {
   const ctx = await boot({ now: () => RECORDED.time });
   try {
     await ctx.oracle.ingestIntent(RECORDED);
@@ -793,6 +784,14 @@ test("ingestIntent stores distinct DIA intents immediately and skips before issu
     const status = await call(ctx.oracle.url, "/api/status");
     assert.equal(status.json.samples, 1);
     assert.equal((status.json.latest as { price?: string } | null)?.price, centsOf(RECORDED.price).toString());
+    const res = await fetch(`${ctx.oracle.url}/api/prices?from=${RECORDED.time - 10}&to=${RECORDED.time + 10}&signed=1`);
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { samples: { price: string; time: number; raw?: string; nonce?: string; intentExpiry?: number; sig?: string }[] };
+    assert.equal(body.samples.length, 1);
+    assert.equal(body.samples[0]?.raw, RECORDED.price.toString());
+    assert.equal(body.samples[0]?.nonce, RECORDED.nonce.toString());
+    assert.equal(body.samples[0]?.intentExpiry, RECORDED.intentExpiry);
+    assert.equal(body.samples[0]?.sig, bytesToHex(RECORDED.sig));
   } finally {
     await ctx.close();
   }
@@ -862,10 +861,11 @@ test("duePositionExpiries restricts auto-publishing to allowedPubkey when config
     fill_txid: rfq.repeat(32),
   });
   const positions = [
-    make("aa", attacker, attacker, base + 300),
-    make("bb", desk, attacker, base + 200),
-    make("cc", attacker, desk, base + 100),
+    make("aa", attacker, attacker, base + 900),
+    make("bb", desk, attacker, base + 600),
+    make("cc", attacker, desk, base + 300),
+    make("dd", desk, attacker, base + 450),
   ];
-  const filtered = duePositionExpiries(positions, { assetId, now: base + 600, done: new Set(), allowedPubkey: desk });
-  assert.deepEqual(filtered.map((item) => item.expiry), [base + 200, base + 100]);
+  const filtered = duePositionExpiries(positions, { assetId, now: base + 1_200, done: new Set(), allowedPubkey: desk });
+  assert.deepEqual(filtered.map((item) => item.expiry), [base + 300, base + 600]);
 });

@@ -17,6 +17,7 @@ import {
   BEACON_READ_FEE,
   DEFAULT_RELAYS,
   EMULATOR_URL,
+  EXECUTOR_URL,
   EXIT,
   isPredict,
   LOCK_S,
@@ -30,9 +31,11 @@ import {
   vaultProgramId,
 } from "../protocol/constants.ts";
 import { assertServerExit, bindContracts, directPayoutKey, payoutVtxo, type Terms } from "../protocol/contracts.ts";
+import { Executor, reboardVaultDelegation, reboardVaultTemplate } from "../protocol/executor.ts";
 import { bytesToHex, hexToBytes, xOnly } from "../protocol/hex.ts";
 import { networkByName } from "../protocol/network.ts";
 import { intentProgram } from "../protocol/programs.ts";
+import predictArtifact from "../contracts/predict_vault.artifact.json" with { type: "json" };
 import {
   isPredictRequest,
   beaconWindowRefusal,
@@ -260,13 +263,32 @@ function backupPubkeyFromEnv(defaultKey: Uint8Array, deskKey: Uint8Array): strin
   return hex;
 }
 const backupPubkeyHex = backupPubkeyFromEnv(client.emulatorKey, holderPk);
+const executorUrl = process.env.EXECUTOR_URL?.trim() ?? EXECUTOR_URL;
+let executorPromise: Promise<Executor | undefined> | null = null;
+function deskExecutor(): Promise<Executor | undefined> {
+  if (!executorUrl || executorUrl === "none") return Promise.resolve(undefined);
+  if (!executorPromise) {
+    executorPromise = Executor.connect(executorUrl, { serverKey: client.serverKey, emulatorKey: client.emulatorKey! })
+      .catch(() => undefined);
+  }
+  return executorPromise;
+}
+
+async function delegateFilledVault(row: QuoteRow) {
+  if (!isPredict(row.kind)) return;
+  const exec = await deskExecutor();
+  if (!exec) return;
+  const bound = bindContracts(termsFor(row));
+  const id = await exec.ensureTemplate("reboard_vault", predictArtifact as arkade.ContractArtifact, reboardVaultTemplate);
+  if (id) await exec.delegate(reboardVaultDelegation(id, bound));
+}
 
 let balance = 0n;
 let spot: { cents: bigint; sources: string[] } | null = null;
 let polling = false;
 
-function beaconFromEnv() {
-  const txid = (process.env.BEACON_TXID ?? "").trim().toLowerCase();
+function beaconFromEnv(): { txid: string; gidx: number } {
+  const txid = required("BEACON_TXID").toLowerCase();
   if (!/^[0-9a-f]{64}$/.test(txid)) {
     throw new Error("BEACON_TXID must be the 64-hex display txid of the identity asset");
   }
@@ -276,6 +298,7 @@ function beaconFromEnv() {
 }
 
 function termsFor(row: QuoteRow): Terms {
+  const predict = isPredict(row.kind);
   return {
     kind: row.kind,
     strike: BigInt(row.strike),
@@ -292,7 +315,7 @@ function termsFor(row: QuoteRow): Terms {
     readFee: BEACON_READ_FEE,
     serverKey: client.serverKey,
     emulatorKey: client.emulatorKey!,
-    ...(isPredict(row.kind) ? {
+    ...(predict ? {
       backupPk: hexToBytes(row.backupPubkey ?? backupPubkeyHex),
       voidAfter: BigInt(row.voidAfter ?? Number(PREDICT_VOID_AFTER)),
       fallbackDelay: BigInt(row.fallbackDelay ?? Number(PREDICT_FALLBACK_DELAY)),
@@ -511,6 +534,7 @@ async function onRequest(message: RfqRequest, from: string) {
     await refuse(from, message.rfq_id, bad);
     return;
   }
+  await refreshOracleStatus();
   const lagRefusal = beaconWindowRefusal(beaconExpiryLag);
   if (lagRefusal) {
     await refuse(from, message.rfq_id, lagRefusal);
@@ -931,6 +955,7 @@ async function pump() {
           // A prediction's stake is paid to the desk, not by it.
           if (fresh) countFill(hour, isPredict(row.kind) ? 0n : BigInt(row.premium), BigInt(row.collateral));
           console.log("filled", row.rfqId, outcome.txid ?? "");
+          void delegateFilledVault(row);
           void announceFilled();
           await refreshFloat();
         } else if (outcome.result === "expired" || outcome.result === "declined") {

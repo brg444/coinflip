@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { sha256 as nobleSha256 } from "@noble/hashes/sha2.js";
 
 import { arkade, asset, Extension, Transaction, UnknownPacket } from "@arkade-os/sdk";
 
@@ -20,6 +20,7 @@ export const STATE_SIZE = 329;
 export const SLOT_COUNT = 8;
 export const SLOT_SIZE = 40;
 export const SLOTS_AT = 9;
+export const BEACON_GRID_S = 300n;
 export const SLOT_OFFSETS = Array.from({ length: SLOT_COUNT }, (_, i) => SLOTS_AT + SLOT_SIZE * i);
 export type Slot = { expiry: bigint; value: Uint8Array };
 export type BeaconState = { version: number; round: bigint; slots: Slot[] };
@@ -57,7 +58,49 @@ function concat(...parts: Uint8Array[]): Uint8Array {
 }
 
 function sha256(...parts: Uint8Array[]): Uint8Array {
-  return new Uint8Array(createHash("sha256").update(concat(...parts)).digest());
+  return nobleSha256(concat(...parts));
+}
+
+const ASCII_ATTEST = new TextEncoder().encode("attest");
+const ASCII_MIGRATE = new TextEncoder().encode("migrate");
+
+/** SHA-256 digest `adminPk` signs to authorize `AttestationBeacon.attest`. */
+export function attestDigest(input: {
+  domain: Uint8Array;
+  id: BeaconId;
+  round: bigint;
+  expiry: bigint;
+  cents: bigint;
+  time: bigint;
+}): Uint8Array {
+  return sha256(
+    input.domain,
+    ASCII_ATTEST,
+    input.id.txid,
+    num2bin(input.id.gidx, 4),
+    num2bin(input.round, 8),
+    num2bin(input.expiry, 8),
+    num2bin(input.cents, 8),
+    num2bin(input.time, 8),
+  );
+}
+
+/** SHA-256 digest `adminPk` signs to authorize `AttestationBeacon.migrate`. */
+export function migrateDigest(input: {
+  domain: Uint8Array;
+  id: BeaconId;
+  round: bigint;
+  nextProgram: Uint8Array;
+}): Uint8Array {
+  if (input.nextProgram.length !== 32) throw new Error("nextProgram must be 32 bytes");
+  return sha256(
+    input.domain,
+    ASCII_MIGRATE,
+    input.id.txid,
+    num2bin(input.id.gidx, 4),
+    num2bin(input.round, 8),
+    input.nextProgram,
+  );
 }
 
 export function encodeState(state: BeaconState): Uint8Array {
@@ -90,11 +133,13 @@ export function genesisState(): Uint8Array {
   });
 }
 
-/** The packet `attest` requires after `prev`: round + 1, the new slot first, the oldest slot dropped. */
+/** The packet `attest` requires after `prev`: round + 1, strictly advancing expiry, oldest slot dropped. */
 export function nextState(prev: Uint8Array, expiry: bigint, value: Uint8Array): Uint8Array {
   const state = decodeState(prev);
   if (expiry <= 0n) throw new Error("expiry must be positive");
+  const lastExpiry = state.slots[0]?.expiry ?? 0n;
   if (state.slots.some((slot) => slot.expiry === expiry)) throw new Error(`expiry ${expiry} is already in a slot`);
+  if (expiry <= lastExpiry) throw new Error(`expiry ${expiry} must exceed latest ${lastExpiry}`);
   return encodeState({
     version: 1,
     round: state.round + 1n,

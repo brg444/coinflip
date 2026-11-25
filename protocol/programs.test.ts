@@ -66,7 +66,7 @@ test("active contract programs load and bind expected functions and opcodes", ()
     },
     { serverKey: key(7), emulatorKey },
   );
-  assert.deepEqual(compiledIntent.compiled.map((fn) => fn.name), ["finalize", "cancel", "unilateral"]);
+  assert.deepEqual(compiledIntent.compiled.map((fn) => fn.name), ["finalize", "cancel", "cancelCltv", "unilateral"]);
   assert.ok((intent.functions.cancel?.arkadeScript?.asm ?? []).includes("CHECKTIME"));
   assert.ok((intent.functions.finalize?.arkadeScript?.asm ?? []).includes("CHECKTIME"));
 
@@ -74,8 +74,13 @@ test("active contract programs load and bind expected functions and opcodes", ()
   const predictAsm = predict.functions.settle?.arkadeScript?.asm ?? [];
   assert.ok(predictAsm.includes("INSPECTINASSETLOOKUP"));
   assert.ok(predictAsm.includes("INSPECTINPUTPACKET"));
+  assert.ok(predictAsm.includes("CHECKTIME"));
   assert.ok((predict.functions.refund?.arkadeScript?.asm ?? []).includes("CHECKTIME"));
   assert.ok((predict.functions.reboard?.arkadeScript?.asm ?? []).includes("TUNNEL"));
-  assert.deepEqual(Object.keys(predict.functions).sort(), ["close", "reboard", "refund", "refundBackup", "settle", "unilateral"]);
+  assert.ok((predict.functions.reboard?.arkadeScript?.asm ?? []).includes("INSPECTINTENTMESSAGE"));
+  assert.deepEqual(
+    Object.keys(predict.functions).sort(),
+    ["close", "reboard", "refund", "refundBackup", "settle", "unilateral"],
+  );
   assert.deepEqual(Object.keys(beaconProgram().functions).sort(), ["attest", "migrate", "read", "unilateral"]);
 });

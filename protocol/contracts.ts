@@ -30,7 +30,7 @@ export type Terms = {
   holderPayoutKey?: Uint8Array;
   /** Identity asset of the AttestationBeacon that settle reads. */
   beacon: BeaconId;
-  /** Sats this settle leaves on the beacon. Must match the beacon's readFee. */
+  /** Sats settle leaves on the beacon. Must match the beacon's readFee. */
   readFee?: bigint;
   serverKey: Uint8Array;
   emulatorKey: Uint8Array;
@@ -121,8 +121,9 @@ export function bindContracts(terms: Terms): Bound {
   if (terms.emulatorKey.length !== 33) {
     throw new Error("emulator key must be 33 bytes");
   }
-  if (terms.beacon.txid.length !== 32) throw new Error("beacon txid must be 32 bytes");
-
+  if (terms.beacon.txid.length !== 32) {
+    throw new Error("beacon txid must be 32 bytes");
+  }
   const predict = isPredict(terms.kind);
   const writer = terms.payoutKey ? directPayout(terms.payoutKey) : payoutVtxo(writerPk, serverKey, terms.exit);
   const holder = terms.holderPayoutKey ? directPayout(terms.holderPayoutKey) : payoutVtxo(holderPk, serverKey, terms.exit);

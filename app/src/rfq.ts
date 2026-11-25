@@ -30,11 +30,14 @@ export function backupKeyMatches(
   deskPk: string,
   emulatorKey: Uint8Array,
   pinned: string | null = null,
+  network = "mutinynet",
 ): boolean {
   const candidate = quoteBackupPk.trim().toLowerCase();
   if (!/^[0-9a-f]{64}$/.test(candidate)) return false;
   if (candidate === deskPk.trim().toLowerCase()) return false;
-  const expected = pinned?.trim().toLowerCase() || bytesToHex(xOnly(emulatorKey));
+  const pinnedClean = pinned?.trim().toLowerCase() || "";
+  if ((network === "bitcoin" || network === "mainnet") && !pinnedClean) return false;
+  const expected = pinnedClean || bytesToHex(xOnly(emulatorKey));
   return candidate === expected;
 }
 
@@ -131,8 +134,8 @@ export async function requestPredictQuotes(input: {
     if (quote.profile.void_after !== Number(PREDICT_VOID_AFTER)) continue;
     if (quote.profile.fallback_delay !== Number(PREDICT_FALLBACK_DELAY)) continue;
     if (quote.profile.final_exit_delay !== Number(PREDICT_FINAL_EXIT_DELAY)) continue;
-    if (!backupKeyMatches(quote.profile.backup_pubkey, quote.profile.writer_pubkey, profile.emulatorKey, input.backupPubkey ?? null)) continue;
     if (!quoteMatchesBeacon(quote.profile.beacon_txid, quote.profile.beacon_gidx)) continue;
+    if (!backupKeyMatches(quote.profile.backup_pubkey, quote.profile.writer_pubkey, profile.emulatorKey, input.backupPubkey ?? null, profile.network)) continue;
     const payout = BigInt(quote.to_amount);
     if (payoutRefusal(payout, input.stake, BEACON_READ_FEE)) continue;
     let bound;

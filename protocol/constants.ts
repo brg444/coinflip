@@ -3,7 +3,7 @@ export const RFQ_KIND = 24859;
 export const POSITION_KIND = 30078;
 export const POSITION_TAG = "arkade-option";
 export const OPTION_VAULT_PROGRAM_ID = "OptionVault";
-export const PREDICT_VAULT_PROGRAM_ID = "PredictVault";
+export const PREDICT_VAULT_PROGRAM_ID = "PredictVaultV2";
 // Must match arkd's unilateralExitDelay and be a multiple of 512s for BIP68.
 export const EXIT = 2048n;
 export const DUST_SATS = 330n;
@@ -12,6 +12,7 @@ export const QUOTE_TTL_S = 30;
 export const LOCK_S = 180;
 export const ARK_URL = "https://mutinynet.arkade.sh";
 export const EMULATOR_URL = "https://emulator.mutinynet.arkade.sh";
+export const EXECUTOR_URL = "https://executor.mutinynet.arkade.sh";
 export const Q_MIN = 10_000n;
 export const Q_MAX = 1_000_000_000n;
 export const PRICE_MAX = 1_000_000_000n;
@@ -41,6 +42,6 @@ export const PREDICT_EDGE = 0.05;
 export const MULTIPLIER_MIN = 1.05;
 export const MULTIPLIER_MAX = 10;
 export const PREDICT_VOID_AFTER = 86_400n;
-// BIP68 512s units: ~6.1h primary response window before Tier 2 backup, +~1h buffer to Tier 3 2-of-2.
+// BIP68 512s units: ~6.1h primary response before Tier 2 backup; ~30h (> voidAfter) before Tier 3 2-of-2.
 export const PREDICT_FALLBACK_DELAY = 22_016n;
-export const PREDICT_FINAL_EXIT_DELAY = 25_600n;
+export const PREDICT_FINAL_EXIT_DELAY = 108_032n;

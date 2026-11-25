@@ -7,6 +7,7 @@ import { arkade, asset, CSVMultisigTapscript, DefaultVtxo, Extension, SingleKey,
 import { holderPayoff, settlementOutputs } from "../app/settle-math.js";
 
 import {
+  attestDigest,
   beaconIdOf,
   bin2num,
   bindBeacon,
@@ -14,6 +15,7 @@ import {
   encodeState,
   genesisOutputs,
   genesisState,
+  migrateDigest,
   nextState,
   num2bin,
   priceValue,
@@ -24,7 +26,7 @@ import {
 } from "./beacon.ts";
 import { EXIT } from "./constants.ts";
 import { bindContracts } from "./contracts.ts";
-import { buildAttest, buildSettle, encodeWitness, statePacket } from "./cospend.ts";
+import { buildAttest, buildMigrate, buildSettle, encodeWitness, statePacket } from "./cospend.ts";
 import { bytesToHex, hexToBytes } from "./hex.ts";
 import { beaconProgram, vaultProgram } from "./programs.ts";
 
@@ -35,7 +37,7 @@ const FIXTURE = {
   kind: 0 as const,
   strike: 9_700_000n,
   collateral: 20_000n,
-  expiry: 1_700_000_000n,
+  expiry: 1_700_000_100n,
   price: 10_000_000n,
   beaconSats: 330n,
   readFee: 0n,
@@ -117,9 +119,20 @@ async function buildFixture() {
     nonce: 1n,
     intentExpiry: FIXTURE.expiry + 3600n,
     sig: dummy,
+    adminSig: dummy,
     next: fixed,
     checkpoint,
   });
+  const migrate = buildMigrate({
+    beacon: { script: beacon.script, coin: coinOf(genesis, FIXTURE.beaconSats), state: genesisState(), id: assetId },
+    nextProgram: beacon.program,
+    nextPkScript: beacon.pkScript,
+    opSig: dummy,
+    checkpoint,
+  });
+  assert.equal(migrate.arkTx.getOutput(0)?.amount, FIXTURE.beaconSats);
+  assert.equal(attestDigest({ domain: FIXTURE.domain, id, round: 0n, expiry: FIXTURE.expiry, cents: FIXTURE.price, time: FIXTURE.expiry }).length, 32);
+  assert.equal(migrateDigest({ domain: FIXTURE.domain, id, round: 0n, nextProgram: beacon.program }).length, 32);
 
   const beaconTx = creatingTx(beacon.pkScript, FIXTURE.beaconSats, [statePacket(fixed)]);
   const vaultTx = creatingTx(vault.pkScript, FIXTURE.collateral);
@@ -158,6 +171,7 @@ test("state packet encodes and decodes the documented layout", () => {
   assert.equal(bytesToHex(two.subarray(49, 329)), bytesToHex(one.subarray(9, 289)));
   assert.equal(bin2num(two.subarray(1, 9)), 2n);
   assert.throws(() => nextState(two, 1_700_000_000n, value), /already in a slot/);
+  assert.throws(() => nextState(two, 1_700_000_300n, value), /must exceed latest/);
   assert.throws(() => nextState(two, 0n, value), /positive/);
 
   const timed = priceValue(10_000_000n, 1_700_000_030n);
@@ -188,7 +202,7 @@ test("slot offsets match both contract sources", () => {
   assert.ok(beacon.includes("const int VALUE_AT = 17;"));
   assert.ok(beacon.includes("const int HISTORY_AT = 49;"));
   assert.ok(beacon.includes("const int HISTORY = 280;"));
-  assert.ok(beacon.includes("num2bin(cents, 8) + num2bin(time, 8) + num2bin(0, 16)"));
+  assert.ok(beacon.includes("int2bytes(cents, 8) + int2bytes(time, 8) + int2bytes(0, 16)"));
   assert.ok(beacon.includes("0x100211ee120bca9f272034d98b1b026bb4ab735ebeb5da8be6a69bf7ee0ea24cfd48"));
   assert.ok(beacon.includes('require(time >= expiry, "sample before expiry")'));
   const vault = readFileSync(here("../contracts/option_vault.ark"), "utf8");
@@ -200,8 +214,9 @@ test("the beacon leaves check what the design says", () => {
   const count = (asm: readonly unknown[] | undefined, name: string) => (asm ?? []).filter((token) => token === name).length;
   const beacon = beaconProgram();
   const attest = beacon.functions.attest?.arkadeScript?.asm;
-  assert.equal(count(attest, "CHECKSIGFROMSTACK"), 1);
+  assert.equal(count(attest, "CHECKSIGFROMSTACK"), 2);
   assert.equal(count(attest, "DIGEST"), 2);
+  assert.equal(count(attest, "SHA256"), 1);
   assert.equal(count(attest, "INSPECTINPUTPACKET"), 1);
   assert.equal(count(attest, "INSPECTPACKET"), 1);
   assert.equal(count(attest, "CHECKTIME"), 1);
@@ -297,5 +312,5 @@ test("the settle transaction has the documented layout", async () => {
   assert.deepEqual(attestExt.getAssetPacket()!.groups[0]!.inputs.map((i) => i.input), [{ type: 1, vin: 0, amount: 1n }]);
   assert.equal(bytesToHex(attestExt.getPacketByType(STATE_TYPE)!.serialize()), bytesToHex(built.fixed));
   assert.ok((attestExt.getEmulatorPacket()!.entries[0]!.witness?.length ?? 0) > 64);
-  assert.deepEqual(built.beacon.script.functionByName("attest")!.def.arkadeScript?.witness?.slice(0, 4), ["sig", "intentExpiry", "nonce", "time"]);
+  assert.deepEqual(built.beacon.script.functionByName("attest")!.def.arkadeScript?.witness?.slice(0, 5), ["adminSig", "sig", "intentExpiry", "nonce", "time"]);
 });

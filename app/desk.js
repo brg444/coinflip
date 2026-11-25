@@ -7,6 +7,7 @@ import {
   paymentUri,
   readAddress,
   readPubkey,
+  registerExecutorDelegations,
   registerIntent,
   saveAddress,
   WALLET_URL,
@@ -37,8 +38,9 @@ import {
 import { predictPayout } from "../protocol/pricing.ts";
 import { openingSample, WINDOW_LINE_WITHIN_S } from "../protocol/window-line.ts";
 import { PINNED_BACKUP_PUBKEY, PINNED_DESKS, RELAYS } from "./rfq-config.js";
+import { explainError } from "./src/explain.ts";
 import { settlementKnown, usdFromCents } from "./src/position-status.ts";
-import { refundVaultFromPage } from "./src/settle.ts";
+import { reboardVaultFromPage, refundVaultFromPage } from "./src/settle.ts";
 import { addressBalance, pkScriptOf, readIntent, readKept, watchIntents } from "./src/watch.ts";
 
 const STORE = "arkade-options-desk-v1";
@@ -415,7 +417,7 @@ async function voidRefundPosition(position, button) {
   } catch (err) {
     button.disabled = false;
     button.textContent = "Try again";
-    renderStatus($("status"), "Couldn’t refund yet. Try again in a moment.", err instanceof Error ? err.message : "refund failed");
+    renderStatus($("status"), explainError("refund", err), err instanceof Error ? err.message : "refund failed");
   }
 }
 
@@ -561,7 +563,7 @@ async function refund(position, button) {
     }
     say(["filled", "settled"].includes(position.status)
       ? TOOK_IT
-      : `Couldn’t take it back: ${err instanceof Error ? err.message : "try again in a moment"}.`);
+      : explainError("cancel", err));
   } finally {
     if (button.isConnected) {
       button.disabled = false;
@@ -585,6 +587,21 @@ const CHAIN_STATUS = {
  */
 const FILL_GRACE_S = 45;
 
+const reboarding = new Set();
+
+async function tryReboard(position) {
+  if (!isPredict(position.kind) || !position.deskPkHex || reboarding.has(position.id)) return;
+  reboarding.add(position.id);
+  try {
+    await reboardVaultFromPage({
+      ...(await fundRequest(position)),
+      fillTxid: position.closeTxid || undefined,
+    });
+  } catch {
+    reboarding.delete(position.id);
+  }
+}
+
 function applyChain(position, update) {
   let next = CHAIN_STATUS[update.phase];
   if (!next) return;
@@ -598,6 +615,7 @@ function applyChain(position, update) {
   const closeTxid = update.closeTxid || position.closeTxid || "";
   const settleTxid = next === "refunded" ? "" : (update.settleTxid || position.settleTxid || "");
   const display = next === "filled" && settlementKnown({ settleTxid, closeTxid }) ? "settled" : next;
+  if (update.unrolled && display === "filled") void tryReboard(position);
   const same = position.status === display
     && Boolean(position.refundable) === update.refundable
     && (position.fundingTxid || "") === fundingTxid
@@ -1820,6 +1838,9 @@ function renderBetFoot() {
     label = "Try again";
     [sentence, detail] = betFault(state.bet.quoteNote);
   }
+  if (!sentence && state.address && !state.pubkey) {
+    sentence = "Pasted address: payouts work, but connect a wallet if you want emergency 2-of-2 recovery.";
+  }
   $("bet-confirm").textContent = label;
   $("bet-confirm").disabled = off;
   renderStatus($("bet-status"), sentence, detail);
@@ -1933,6 +1954,7 @@ function placeBet() {
   state.selected = position.id;
   show("home");
   startWatch();
+  void fundRequest(position).then((req) => registerExecutorDelegations(req));
   openWallet(position);
 }
 

@@ -4,7 +4,7 @@ import test from "node:test";
 
 import { secp256k1 } from "@noble/curves/secp256k1.js";
 
-import { centsOf, DIA_PUBKEY, intentDigest, type DiaIntent } from "./dia.ts";
+import { centsOf, DIA_PUBKEY, ethAddressOf, intentDigest, intentSigned, localFeed, type DiaIntent } from "./dia.ts";
 
 /**
  * A real getIntent for BTC/USD signed by the pinned key
@@ -54,7 +54,7 @@ test("the compiled attest checks the DIA digest, the pinned key, and the window"
     compiler: { version: string };
     functions: { name: string; arkade?: { asm: string[] } }[];
   };
-  assert.equal(artifact.compiler.version, "0.1.0-rc.1");
+  assert.equal(artifact.compiler.version, "0.1.0");
   const asm = artifact.functions.find((fn) => fn.name === "attest")?.arkade?.asm ?? [];
   assert.ok(asm.includes("OP_DIGEST"));
   assert.ok(asm.includes("OP_DIV"));
@@ -63,4 +63,16 @@ test("the compiled attest checks the DIA digest, the pinned key, and the window"
   assert.ok(asm.includes("OP_CHECKSIGFROMSTACK"));
   assert.ok(asm.includes("0x" + Buffer.from(DIA_PUBKEY).toString("hex")));
   assert.ok(asm.includes("0xf57d55f057fd4aba6b1a7f8bccb6a3e826cf71fd34971f22a39d7ffd6e620fb3"));
+});
+
+test("localFeed signs verifiable EIP-712 DIA intents and ethAddressOf derives a 20-byte address", () => {
+  const feed = localFeed(new Uint8Array(32).fill(7), () => 8_412_345n);
+  assert.equal(feed.key.length, 34);
+  assert.equal(feed.key[0], 0x10);
+  assert.equal(ethAddressOf(feed.key).length, 40);
+  const signed = feed.sign(8_412_345n, 1_795_000_030);
+  assert.equal(centsOf(signed.price), 8_412_345n);
+  assert.equal(intentSigned(signed, feed.key), true);
+  assert.equal(intentSigned(signed, DIA_PUBKEY), false);
+  assert.equal(intentSigned({ ...signed, price: signed.price + 1n }, feed.key), false);
 });

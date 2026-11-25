@@ -96,6 +96,8 @@ test("PredictVault exposes three-tier exit leaves and expected opcodes", async (
 
   assert.ok((predict.functions.refund?.arkadeScript?.asm ?? []).includes("CHECKTIME"));
   assert.ok((predict.functions.reboard?.arkadeScript?.asm ?? []).includes("TUNNEL"));
+  assert.ok((predict.functions.reboard?.arkadeScript?.asm ?? []).includes("INSPECTINTENTMESSAGE"));
+  assert.ok(PREDICT_FINAL_EXIT_DELAY > PREDICT_VOID_AFTER);
 
   const terms = await predictTerms(2);
   const backupA = await key(30).xOnlyPublicKey();

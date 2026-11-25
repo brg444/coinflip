@@ -168,6 +168,7 @@ export async function settleQuote(env: {
   expected?: { price: bigint; time: bigint };
 }): Promise<SettleOutcome> {
   if (env.now < Number(env.terms.expiry)) return { result: "waiting", reason: "early" };
+  if (!env.terms.beacon) return { result: "mismatch" };
   const id = asset.AssetId.fromString(env.beacon.assetId);
   const beaconId = beaconIdOf(id);
   if (bytesToHex(beaconId.txid) !== bytesToHex(env.terms.beacon.txid) || beaconId.gidx !== env.terms.beacon.gidx) {
@@ -335,4 +336,31 @@ export async function refundQuote(env: {
     if (hex === writerHex) writer = output.amount;
   }
   return { result: "refunded", txid: submitted.txid, holder, writer };
+}
+
+/** Reboard or renew a PredictVault into an offchain batch unchanged via its `reboard` leaf. */
+export async function reboardPredictVault(env: {
+  client: arkade.Arkade;
+  terms: Terms;
+  fillTxid?: string;
+  signal?: AbortSignal;
+}): Promise<{ result: "reboarded"; commitmentTxid: string; intentId: string } | { result: "missing" }> {
+  if (!isPredict(env.terms.kind)) throw new Error("reboard is only supported for PredictVault");
+  const bound = bindContracts(env.terms);
+  const contract = env.client.contract(vaultProgramFor(env.terms.kind), bound.vault);
+  const scriptHex = bytesToHex(bound.vaultPkScript);
+  // ArkadeContract.getUtxos() filters out unrolled coins; query the indexer directly so unrolled vaults are included.
+  const coins = env.client.indexer
+    ? (await env.client.indexer.getVtxos({ scripts: [scriptHex] })).vtxos.filter((c) => !c.isSpent && !c.spentBy)
+    : await contract.getUtxos();
+  const target = (env.fillTxid ? coins.find((c) => c.txid === env.fillTxid) : undefined)
+    ?? coins.find((c) => c.isUnrolled)
+    ?? coins[0];
+  if (!target) return { result: "missing" };
+  const res = await arkade.renewProgramContractOutputs(
+    env.client,
+    [{ contract, coin: target, fn: "reboard" }],
+    { signal: env.signal },
+  );
+  return { result: "reboarded", commitmentTxid: res.commitmentTxid, intentId: res.intentId };
 }

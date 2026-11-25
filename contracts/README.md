@@ -4,27 +4,29 @@ Cash-settled options and short-window binary predictions on Arkade. The compiler
 
 ## PredictVault
 
-`predict_vault.ark`. All-or-nothing call on where Bitcoin closes: higher (kind 2: `ST > strike`) or lower (kind 3: `ST < strike`). Exact strike pays the writer for both kinds.
+`predict_vault.ark` (compiled with `@arkade-os/compiler@0.1.0`). All-or-nothing call on where Bitcoin closes: higher (kind 2: `ST > strike`) or lower (kind 3: `ST < strike`). Exact strike pays the writer for both kinds.
 
-- **Inputs & outputs.** The desk is the writer and funds `collateral` (the full payout); the bettor is the holder and paid `stake` to the desk when `OptionIntent` filled. `settle()` spends the vault as input 0 and `AttestationBeacon` as input 1. Output 0 is the beacon continuation with `readFee` sats added; payouts start at output 1 and sum to `collateral - readFee`.
-- **Beacon read & window.** Reads the newest matching fixing for `expiry` from the beacon state packet (first 8 bytes = price in USD cents, next 8 bytes = sample time). Rejects any sample time outside `[expiry, expiry + 60]`.
+- **Inputs & outputs.** The desk is the writer and funds `collateral` (the full payout); the bettor is the holder and paid `stake` to the desk when `OptionIntent` filled. `settle()` spends the vault as input 0 and `AttestationBeacon` as input 1. Output 0 is the beacon continuation with `readFee` sats (`1,000`) added; payouts start at output 1 and sum to `collateral - readFee`.
+- **Beacon read & canonical fixing.** Reads the single committed fixing for `expiry` from the beacon state packet (first 8 bytes = price in USD cents, next 8 bytes = sample time), preventing either side from cherry-picking among multiple DIA prints inside `[expiry, expiry + 60]`.
 - **Dust folding.** Any payout leg at or below `DUST` (`330` sats) is folded into the other party's output.
 - **Three-tier exit & void model.** Replaces single-party writer unilateral exit so the House cannot unroll and walk away from a payout:
 
 | Tier | Function | Who | When | Outcome |
 | --- | --- | --- | --- | --- |
-| 1 | `settle()` | Anyone, with operator | After `expiry`, with beacon fixing | Winner paid (`collateral - readFee`) |
-| 1 | `reboard()` | Anyone, with operator | After an unroll (v2 intent proof) | Vault returns off-chain unchanged via `this.tunnel(activeInputIndex - 1)` |
-| 1 | `refund()` | Anyone, with operator | After `expiry + voidAfter` (24h) | Bet is void: `stake` back to holder, remainder to writer (dust folded) |
+| 1 | `settle()` | Anyone, with operator | After `expiry`, with committed beacon fixing | Winner paid (`collateral - readFee`) |
+| 1 | `reboard()` | Anyone, with operator (`executord` or page) | After an unroll or before expiry (v2 intent proof, `onchain_output_indexes == "[]"`) | Vault returns off-chain unchanged via `this.tunnel(activeInputIndex - 1)` |
+| 1 | `refund()` | Anyone, with operator | After `expiry + voidAfter` (24h) | Prediction is void: `stake` back to holder, remainder to writer (dust folded) |
 | 1 | `close(writerSig, holderSig)` | House and player | Any time | Cooperative split |
-| 2 | `refundBackup(backupSig)` | Backup emulator via `tweak(backupPk, refund)` | After `older(fallbackDelay)` (~6.1h) | Same void outcome on L1 without primary operator |
-| 3 | `unilateral(writerSig, holderSig)` | House and player (2-of-2) | After `older(finalExitDelay)` (~7.1h) | Mutual last-resort L1 exit |
+| 2 | `refundBackup(backupSig)` | Backup emulator via `tweak(backupPk, refund)` | After `older(fallbackDelay)` (~6.1h) | Void refund on L1 without primary operator (after `expiry + voidAfter`; supports L1 fee-sponsor input) |
+| 3 | `unilateral(writerSig, holderSig)` | House and player (2-of-2) | After `older(finalExitDelay)` (~30h > `voidAfter`) | Mutual last-resort L1 exit |
 
 Constructor: `kind`, `writerPk`, `holderPk`, `writerScript`, `holderScript`, `strike`, `collateral`, `stake`, `expiry`, `beaconTxid`, `beaconGidx`, `readFee`, `backupPk`, `voidAfter`, `fallbackDelay`, `finalExitDelay`.
 
+> **Mainnet note:** On Mutinynet, if `BACKUP_EMULATOR_PUBKEY` / `PINNED_BACKUP_PUBKEY` is unset, the desk and page fall back to the primary emulator key as a placeholder. On Bitcoin mainnet, the page refuses quotes unless an independent backup emulator pubkey is explicitly pinned.
+
 ## OptionVault
 
-`option_vault.ark`. The writer locks BTC. Kind 0 is a covered call. Kind 1 is a limited put. Settlement pays the holder in BTC from that lock using the same beacon read, `[expiry, expiry + 60]` window, and `330`-sat dust folding as `PredictVault`.
+`option_vault.ark`. The writer locks BTC. Kind 0 is a covered call. Kind 1 is a limited put. Settlement pays the holder in BTC from that lock using the `AttestationBeacon` read, `[expiry, expiry + 60]` window, and `330`-sat dust folding.
 
 | Function | |
 | --- | --- |
@@ -36,15 +38,15 @@ Constructor: `kind`, `writerPk`, `holderPk`, `writerScript`, `holderScript`, `st
 
 ## OptionIntent
 
-`option_intent.ark`. Timed RFQ funding lock filled before a vault exists. `side == 0` (options): writer locks `collateral`, solver pays `premium` and funds `OptionVault`. `side == 1` (Predict): holder locks stake (`premium`), solver pays stake to `solverScript` and funds `PredictVault` with `collateral`. Maker can `cancel()` after `deadline` or exit after `exit`.
+`option_intent.ark`. Timed RFQ funding lock filled before a vault exists. `side == 0` (options): writer locks `collateral`, solver pays `premium` and funds `OptionVault`. `side == 1` (Predict): holder locks stake (`premium`), solver pays stake to `solverScript` and funds `PredictVault` with `collateral`. Maker can `cancel()` immediately after `deadline` (`OP_CHECKTIME`), `executord` can auto-refund via `cancelCltv` (`after(deadline)` + `cancelAuto()`), or maker can exit on Bitcoin after `exit`.
 
 ## AttestationBeacon
 
-`attestation_beacon.ark`. A price registry holding the eight newest fixings. The vault reads it by spending it in the same transaction. A signature names this beacon and one expiry, so a print for one expiry cannot fill another.
+`attestation_beacon.ark`. A price registry holding the eight newest 5-minute closes. The vault reads it by spending it in the same transaction. Each `attest` requires **both** the pinned DIA EIP-712 signature and an `adminPk` Schnorr signature over `(domain, "attest", ctrlTxid, ctrlGidx, round, expiry, cents, time)`, enforces `expiry % 300 == 0` and strictly advancing close times (`expiry > lastExpiry`) so nobody can front-run a close or flush and overwrite an earlier fixing, and never allows the oracle to invent a price.
 
 | Function | |
 | --- | --- |
-| `attest(expiry, price, time, nonce, intentExpiry, sig)` | Writes one fixing. `price` is the DIA 18-decimal integer. The script checks the EIP-712 signature, stores USD cents, and requires the timestamp in `[expiry, expiry + expiryLag]`. |
+| `attest(expiry, price, time, nonce, intentExpiry, sig, adminSig)` | Writes one fixing. `price` is the DIA 18-decimal integer. Verifies both the pinned DIA EIP-712 signature and `adminPk`'s Schnorr signature, requires `expiry % 300 == 0`, `expiry > lastExpiry`, and `time` in `[expiry, expiry + expiryLag]`, and stores USD cents. |
 | `read(selfIndex)` | Carries the state forward and adds `readFee`. No signature. |
 | `migrate(next, opSig)` | `adminPk` moves the coin to another script. |
 | `unilateral(adminSig)` | `adminPk`, after `exit`. |

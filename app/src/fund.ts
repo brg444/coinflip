@@ -15,11 +15,14 @@ import {
 } from "@arkade-os/sdk";
 
 import { beaconIdOf } from "../../protocol/beacon-id.ts";
-import { ARK_URL, BEACON_READ_FEE, DUST_SATS, EMULATOR_URL, EXIT, isPredict, type Kind } from "../../protocol/constants.ts";
+import { ARK_URL, BEACON_READ_FEE, DUST_SATS, EMULATOR_URL, EXECUTOR_URL, EXIT, isPredict, type Kind } from "../../protocol/constants.ts";
 import { assertServerExit, bindContracts, payoutVtxo, type Terms } from "../../protocol/contracts.ts";
+import { cancelIntentDelegation, cancelIntentTemplate, Executor, reboardVaultDelegation, reboardVaultTemplate } from "../../protocol/executor.ts";
 import { bytesToHex, hexToBytes, xOnly } from "../../protocol/hex.ts";
 import { networkByName } from "../../protocol/network.ts";
 import { intentProgram, vaultProgram, vaultProgramFor } from "../../protocol/programs.ts";
+import intentArtifact from "../../contracts/option_intent.artifact.json" with { type: "json" };
+import predictArtifact from "../../contracts/predict_vault.artifact.json" with { type: "json" };
 
 const NETWORK_NAME = "Mutinynet";
 export const WALLET_URL = "https://mutinynet.arkade.money";
@@ -51,7 +54,7 @@ export type FundRequest = {
   voidAfter?: bigint;
   fallbackDelay?: bigint;
   finalExitDelay?: bigint;
-  /** Display txid of the beacon identity asset, from the desk's quote. Required to build a vault. */
+  /** Display txid of the beacon identity asset. */
   beaconTxidHex?: string;
   beaconGidx?: number;
   exit?: bigint;
@@ -75,6 +78,7 @@ export type WriterBinding = {
   pubkey: string;
   pkScript: string;
   address: string;
+  network: string;
   signerKey?: Uint8Array;
   payoutKey: Uint8Array;
   serverKey: Uint8Array;
@@ -83,6 +87,7 @@ export type WriterBinding = {
 
 type Session = {
   client: Awaited<ReturnType<typeof arkade.Arkade.connect>>;
+  network: string;
 };
 
 const indexer = new RestIndexerProvider(ARK_URL);
@@ -117,7 +122,7 @@ function operatorSession(): Promise<Session> {
         contractManager,
         network: networkByName(info.network),
       });
-      return { client };
+      return { client, network: info.network.trim().toLowerCase() };
     })();
     operatorPromise.catch(() => {
       operatorPromise = null;
@@ -135,16 +140,19 @@ function openSession(identity: SingleKey): Promise<Session> {
   let pending = sessions.get(id);
   if (!pending) {
     pending = (async () => {
+      const ark = new RestArkProvider(ARK_URL);
+      const info = await ark.getInfo();
+      const network = info.network.trim().toLowerCase();
       const contractManager = await contracts();
       const client = await arkade.Arkade.connect({
-        arkade: new RestArkProvider(ARK_URL),
+        arkade: ark,
         indexer,
         emulator: new RestEmulatorProvider(EMULATOR_URL),
         identity,
         contractManager,
-        network: networks.mutinynet,
+        network: networkByName(network),
       });
-      return { client };
+      return { client, network };
     })();
     pending.catch(() => {
       sessions.delete(id);
@@ -244,7 +252,7 @@ function sessionHex(): string {
 
 export async function writerBinding(address: string, pubkey?: string, exit: bigint = EXIT): Promise<WriterBinding> {
   const decoded = ArkAddress.decode(parseWriterAddress(address));
-  const { client } = await openSession(SingleKey.fromHex(sessionHex()));
+  const { client, network } = await openSession(SingleKey.fromHex(sessionHex()));
   if (!client.emulatorKey) throw new Error("The emulator key is missing.");
   await assertServerExit();
   if (bytesToHex(xOnly(client.serverKey)) !== bytesToHex(xOnly(decoded.serverPubKey))) {
@@ -256,6 +264,7 @@ export async function writerBinding(address: string, pubkey?: string, exit: bigi
     pubkey: bytesToHex(signerKey ?? payoutKey),
     pkScript: bytesToHex(decoded.pkScript),
     address: decoded.encode(),
+    network,
     signerKey,
     payoutKey,
     serverKey: client.serverKey,
@@ -436,4 +445,32 @@ export async function cancelIntent(req: FundRequest): Promise<string> {
     lastTxid = sent.txid;
   }
   return lastTxid;
+}
+
+let cachedExecutor: Promise<Executor | undefined> | null = null;
+function connectExecutor(serverKey: Uint8Array, emulatorKey: Uint8Array): Promise<Executor | undefined> {
+  if (!cachedExecutor) {
+    cachedExecutor = Executor.connect(EXECUTOR_URL, { serverKey, emulatorKey }).catch(() => undefined);
+  }
+  return cachedExecutor;
+}
+
+/** Best-effort registration with executord for automatic intent refund and vault reboard/renewal. */
+export async function registerExecutorDelegations(req: FundRequest): Promise<{ cancel: boolean; reboard: boolean }> {
+  try {
+    const { client, bound } = await build(req);
+    if (!client.emulatorKey) return { cancel: false, reboard: false };
+    const executor = await connectExecutor(client.serverKey, client.emulatorKey);
+    if (!executor) return { cancel: false, reboard: false };
+    const cancelId = await executor.ensureTemplate("cancel_intent", intentArtifact as arkade.ContractArtifact, cancelIntentTemplate);
+    const cancel = cancelId ? await executor.delegate(cancelIntentDelegation(cancelId, bound)) : false;
+    let reboard = false;
+    if (isPredict(req.kind)) {
+      const reboardId = await executor.ensureTemplate("reboard_vault", predictArtifact as arkade.ContractArtifact, reboardVaultTemplate);
+      reboard = reboardId ? await executor.delegate(reboardVaultDelegation(reboardId, bound)) : false;
+    }
+    return { cancel, reboard };
+  } catch {
+    return { cancel: false, reboard: false };
+  }
 }

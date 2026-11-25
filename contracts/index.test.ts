@@ -4,7 +4,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { compile } from "@arkade-os/compiler";
+import { compileContract } from "./compile.mjs";
 
 import { bindBeacon as bindBeaconFromProtocol } from "../protocol/beacon.ts";
 import { bindContracts as bindContractsFromProtocol } from "../protocol/contracts.ts";
@@ -85,7 +85,7 @@ test("the two artifacts publish the vault and beacon functions", () => {
       "exit",
     ],
     functions: [
-      { name: "attest", inputs: ["expiry", "price", "time", "nonce", "intentExpiry", "sig"] },
+      { name: "attest", inputs: ["expiry", "price", "time", "nonce", "intentExpiry", "sig", "adminSig"] },
       { name: "read", inputs: ["selfIndex"] },
       { name: "migrate", inputs: ["next", "opSig"] },
       { name: "unilateral", inputs: ["adminSig"] },
@@ -111,18 +111,13 @@ test("the import surface is the protocol bind and settle helpers", () => {
 test("committed contract artifacts match compiled .ark sources", async () => {
   const dir = path.dirname(fileURLToPath(import.meta.url));
   const entries = readdirSync(dir).sort();
-  const files = Object.fromEntries(
-    entries.filter((name) => name.endsWith(".ark")).map((name) => [name, readFileSync(path.join(dir, name), "utf8")]),
-  );
   const artifactFiles = entries.filter((name) => name.endsWith(".artifact.json"));
   assert.ok(artifactFiles.length >= 4);
   for (const artifactFile of artifactFiles) {
     const entry = artifactFile.replace(/\.artifact\.json$/, ".ark");
     const committed = JSON.parse(readFileSync(path.join(dir, artifactFile), "utf8")) as Record<string, unknown>;
-    const compiled = await compile({ entry, files }, { optimize: true });
+    const compiled = await compileContract(entry, dir);
     assert.ok(compiled.artifact, `${entry}: ${compiled.diagnostics.map((d) => d.message).join("; ")}`);
-    assert.equal(compiled.artifact.contractName, committed.contractName, `${entry} contractName`);
-    assert.deepEqual(compiled.artifact.constructorInputs, committed.constructorInputs, `${entry} constructorInputs`);
-    assert.deepEqual(compiled.artifact.functions, committed.functions, `${entry} functions`);
+    assert.deepEqual(compiled.artifact, committed, `${entry} drifted`);
   }
 });

@@ -1,17 +1,13 @@
-import { readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { readdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { compile } from "@arkade-os/compiler";
+import { compileContract } from "../contracts/compile.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const dir = path.join(root, "contracts");
 
 const entries = readdirSync(dir).sort();
-const files = Object.fromEntries(
-  entries.filter((name) => name.endsWith(".ark")).map((name) => [name, readFileSync(path.join(dir, name), "utf8")]),
-);
-
 const requested = process.argv.slice(2).map((name) => (name.endsWith(".ark") ? name : `${name}.ark`));
 const targets = requested.length
   ? requested
@@ -21,12 +17,7 @@ const targets = requested.length
 
 let failed = false;
 for (const entry of targets) {
-  if (!(entry in files)) {
-    console.error(`missing source: contracts/${entry}`);
-    failed = true;
-    continue;
-  }
-  const result = await compile({ entry, files }, { optimize: true });
+  const result = await compileContract(entry, dir);
   for (const diag of result.diagnostics) {
     const loc = diag.start ? `${diag.file}:${diag.start.line}:${diag.start.column}` : diag.file;
     console.error(`[${diag.severity}${diag.code ? `/${diag.code}` : ""}] ${loc}: ${diag.message}`);

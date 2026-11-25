@@ -324,7 +324,8 @@ export function parsePosition(value: unknown): OptionPosition | null {
   if (!amount(body.collateral) || !amount(body.strike)) return null;
   if (!int(body.expiry, 4_000_000_000) || !int(body.exit, 4_000_000_000)) return null;
   if (!hex64(body.writer_pubkey) || !script(body.writer_pk_script)) return null;
-  if (!hex64(body.holder_pubkey) || !hex64(body.beacon_txid) || !int(body.beacon_gidx, 65_535)) return null;
+  if (!hex64(body.holder_pubkey)) return null;
+  if (!hex64(body.beacon_txid) || !int(body.beacon_gidx, 65_535)) return null;
   if (!address(body.vault_address) || !hex64(body.fill_txid)) return null;
   let predictFields: Pick<OptionPosition, "holder_pk_script" | "stake" | "backup_pubkey" | "void_after" | "fallback_delay" | "final_exit_delay"> = {};
   if (predict) {
@@ -403,6 +404,7 @@ export function requestRefusal(message: RfqRequest, now: number): string {
   if (isPredictRequest(message.profile)) return predictRefusal(message.profile.expiry, BigInt(message.amount), now);
   const collateral = BigInt(message.amount);
   if (collateral < Q_MIN || collateral > Q_MAX) return "collateral";
+  if (message.profile.expiry % PREDICT_GRID_S !== 0) return "expiry";
   // Ten minutes is allowed. The open window (expiry − 1800) may already
   // have passed; the quote only has to finish before expiry.
   if (message.profile.expiry <= now + 60) return "expiry";
