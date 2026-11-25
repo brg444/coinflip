@@ -881,6 +881,7 @@ body { padding-left: env(safe-area-inset-left); padding-right: env(safe-area-ins
   html.standalone .nav button[aria-current="page"]::before { top: -2px; }
   html.standalone .nav .count { top: 1px; }
   html.standalone .strip { padding-top: env(safe-area-inset-top); height: calc(28px + env(safe-area-inset-top)); }
+  html.standalone body:not(:has(> .strip)) .bar { padding-top: env(safe-area-inset-top); }
 }
 /* How it works, phones: its own short page. Desktop keeps the two-column card. */
 .how-phone { display: none; }

@@ -39,8 +39,8 @@ let html = readFileSync(path.join(root, "app/index.html"), "utf8")
 if (isMainnet) {
   html = html
     .replace(
-      '<p class="strip" role="note"><span>Educational demo</span><span aria-hidden="true">·</span><span>Mutinynet</span><span aria-hidden="true">·</span><span>coins have no value</span></p>',
-      '<p class="strip" role="note"><span>Bitcoin mainnet</span><span aria-hidden="true">·</span><span>Arkade</span><span aria-hidden="true">·</span><span>real sats</span></p>',
+      /\s*<p class="strip" role="note"><span>Educational demo<\/span><span aria-hidden="true">·<\/span><span>Mutinynet<\/span><span aria-hidden="true">·<\/span><span>coins have no value<\/span><\/p>/,
+      "",
     )
     .replace('placeholder="tark1…"', 'placeholder="ark1…"')
     .replace(
