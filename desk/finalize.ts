@@ -80,10 +80,20 @@ function alreadyFinalized(err: unknown): boolean {
   return /not in a valid stage to finalize/i.test(messageOf(err));
 }
 
+const MAX_TRACKED_STUCK = 2_000;
 // Arkd spent these inputs and then lost the offchain row. Submit and finalize both refuse.
 const stuckArkTxs = new Set<string>();
 // Those outpoints are not pending work anymore. The indexer can keep listing them.
 const clearedOutpoints = new Set<string>();
+
+function addBounded(set: Set<string>, value: string) {
+  if (set.has(value)) return;
+  if (set.size >= MAX_TRACKED_STUCK) {
+    const oldest = set.values().next().value;
+    if (oldest !== undefined) set.delete(oldest);
+  }
+  set.add(value);
+}
 
 type Outpoint = { txid: string; vout: number };
 type ReconcileSpent = (outpoints: Outpoint[]) => Promise<void>;
@@ -98,10 +108,10 @@ async function dropAlreadySpent(
   arkTxid: string | undefined,
   reconcile?: ReconcileSpent,
 ): Promise<void> {
-  if (arkTxid) stuckArkTxs.add(arkTxid);
+  if (arkTxid) addBounded(stuckArkTxs, arkTxid);
   if (!coins.length) return;
   const outpoints = coins.map((coin) => ({ txid: coin.txid, vout: coin.vout }));
-  for (const coin of outpoints) clearedOutpoints.add(outpointId(coin));
+  for (const coin of outpoints) addBounded(clearedOutpoints, outpointId(coin));
   if (!reconcile) return;
   try {
     await reconcile(outpoints);

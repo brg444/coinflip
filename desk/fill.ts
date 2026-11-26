@@ -29,18 +29,42 @@ function asInput(coin: Coin, script: DefaultVtxo.Script): ArkTxInput {
   };
 }
 
-export function selectFloat(coins: Coin[], premium: bigint, minExpiryS?: number): Coin[] | null {
-  const eligible = minExpiryS == null ? coins : coins.filter((coin) => coinOutlives(coin, minExpiryS));
-  const sorted = [...eligible].sort((a, b) => a.value - b.value);
+export const DEFAULT_MAX_FLOAT_INPUTS = 20;
+
+export function selectFloat(
+  coins: Coin[],
+  amount: bigint,
+  minExpiryS?: number,
+  opts?: { allowSmallChange?: boolean; maxInputs?: number },
+): Coin[] | null {
+  const eligible = (minExpiryS == null ? coins : coins.filter((coin) => coinOutlives(coin, minExpiryS)))
+    .filter((coin) => coin.value > 0);
+  const allowSmallChange = Boolean(opts?.allowSmallChange);
+  const maxInputs = Math.max(1, opts?.maxInputs ?? DEFAULT_MAX_FLOAT_INPUTS);
+
+  // Prefer the smallest single coin that covers `amount` cleanly (minimizes tx weight & input bloat).
+  const asc = [...eligible].sort((a, b) => a.value - b.value);
+  for (const coin of asc) {
+    const change = BigInt(coin.value) - amount;
+    if (change >= 0n && (allowSmallChange || change === 0n || change > DUST_SATS)) {
+      return [coin];
+    }
+  }
+
+  // Otherwise combine largest coins first, capped at `maxInputs` to stay well under tx weight limits.
+  const desc = [...eligible].sort((a, b) => b.value - a.value);
   const picked: Coin[] = [];
   let sum = 0n;
-  for (const coin of sorted) {
+  for (const coin of desc) {
+    if (picked.length >= maxInputs) break;
     picked.push(coin);
     sum += BigInt(coin.value);
-    const change = sum - premium;
-    if (change === 0n || change > DUST_SATS) return picked;
+    const change = sum - amount;
+    if (change >= 0n && (allowSmallChange || change === 0n || change > DUST_SATS)) {
+      return picked;
+    }
   }
-  if (sum >= premium) return picked;
+  if (sum >= amount) return picked;
   return null;
 }
 
@@ -114,7 +138,7 @@ export async function fillQuote(opts: {
   // The desk pays the premium for an option, and the whole payout for a prediction.
   const outlay = predict ? collateral : premium;
   const float = opts.float ?? await deskFloat(opts.client, opts.deskScript);
-  const picked = selectFloat(float, outlay, minExpiry);
+  const picked = selectFloat(float, outlay, minExpiry, { allowSmallChange: predict });
   if (!picked) return { result: "short" };
 
   const locked = BigInt(coin.value);

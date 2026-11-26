@@ -23,6 +23,8 @@ import (
 	"github.com/btcsuite/btcd/wire/v2"
 )
 
+const testReadFee int64 = 1_000
+
 type artifactFile struct {
 	ContractName string             `json:"contractName"`
 	Functions    []artifactFunction `json:"functions"`

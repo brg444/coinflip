@@ -16,10 +16,13 @@ const publish = () => {
     ? createHash("sha256").update(readFileSync(jsPath)).digest("hex").slice(0, 10)
     : "dev";
   const cssHash = createHash("sha256").update(readFileSync(path.join(root, "app/desk.css"))).digest("hex").slice(0, 10);
+  const bootHash = createHash("sha256").update(readFileSync(path.join(root, "app/boot.js"))).digest("hex").slice(0, 10);
   const html = readFileSync(path.join(root, "app/index.html"), "utf8")
+    .replace('src="./boot.js"', `src="./boot.js?${bootHash}"`)
     .replace('src="./app.js"', `src="./app.js?${hash}"`)
     .replace('href="desk.css"', `href="desk.css?${cssHash}"`);
   writeFileSync(path.join(dist, "index.html"), html);
+  cpSync(path.join(root, "app/boot.js"), path.join(dist, "boot.js"));
   cpSync(path.join(root, "app/desk.css"), path.join(dist, "desk.css"));
   writeFileSync(path.join(dist, ".nojekyll"), "");
 };
@@ -55,10 +58,23 @@ const types = {
 };
 http
   .createServer((req, res) => {
-    const url = new URL(req.url ?? "/", "http://localhost");
-    let rel = decodeURIComponent(url.pathname);
+    let url;
+    let rel;
+    try {
+      url = new URL(req.url ?? "/", "http://localhost");
+      rel = decodeURIComponent(url.pathname);
+    } catch {
+      res.writeHead(400);
+      res.end("bad request");
+      return;
+    }
+    if (rel.includes("\0")) {
+      res.writeHead(400);
+      res.end("bad request");
+      return;
+    }
     if (rel.endsWith("/")) rel += "index.html";
-    rel = rel.replace(/^\//, "");
+    rel = rel.replace(/^\/+/, "");
     const file = path.resolve(dist, rel);
     if (!file.startsWith(dist + path.sep) || !existsSync(file) || !statSync(file).isFile()) {
       res.writeHead(404);
@@ -66,7 +82,11 @@ http
       return;
     }
     res.writeHead(200, { "content-type": types[path.extname(file)] ?? "application/octet-stream" });
-    createReadStream(file).pipe(res);
+    const stream = createReadStream(file);
+    stream.on("error", () => {
+      if (!res.writableEnded) res.end();
+    });
+    stream.pipe(res);
   })
   .listen(port, "127.0.0.1", () => {
     console.log(`options http://127.0.0.1:${port}`);

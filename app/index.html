@@ -1,13 +1,12 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <script>if(location.protocol==="http:"&&/(^|\.)coinflip\.casino$/.test(location.hostname))location.replace("https://"+location.host+location.pathname+location.search+location.hash)</script>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>COINFLIP</title>
   <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M3.5 19.1A11 11 0 0 1 19.1 3.5Z' fill='%23381993'/%3E%3Cpath d='M20.5 4.9A11 11 0 0 1 4.9 20.5Z' fill='%23381993'/%3E%3C/svg%3E">
   <meta name="theme-color" content="#ffffff">
-  <script>try{var t=localStorage.getItem("arkade-trade-theme");if(t==="light"||t==="dark")document.documentElement.dataset.theme=t}catch(e){}</script>
+  <script src="./boot.js"></script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -38,7 +37,8 @@
       <p class="sub" id="connect-current" hidden>Connected: <span class="mono" id="connect-address"></span> <button type="button" class="textbtn" id="account-change">Use another wallet</button></p>
       <button type="button" class="btn go" id="wallet-connect">Open Arkade wallet</button>
       <div class="form">
-        <label>Or paste your Arkade address<input id="account-key" class="mono-input" autocomplete="off" spellcheck="false" placeholder="tark1…" aria-describedby="account-error"></label>
+        <label>Or paste your Arkade address<input id="account-key" class="mono-input" autocomplete="off" spellcheck="false" placeholder="tark1…" aria-describedby="account-error account-paste-warn"></label>
+        <p id="account-paste-warn" class="warn" role="note">Pasted addresses support payouts and automatic settlement, but pre-fill L1 exit and emergency 2-of-2 L1 recovery require connecting your Arkade wallet.</p>
         <p id="account-error" class="error" role="status"></p>
         <div><button type="button" class="btn quiet sm" id="account-save">Continue</button></div>
       </div>
@@ -136,7 +136,7 @@
         <p class="how-names">A close exactly on the line goes to the desk. There are no partial payouts.</p>
 
         <h2>What the multiple means</h2>
-        <p>The multiple is what you get back for every sat you stake if you are right. It comes from how likely the price is to finish on your side, read from Deribit’s Bitcoin options, less the desk’s 5% edge, so an even call pays 1.90×. A 1,000-sat fee for the price check comes out of the payout.</p>
+        <p>The multiple is what you get back for every sat you stake if you are right. It comes from how likely the price is to finish on your side, read from Deribit’s Bitcoin options, less the desk’s 5% edge, so an even call pays 1.90×.</p>
 
         <h2>If settlement stalls</h2>
         <p>If a prediction cannot settle within 24 hours of the close, it voids and anyone can trigger a refund of your stake from the vault. If Arkade itself stays offline for more than 7 days, a separate backup recovery key (held independently of the desk) can spend an unsettled vault on Bitcoin L1 to issue that refund—you are trusting that backup key custodian to sign only valid refunds after 7 days.</p>
@@ -151,7 +151,7 @@
               <span class="how-tag vault">Prediction</span>
             </div>
             <strong>Stake in</strong>
-            <p>Placing the prediction fixes your multiple. You then have 60 seconds to send the stake from your wallet.</p>
+            <p>Placing the prediction fixes your multiple. You then have 30 seconds to send the stake from your wallet.</p>
           </div>
           <div class="how-join" aria-hidden="true"></div>
           <div class="how-step">
@@ -201,15 +201,15 @@
         <h2 class="how-head">From call to payout</h2>
         <ol class="how-steps">
           <li><b>Pick a line and a close</b><span>A close comes every five minutes. The further your line from today’s price, the bigger the multiple.</span></li>
-          <li><b>Send your stake</b><span>Placing the prediction fixes your multiple, then you have 60 seconds to send the stake from your Arkade wallet.</span></li>
+          <li><b>Send your stake</b><span>Placing the prediction fixes your multiple, then you have 30 seconds to send the stake from your Arkade wallet.</span></li>
           <li><b>The desk takes the other side</b><span>In one transaction your stake goes to the desk and the desk locks your whole payout in a vault.</span></li>
           <li><b>The close decides it</b><span>A minute after the close the oracle’s price is fixed, and the vault pays you if you were right. Nothing for you to do.</span></li>
         </ol>
 
         <h2 class="how-head">The multiple</h2>
         <div class="how-example">
-          <p class="how-sum"><span>50,000 sats at 1.90×</span><b>94,000 sats back</b></p>
-          <p>The multiple is what each sat returns if you’re right, priced from Deribit’s Bitcoin options less the desk’s 5% edge, so an even call pays 1.90×. A 1,000-sat price-check fee comes out of the payout.</p>
+          <p class="how-sum"><span>50,000 sats at 1.90×</span><b>95,000 sats back</b></p>
+          <p>The multiple is what each sat returns if you’re right, priced from Deribit’s Bitcoin options less the desk’s 5% edge, so an even call pays 1.90×.</p>
         </div>
 
         <details class="how-more">
@@ -236,7 +236,6 @@
       <p class="sub" id="bet-sub"></p>
       <button type="button" class="chart-fold" id="bet-chart-fold" aria-expanded="false" aria-controls="bet-details">See the details<svg viewBox="0 0 14 14" aria-hidden="true"><path d="M3 5.5l4 4 4-4"/></svg></button>
       <div id="bet-details">
-      <p class="fee"><span id="bet-fee-label"></span><b>−1,000 sats</b></p>
       <div class="rows-head"><span id="bet-rows-when"></span><span>You get back</span></div>
       <div id="bet-rows"></div>
       <section class="chartcard" id="bet-chartcard">
@@ -250,6 +249,7 @@
     <div class="stick">
       <label class="check"><input type="checkbox" id="bet-agree"><span id="bet-agree-text"></span></label>
       <div class="sheet-foot"><button type="button" class="btn go" id="bet-confirm">Place prediction</button><span class="firm" id="bet-firm"></span></div>
+      <p class="warn" id="bet-pasted-warn" role="note" hidden></p>
       <p class="status" id="bet-status" role="status"></p>
     </div>
   </aside>

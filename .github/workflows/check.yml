@@ -2,6 +2,8 @@ name: Check
 
 on:
   pull_request:
+  push:
+    branches: [main]
 
 jobs:
   test:
@@ -19,8 +21,24 @@ jobs:
           node-version: 22
           cache: pnpm
 
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: contracts/go/go.mod
+          cache-dependency-path: contracts/go/go.sum
+
       - name: Install
         run: pnpm install --frozen-lockfile
 
-      - name: Test
+      - name: Typecheck
+        run: pnpm exec tsc --noEmit
+
+      - name: Unit & Integration Tests
         run: pnpm test
+
+      - name: Build Page
+        run: pnpm build
+
+      - name: Go Arkade VM Contract Tests
+        working-directory: contracts/go
+        run: go test -v ./...

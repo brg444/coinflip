@@ -10,7 +10,7 @@ import { cancelIntentDelegation, executorArtifact, reboardVaultDelegation, scrip
 import { bytesToHex } from "../../protocol/hex.ts";
 import { LIVE_BEACON_STATUS } from "./beacon-status.ts";
 import { explainError } from "./explain.ts";
-import { backupKeyMatches, oracleKeyMatches, quoteMatchesBeacon } from "./rfq.ts";
+import { backupKeyMatches, oracleKeyMatches } from "./rfq.ts";
 
 test("oracleKeyMatches accepts only the pinned oracle x-only pubkey", () => {
   const pinned = LIVE_BEACON_STATUS.args.adminPk;
@@ -19,14 +19,6 @@ test("oracleKeyMatches accepts only the pinned oracle x-only pubkey", () => {
   assert.equal(oracleKeyMatches("00".repeat(32), pinned), false);
   assert.equal(oracleKeyMatches("not-a-key", pinned), false);
   assert.equal(oracleKeyMatches(pinned, null), false);
-});
-
-test("quoteMatchesBeacon accepts only the pinned beacon txid and group index", () => {
-  assert.equal(quoteMatchesBeacon(LIVE_BEACON_STATUS.issueTxid, 0), true);
-  assert.equal(quoteMatchesBeacon(LIVE_BEACON_STATUS.issueTxid.toUpperCase(), 0), true);
-  assert.equal(quoteMatchesBeacon(LIVE_BEACON_STATUS.issueTxid, 1), false);
-  assert.equal(quoteMatchesBeacon("00".repeat(32), 0), false);
-  assert.equal(quoteMatchesBeacon("not-a-txid", 0), false);
 });
 
 test("backupKeyMatches pins backupPk, rejects desk substitution, and requires an independent key on mainnet", async () => {

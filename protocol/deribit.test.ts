@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { deribitPremium, parseBook, parseInstrument, type SurfacePoint } from "./deribit.ts";
+import { deribitMultiplier, deribitPremium, parseBook, parseInstrument, predictVol, type SurfacePoint } from "./deribit.ts";
 import { payablePremium } from "./pricing.ts";
 
 const now = 1_700_000_000;
@@ -163,4 +163,44 @@ test("a strike past the listed wing is cheaper than the wing", () => {
   assert.ok(wing && far);
   assert.ok(far.markBtc < wing.markBtc);
   assert.ok(far.markBtc > 0);
+});
+
+test("predictVol picks the nearest call expiry at least 6 hours out, interpolates ATM IV, and clamps to [0.2, 2]", () => {
+  const shortExp = now + 5 * 3600 + 59 * 60;
+  const sixHours = now + 6 * 3600;
+  const surface: SurfacePoint[] = [
+    point(shortExp, 100_000, true, 0.01, 1.5), // ignored (< 6h)
+    point(sixHours, 100_000, false, 0.02, 0.9), // ignored (put)
+    point(sixHours, 95_000, true, 0.05, 0.4),
+    point(sixHours, 105_000, true, 0.01, 0.6),
+    point(week, 100_000, true, 0.02, 0.8),
+  ];
+  assert.equal(predictVol(surface, 100_000, now), 0.5);
+  assert.equal(predictVol([], 100_000, now), null);
+  assert.equal(predictVol(surface, 0, now), null);
+  assert.equal(predictVol([point(shortExp, 100_000, true, 0.01, 0.5)], 100_000, now), null);
+
+  // Clamping bounds [0.2, 2.0]
+  assert.equal(predictVol([point(sixHours, 100_000, true, 0.01, 0.05)], 100_000, now), 0.2);
+  assert.equal(predictVol([point(sixHours, 100_000, true, 0.1, 3.5)], 100_000, now), 2);
+});
+
+test("deribitMultiplier prices ATM at 1.90x, increases for OTM calls/puts, honors vol override, and rejects extreme lines", () => {
+  const expiry = now + 300;
+  const spotCents = 10_000_000; // $100,000
+  const atm = deribitMultiplier({ kind: 2, lineCents: spotCents, expiry, now, spotCents, points: book, edge: 0.05 });
+  assert.equal(atm, 1.9);
+
+  const otmUp = deribitMultiplier({ kind: 2, lineCents: spotCents + 10_000, expiry, now, spotCents, points: book, edge: 0.05 });
+  const itmUp = deribitMultiplier({ kind: 2, lineCents: spotCents - 10_000, expiry, now, spotCents, points: book, edge: 0.05 });
+  const otmDown = deribitMultiplier({ kind: 3, lineCents: spotCents - 10_000, expiry, now, spotCents, points: book, edge: 0.05 });
+  assert.ok(otmUp != null && itmUp != null && otmDown != null);
+  assert.ok(otmUp > atm);
+  assert.ok(itmUp < atm);
+  assert.ok(otmDown > atm);
+
+  // Extreme OTM exceeds MULTIPLIER_MAX and returns null; empty surface returns null unless vol override is provided.
+  assert.equal(deribitMultiplier({ kind: 2, lineCents: spotCents + 500_000, expiry, now, spotCents, points: book }), null);
+  assert.equal(deribitMultiplier({ kind: 2, lineCents: spotCents, expiry, now, spotCents, points: [] }), null);
+  assert.equal(deribitMultiplier({ kind: 2, lineCents: spotCents, expiry, now, spotCents, points: [], vol: 0.5, edge: 0.05 }), 1.9);
 });

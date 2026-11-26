@@ -150,6 +150,8 @@ function isEvent(value: unknown): value is Sealed {
   return typeof event.id === "string" && typeof event.pubkey === "string" && typeof event.content === "string";
 }
 
+const MAX_SEEN_EVENTS = 10_000;
+
 function subscribeRelay(
   url: string,
   subId: string,
@@ -174,6 +176,10 @@ function subscribeRelay(
       ws.addEventListener("message", (ev) => {
         const frame = parseFrame(ev.data);
         if (!frame || frame[0] !== "EVENT" || !isEvent(frame[2]) || seen.has(frame[2].id)) return;
+        if (seen.size >= MAX_SEEN_EVENTS) {
+          const oldest = seen.values().next().value;
+          if (oldest !== undefined) seen.delete(oldest);
+        }
         seen.add(frame[2].id);
         onEvent(frame[2]);
       });

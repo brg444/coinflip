@@ -4,23 +4,23 @@ Cash-settled options and short-window binary predictions on Arkade. The compiler
 
 ## PredictVault
 
-`predict_vault.ark` (compiled with `@arkade-os/compiler@0.1.0`). All-or-nothing call on where Bitcoin closes: higher (kind 2: `ST > strike`) or lower (kind 3: `ST < strike`). Exact strike pays the writer for both kinds.
+`predict_vault.ark` (`PredictVaultV3`, compiled with `@arkade-os/compiler@0.1.0`). All-or-nothing call on where Bitcoin closes: higher (kind 2: `ST > strike`) or lower (kind 3: `ST < strike`). Exact strike pays the writer for both kinds.
 
-- **Inputs & outputs.** The desk is the writer and funds `collateral` (the full payout); the bettor is the holder and paid `stake` to the desk when `OptionIntent` filled. `settle()` spends the vault as input 0 and `AttestationBeacon` as input 1. Output 0 is the beacon continuation with `readFee` sats (`1,000`) added; payouts start at output 1 and sum to `collateral - readFee`.
-- **Beacon read & canonical fixing.** Reads the single committed fixing for `expiry` from the beacon state packet (first 8 bytes = price in USD cents, next 8 bytes = sample time), preventing either side from cherry-picking among multiple DIA prints inside `[expiry, expiry + 60]`.
+- **Inputs & outputs.** The desk is the writer and funds `collateral` (the full payout); the bettor is the holder and paid `stake` to the desk when `OptionIntent` filled. `settle(price, time, nonce, intentExpiry, sig, oracleSig)` spends the vault standalone as the only input (`tx.numInputs == 1`, `this.activeInputIndex == 0`). Payouts start at output 0 with zero read fee and sum to `locked` (`>= collateral`).
+- **Direct signature verification.** Verifies both the pinned DIA EIP-712 BTC/USD price signature and `oraclePk`'s BIP340 Schnorr signature over `sha256("BTCUSD-FIX" || "fix" || int2bytes(expiry, 8) || int2bytes(st, 8) || int2bytes(time, 8))` directly on the stack, with `time` in `[expiry, expiry + 60]` and `checkTime(expiry + 60)`. No shared beacon coin or VTXO contention.
 - **Dust folding.** Any payout leg at or below `DUST` (`330` sats) is folded into the other party's output.
 - **Three-tier exit & void model.** Replaces single-party writer unilateral exit so the House cannot unroll and walk away from a payout:
 
 | Tier | Function | Who | When | Outcome |
 | --- | --- | --- | --- | --- |
-| 1 | `settle()` | Anyone, with operator | After `expiry`, with committed beacon fixing | Winner paid (`collateral - readFee`) |
+| 1 | `settle(...)` | Anyone, with operator | After `expiry + 60`, with signed DIA + `oraclePk` fixing | Winner paid full `collateral` (zero read fee) |
 | 1 | `reboard()` | Anyone, with operator (`executord` or page) | After an unroll or before expiry (v2 intent proof, `onchain_output_indexes == "[]"`) | Vault returns off-chain unchanged via `this.tunnel(activeInputIndex - 1)` |
 | 1 | `refund()` | Anyone, with operator | After `expiry + voidAfter` (24h) | Prediction is void: `stake` back to holder, remainder to writer (dust folded) |
 | 1 | `close(writerSig, holderSig)` | House and player | Any time | Cooperative split |
 | 2 | `refundBackup(backupSig)` | Backup emulator via `tweak(backupPk, refund)` | After `older(fallbackDelay)` (~6.1h) | Void refund on L1 without primary operator (after `expiry + voidAfter`; supports L1 fee-sponsor input) |
 | 3 | `unilateral(writerSig, holderSig)` | House and player (2-of-2) | After `older(finalExitDelay)` (~30h > `voidAfter`) | Mutual last-resort L1 exit |
 
-Constructor: `kind`, `writerPk`, `holderPk`, `writerScript`, `holderScript`, `strike`, `collateral`, `stake`, `expiry`, `beaconTxid`, `beaconGidx`, `readFee`, `backupPk`, `voidAfter`, `fallbackDelay`, `finalExitDelay`.
+Constructor: `kind`, `writerPk`, `holderPk`, `writerScript`, `holderScript`, `strike`, `collateral`, `stake`, `expiry`, `oraclePk`, `backupPk`, `voidAfter`, `fallbackDelay`, `finalExitDelay`.
 
 > **Mainnet note:** On Mutinynet, if `BACKUP_EMULATOR_PUBKEY` / `PINNED_BACKUP_PUBKEY` is unset, the desk and page fall back to the primary emulator key as a placeholder. On Bitcoin mainnet (`NETWORK=bitcoin`), both the desk and page fail closed unless an independent backup emulator pubkey is explicitly configured, and `exit` / `fallbackDelay` / `finalExitDelay` scale to mainnet `arkd`'s 7-day `unilateralExitDelay` (`605,184s` / `605,184s` / `691,200s`). See `docs/mainnet-runbook.md`.
 >

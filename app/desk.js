@@ -39,6 +39,7 @@ import {
 } from "../protocol/constants.ts";
 import { predictPayout } from "../protocol/pricing.ts";
 import { openingSample, WINDOW_LINE_WITHIN_S } from "../protocol/window-line.ts";
+import { parseOracleFixing } from "../settle/oracle.ts";
 import { PINNED_BACKUP_PUBKEY, PINNED_DESKS, PINNED_ORACLE_PUBKEY, RELAYS } from "./rfq-config.js";
 import { explainError } from "./src/explain.ts";
 import { settlementKnown, usdFromCents } from "./src/position-status.ts";
@@ -1351,17 +1352,16 @@ function renderPredict() {
   if (outOfRange) {
     note.textContent = `Stake between ${inUnit(STAKE_MIN)} and ${inUnit(STAKE_MAX)}.`;
   } else if (beats(payout, t.stake)) {
-    // Phones show the short form; the fee is spelled out in the drawer either way.
     note.replaceChildren(
       "You win about ",
       el("b", "", inUsd() ? usdFig(worth(won(payout), spotUsd())) : `${int(won(payout))} sats`),
-      el("span", "est-long", `${inUsd() ? ` (${int(won(payout))} sats)` : ""} if you’re right · ${timesX(m)} your stake, less the 1,000‑sat fee`),
+      el("span", "est-long", `${inUsd() ? ` (${int(won(payout))} sats)` : ""} if you’re right · ${timesX(m)} your stake`),
       el("span", "est-short", ` if you’re right · ${timesX(m)}`),
     );
   } else if (m == null) {
     note.textContent = "The desk doesn’t quote this line for this close. Pick one nearer the current price.";
   } else {
-    note.textContent = `This wins about ${int(won(payout))} sats, which doesn’t beat your stake after the 1,000-sat fee. Stake more or pick a further line.`;
+    note.textContent = `This wins about ${int(won(payout))} sats, which doesn’t beat your stake. Stake more or pick a further line.`;
   }
   see.disabled = outOfRange || !beats(payout, t.stake);
   see.textContent = "Review prediction";
@@ -1417,8 +1417,8 @@ function renderBetPop(focus = false) {
   if (state.bet.open === "stake") {
     title = "How much to stake?";
     hint = inUsd()
-      ? `Dollars become sats at the current ${usd0(spotUsd())}; the stake is in sats from the moment the desk quotes it. The 1,000-sat price-check fee comes out of the payout at ${at}.`
-      : `The 1,000-sat price-check fee comes out of the payout at ${at}.`;
+      ? `Dollars become sats at the current ${usd0(spotUsd())}; the stake is in sats from the moment the desk quotes it.`
+      : "";
     const m = betMultiplier(t.kind, t.lineCents, t.expiry);
     const list = el("div", "opts");
     const choices = inUsd() ? USD_STAKES.map((usd) => [usd, usdToSats(usd)]) : STAKES.map((sats) => [null, sats]);
@@ -1436,7 +1436,7 @@ function renderBetPop(focus = false) {
           ? `Stake between ${inUnit(STAKE_MIN)} and ${inUnit(STAKE_MAX)}.`
           : m == null
             ? "The desk doesn’t quote this line."
-            : `Wins ${inUnit(won(payout))} after the fee, not more than you put in.`,
+            : `Wins ${inUnit(won(payout))}, not more than you put in.`,
       }));
     }
     const typed = el("form", "typed");
@@ -1764,9 +1764,8 @@ function renderBet() {
     $("bet-head").textContent = "This doesn’t beat your stake.";
     $("bet-sub").textContent = m == null
       ? "The desk doesn’t quote this line for this close."
-      : `It wins ${int(won(payout))} sats after the 1,000-sat fee, not more than the ${int(t.stake)} you put in.`;
+      : `It wins ${int(won(payout))} sats, not more than the ${int(t.stake)} you put in.`;
   }
-  $("bet-fee-label").textContent = `Price-check fee at ${at}`;
   $("bet-rows-when").textContent = `If BTC at ${at} is`;
   const rows = [
     [`${capital(DIR[t.kind])} ${line}`, payout != null ? inUnit(won(payout)) : "—",
@@ -1798,7 +1797,7 @@ function betFault(note) {
   if (note.includes("refused: expiry")) return ["That window is closing too soon. Pick a later close.", detail];
   if (note.includes("refused: window line")) return ["The window’s opening price has moved on. Review the prediction again.", detail];
   if (note.includes("refused: line")) return ["The desk doesn’t quote this line right now. Pick one nearer the current price.", detail];
-  if (note.includes("refused: payout")) return ["This payout doesn’t beat your stake after the fee. Stake more or pick a further line.", detail];
+  if (note.includes("refused: payout")) return ["This payout doesn’t beat your stake. Stake more or pick a further line.", detail];
   if (note.includes("refused: stake")) return [`Stake between ${fmtBtc(STAKE_MIN)} and ${fmtBtc(STAKE_MAX)} BTC.`, detail];
   if (note.includes("exposure")) return ["The desk has taken all it can for now. Try a smaller stake or a later close.", detail];
   if (note.includes("did not answer")) return ["The desk didn’t answer. Try again in a moment.", detail];
@@ -1842,8 +1841,13 @@ function renderBetFoot() {
     label = "Try again";
     [sentence, detail] = betFault(state.bet.quoteNote);
   }
-  if (!sentence && state.address && !state.pubkey) {
-    sentence = "Pasted address: payouts work, but connect a wallet if you want emergency 2-of-2 recovery.";
+  const pastedWarn = $("bet-pasted-warn");
+  if (pastedWarn) {
+    const isPasted = Boolean(state.address && !state.pubkey);
+    pastedWarn.hidden = !isPasted;
+    pastedWarn.textContent = isPasted
+      ? "Pasted address: payouts and automatic settlement work, but pre-fill L1 exit and emergency 2-of-2 L1 recovery require connecting your Arkade wallet."
+      : "";
   }
   $("bet-confirm").textContent = label;
   $("bet-confirm").disabled = off;
@@ -1972,28 +1976,23 @@ const FIXING_LAG_S = 60;
 let oracleReadable = true;
 const fixingReads = new Set();
 
-function chooseFixing(samples, expiry) {
-  const inWindow = samples.filter((s) => s.time >= expiry && s.time <= expiry + FIXING_LAG_S);
-  const pool = inWindow.length ? inWindow : samples.filter((s) => s.time >= expiry - FIXING_LAG_S && s.time < expiry);
-  if (!pool.length) return null;
-  return pool.reduce((best, s) => (s.time >= best.time ? s : best));
-}
-
 async function readFixing(position) {
   const expiry = Number(position.expiry);
-  const res = await fetch(`oracle/prices?from=${expiry - FIXING_LAG_S}&to=${expiry + FIXING_LAG_S}&limit=200`, { cache: "no-store", signal: AbortSignal.timeout(8_000) });
-  if (res.status === 404) {
+  const res = await fetch(`oracle/fixing?expiry=${expiry}`, { cache: "no-store", signal: AbortSignal.timeout(8_000) });
+  const isJson = (res.headers.get("content-type") ?? "").toLowerCase().includes("application/json");
+  if (res.status === 404 && !isJson) {
     // A static host has no oracle behind it; the result then arrives with the settlement.
     oracleReadable = false;
     return;
   }
   if (!res.ok) return;
   const body = await res.json();
-  const samples = (Array.isArray(body?.samples) ? body.samples : [])
-    .filter((s) => typeof s?.price === "string" && /^[0-9]+$/.test(s.price) && Number.isSafeInteger(s.time));
-  const chosen = chooseFixing(samples, expiry);
-  if (!chosen || position.fixCents === chosen.price) return;
-  position.fixCents = chosen.price;
+  const expectedPk = position.oraclePkHex || PINNED_ORACLE_PUBKEY || undefined;
+  const verified = parseOracleFixing(body, expectedPk);
+  if (!verified || verified.expiry !== expiry) return;
+  const price = verified.cents.toString();
+  if (position.fixCents === price) return;
+  position.fixCents = price;
   persist();
   if (state.view === "home") renderBlotter();
 }
@@ -2230,10 +2229,11 @@ function renderPrediction(p) {
     body.push(el("p", "sub", fixing != null
       ? `The ${at} fixing was ${usd2(fixing)}, ${usd2(Math.abs(fixing - line))} ${DIR[p.kind]} your ${lineUsd} line. That’s your ${int(stake)} back plus ${int(back - stake)}.`
       : `BTC closed ${DIR[p.kind]} your ${lineUsd} line. That’s your ${int(stake)} back plus ${int(back - stake)}.`));
+    const winFee = payout - back;
     body.push(ledger([
       ["You staked", `${int(stake)} sats`],
       ["From the desk", `+${int(payout - stake)}`],
-      [`Price-check fee at ${at}`, `−${int(payout - back)}`, "minus"],
+      ...(winFee > 0n ? [[`Price-check fee at ${at}`, `−${int(winFee)}`, "minus"]] : []),
       ["Paid to you", `${int(back)} sats`, "tot"],
     ]));
     body.push(el("p", "sub", "Paid to your Arkade wallet. Nothing left to do."), ...again());
@@ -2310,10 +2310,11 @@ function renderPrediction(p) {
       head.replaceChildren("You won ", el("span", "amt", `${int(won(payout))} sats`), ".");
       badge = pill("Won · paying out", "pill ok");
       body.push(el("p", "sub", `The ${at} fixing was ${usd2(fixing)}, ${usd2(Math.abs(fixing - line))} ${DIR[p.kind]} your ${lineUsd} line. The payout is on its way to your Arkade wallet; nothing for you to do.`));
+      const estFee = payout - won(payout);
       body.push(ledger([
         ["You staked", `${int(stake)} sats`],
         ["From the desk", `+${int(payout - stake)}`],
-        [`Price-check fee at ${at}`, `−${int(payout - won(payout))}`, "minus"],
+        ...(estFee > 0n ? [[`Price-check fee at ${at}`, `−${int(estFee)}`, "minus"]] : []),
         ["Paid to you", `${int(won(payout))} sats`, "tot"],
       ]));
       body.push(...again());
@@ -2948,27 +2949,34 @@ function renderSetup(next) {
     panel.hidden = true;
     return;
   }
-  const oracleDone = BigInt(next.oracle.balance || 0) >= BigInt(next.oracle.need) || ["deploying", "desk", "fund-desk"].includes(next.stage);
+  const oracleNeed = BigInt(next.oracle?.need || 0);
+  const needsOracleDeposit = oracleNeed > 0n;
+  const oracleDone = !needsOracleDeposit || BigInt(next.oracle.balance || 0) >= oracleNeed || ["deploying", "desk", "fund-desk"].includes(next.stage);
   const deskDone = BigInt(next.desk.balance || 0) >= BigInt(next.desk.need) / 4n;
-  const count = Number(oracleDone) + Number(deskDone);
+  const total = needsOracleDeposit ? 2 : 1;
+  const count = (needsOracleDeposit ? Number(oracleDone) : 0) + Number(deskDone);
   pill.hidden = false;
-  $("setup-pill-text").replaceChildren(el("span", "long", "Fund demo "), `${count}/2`);
-  pill.setAttribute("aria-label", `Demo setup, ${count} of 2 deposits in`);
+  $("setup-pill-text").replaceChildren(el("span", "long", "Fund demo "), `${count}/${total}`);
+  pill.setAttribute("aria-label", `Demo setup, ${count} of ${total} ${total === 1 ? "deposit" : "deposits"} in`);
   pill.setAttribute("aria-expanded", String(setupOpen));
   const steps = el("ol", "setup-steps");
+  if (needsOracleDeposit) {
+    steps.append(
+      setupStep(1, {
+        title: "Price oracle",
+        note: oracleDone
+          ? next.stage === "deploying" ? "Setting up the price feed." : "Signs the price that settles every prediction."
+          : `Send ${int(oracleNeed)} sats. It signs the price that settles every prediction.`,
+        address: next.oracle.wallet,
+        balance: next.oracle.balance,
+        need: next.oracle.need,
+        done: oracleDone,
+        busy: next.stage === "deploying",
+      }),
+    );
+  }
   steps.append(
-    setupStep(1, {
-      title: "Price oracle",
-      note: oracleDone
-        ? next.stage === "deploying" ? "Setting up the price feed." : "Signs the price that settles every prediction."
-        : `Send ${int(BigInt(next.oracle.need))} sats. It signs the price that settles every prediction.`,
-      address: next.oracle.wallet,
-      balance: next.oracle.balance,
-      need: next.oracle.need,
-      done: oracleDone,
-      busy: next.stage === "deploying",
-    }),
-    setupStep(2, {
+    setupStep(needsOracleDeposit ? 2 : 1, {
       title: "Desk",
       note: next.desk.address
         ? `Send about ${int(BigInt(next.desk.need))} sats. It pays winning predictions.`
@@ -2983,7 +2991,11 @@ function renderSetup(next) {
   open.href = next.wallet || WALLET_URL;
   open.target = "_blank";
   open.rel = "noopener";
-  const title = el("p", "setup-title", "Two deposits before the first prediction");
+  const title = el(
+    "p",
+    "setup-title",
+    needsOracleDeposit ? "Two deposits before the first prediction" : "Fund the desk before the first prediction",
+  );
   title.id = "setup-title";
   const foot = el("p", "setup-foot");
   foot.append(open, " · updates as they land");

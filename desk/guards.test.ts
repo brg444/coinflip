@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  adverseSpotCents,
   BASIS_MAX_BPS,
   BEACON_RATCHET_MARGIN_S,
   beaconExpiryRefusal,
@@ -97,4 +98,21 @@ test("predictFillAllowed rejects negative-EV adverse moves during the lock and p
   assert.equal(predictFillAllowed({ kind: 2, spotCents: line + 5_000, lineCents: line, expiry, now: now + 30, vol, stake, payout }), false);
   assert.equal(predictFillAllowed({ kind: 3, spotCents: line - 5_000, lineCents: line, expiry, now: now + 30, vol, stake, payout }), false);
   assert.equal(predictFillAllowed({ kind: 2, spotCents: line, lineCents: line, expiry, now: expiry, vol, stake, payout }), false);
+
+  // SEC-04: live exchange moves +$50 while lagging DIA stays flat at the line -> adverseSpotCents rejects fill.
+  const diaFlat = BigInt(line);
+  const exchUp = BigInt(line + 5_000);
+  const exchDown = BigInt(line - 5_000);
+  assert.equal(adverseSpotCents(2, diaFlat, exchUp), exchUp);
+  assert.equal(adverseSpotCents(2, exchUp, diaFlat), exchUp);
+  assert.equal(adverseSpotCents(3, diaFlat, exchDown), exchDown);
+  assert.equal(adverseSpotCents(3, exchDown, diaFlat), exchDown);
+  assert.equal(
+    predictFillAllowed({ kind: 2, spotCents: Number(adverseSpotCents(2, diaFlat, exchUp)), lineCents: line, expiry, now: now + 15, vol, stake, payout }),
+    false,
+  );
+  assert.equal(
+    predictFillAllowed({ kind: 3, spotCents: Number(adverseSpotCents(3, diaFlat, exchDown)), lineCents: line, expiry, now: now + 15, vol, stake, payout }),
+    false,
+  );
 });

@@ -26,7 +26,8 @@ import { statePacket } from "../protocol/cospend.ts";
 import { bytesToHex } from "../protocol/hex.ts";
 import type { OptionPosition } from "../protocol/messages.ts";
 import { createOracle, dueExpiries, duePositionExpiries, skippedPublish, type HeldCoin, type OracleDeps, type OracleWallet } from "./service.ts";
-import { chooseSample, loadStore, pruneSamples, SAMPLE_HISTORY_S, saveStore, type StoredSample } from "./store.ts";
+import { chooseSample, chooseStrictSample, FIXING_GRACE_S, FIXING_HISTORY_S, loadStore, pruneFixings, pruneSamples, SAMPLE_HISTORY_S, saveStore, windowSettled, type StoredSample } from "./store.ts";
+import { parseOracleFixing } from "../settle/oracle.ts";
 
 const CHECKPOINT_HEX = "03080040b27520dfcaec558c7e78cf3e38b898ba8a43cfb5727266bae32c5c5b3aeb32c558aa0bac";
 
@@ -1062,7 +1063,7 @@ test("publishAnnounced does not leapfrog to a later close when an earlier close 
   }
 });
 
-test("stateless oracle serves canonical Schnorr-signed fixings from GET /api/fixing without a beacon", async () => {
+test("stateless oracle waits for window settlement before freezing, signs idempotently, and prunes old fixings", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "oracle-stateless-"));
   const expiry = 1_700_000_100; // multiple of 300
   const oracleKey = secret(9);
@@ -1089,32 +1090,96 @@ test("stateless oracle serves canonical Schnorr-signed fixings from GET /api/fix
     assert.equal((status.json.args as { adminPk?: string }).adminPk, oraclePkHex);
     assert.equal(status.json.assetId, null);
 
-    // Before expiry + 60, off-grid, and missing sample all fail cleanly.
+    // Before expiry + 60, off-grid, and future closes all fail cleanly.
     assert.equal((await call(oracle.url, `/api/fixing?expiry=${expiry}`)).status, 400);
     clock = expiry + 60;
     assert.equal((await call(oracle.url, `/api/fixing?expiry=${expiry + 60}`)).status, 400);
     assert.equal((await call(oracle.url, `/api/fixing?expiry=${expiry + 300}`)).status, 400);
 
-    // At expiry + 60, returns canonical fixing signed with oracleKey over predictFixDigest.
-    const first = await call(oracle.url, `/api/fixing?expiry=${expiry}`);
+    // At expiry + 60 without a post-window sample (> expiry + 60) and before grace expires, returns 425 (do not prematurely freeze).
+    const waiting = await call(oracle.url, `/api/fixing?expiry=${expiry}`);
+    assert.equal(waiting.status, 425, JSON.stringify(waiting.json));
+    assert.equal(waiting.json.error, "waiting for close print");
+
+    // Once grace elapses (expiry + 60 + FIXING_GRACE_S), concurrent callers get the exact same canonical fixing.
+    clock = expiry + 60 + FIXING_GRACE_S;
+    const [first, concurrent] = await Promise.all([
+      call(oracle.url, `/api/fixing?expiry=${expiry}`),
+      call(oracle.url, `/api/fixing?expiry=${expiry}`),
+    ]);
     assert.equal(first.status, 200, JSON.stringify(first.json));
+    assert.equal(concurrent.status, 200);
+    assert.deepEqual(concurrent.json, first.json);
     assert.equal(first.json.expiry, expiry);
     assert.equal(first.json.price, "9950000");
     assert.equal(first.json.time, expiry + 12);
     assert.equal(first.json.oraclePk, oraclePkHex);
     const digest = predictFixDigest({ expiry: BigInt(expiry), cents: 9_950_000n, time: BigInt(expiry + 12) });
     assert.equal(schnorr.verify(hex.decode(String(first.json.oracleSig)), digest, oraclePk), true);
+    const persisted = await loadStore(dir);
+    assert.equal(persisted.fixings.filter((row) => row.expiry === expiry).length, 1);
 
-    // Repeated call is idempotent and returns the exact same canonical sample & signature.
-    const second = await call(oracle.url, `/api/fixing?expiry=${expiry}`);
-    assert.equal(second.status, 200);
-    assert.deepEqual(second.json, first.json);
-
-    // Missing sample on an already-closed window returns 404.
-    clock = expiry + 360;
+    // Missing sample on an already-closed window past grace returns 404 (never falls back to pre-expiry sample).
+    clock = expiry + 360 + FIXING_GRACE_S;
     assert.equal((await call(oracle.url, `/api/fixing?expiry=${expiry + 300}`)).status, 404);
   } finally {
     await oracle.close();
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test("deterministic fixing waits for a post-window print so a late in-window sample is included", async () => {
+  const expiry = 1_794_696_000;
+  const lag = 60;
+  assert.equal(windowSettled([{ time: expiry + 10 }], expiry, lag, expiry + 60), false);
+  assert.equal(windowSettled([{ time: expiry + 10 }, { time: expiry + 60 }], expiry, lag, expiry + 60), false);
+  assert.equal(windowSettled([{ time: expiry + 10 }, { time: expiry + 61 }], expiry, lag, expiry + 60), true);
+  assert.equal(windowSettled([{ time: expiry + 10 }], expiry, lag, expiry + 60 + FIXING_GRACE_S), true);
+  assert.equal(chooseStrictSample([{ time: expiry - 1, price: "1" }], expiry, lag), null);
+  assert.equal(chooseStrictSample([{ time: expiry + 10, price: "1" }, { time: expiry + 58, price: "2" }, { time: expiry + 62, price: "3" }], expiry, lag)?.price, "2");
+
+  const pruned = pruneFixings([
+    { expiry: expiry - FIXING_HISTORY_S - 1, price: "1", txid: "" },
+    { expiry: expiry - FIXING_HISTORY_S, price: "2", txid: "" },
+  ], expiry);
+  assert.deepEqual(pruned.map((row) => row.price), ["2"]);
+
+  // A real DIA sample inside [expiry, expiry + 60] passes parseOracleFixing, and forged/mismatched signatures fail.
+  const oracleKey = secret(11);
+  const oraclePk = schnorr.getPublicKey(oracleKey);
+  const oraclePkHex = bytesToHex(oraclePk);
+  const recExpiry = Math.floor(RECORDED.time / 300) * 300; // 1794696000; RECORDED.time = 1794696202 -> wait: shift by grid
+  assert.equal(recExpiry % 300, 0);
+  // RECORDED.time is 1794696202 (202s past 1794696000); check parseOracleFixing rejects out-of-window timestamps and forged oracleSig.
+  const badWindow = parseOracleFixing({
+    expiry: recExpiry,
+    price: centsOf(RECORDED.price).toString(),
+    time: RECORDED.time,
+    raw: RECORDED.price.toString(),
+    nonce: RECORDED.nonce.toString(),
+    intentExpiry: RECORDED.intentExpiry,
+    sig: bytesToHex(RECORDED.sig),
+    oracleSig: bytesToHex(schnorr.sign(predictFixDigest({ expiry: BigInt(recExpiry), cents: centsOf(RECORDED.price), time: BigInt(RECORDED.time) }), oracleKey)),
+    oraclePk: oraclePkHex,
+  }, oraclePkHex);
+  assert.equal(badWindow, null);
+
+  // Real recorded print inside [1795593000, 1795593060] passes and rejects wrong oracle key or tampered sig.
+  const inWindow = {
+    expiry: 1_795_593_000,
+    price: "5872826",
+    time: 1_795_593_002,
+    raw: "58728258984125017358336",
+    nonce: "1793790301274586439",
+    intentExpiry: 1_795_596_602,
+    sig: "7980c73f7210211fd2887cc55bd0df6e049ccb57771131a81ed1bb655a6b52887fa15bb26be0e35f0de52badce56190ec3df541814e8652d0f9314a088c26280",
+    oracleSig: bytesToHex(schnorr.sign(predictFixDigest({ expiry: 1_795_593_000n, cents: 5_872_826n, time: 1_795_593_002n }), oracleKey)),
+    oraclePk: oraclePkHex,
+  };
+  const valid = parseOracleFixing(inWindow, oraclePkHex);
+  assert.ok(valid);
+  assert.equal(valid.cents, 5_872_826n);
+  assert.equal(parseOracleFixing(inWindow, "00".repeat(32)), null);
+  assert.equal(parseOracleFixing({ ...inWindow, oracleSig: "aa".repeat(64) }, oraclePkHex), null);
+  assert.equal(parseOracleFixing({ ...inWindow, sig: "bb".repeat(64) }, oraclePkHex), null);
 });

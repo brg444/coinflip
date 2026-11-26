@@ -22,15 +22,15 @@ import { beaconIdOf, bindBeacon } from "../protocol/beacon.ts";
 import { centsOf, fetchPinnedIntent } from "../protocol/dia.ts";
 import { fillQuote } from "../desk/fill.ts";
 import type { QuoteRow } from "../desk/book.ts";
-import { BEACON_READ_FEE, DUST_SATS, EXIT, Q_MIN } from "../protocol/constants.ts";
+import { BEACON_READ_FEE, DUST_SATS, EXIT, PREDICT_READ_FEE, Q_MIN } from "../protocol/constants.ts";
 import { assertServerExit, bindContracts, payoutVtxo } from "../protocol/contracts.ts";
 import { bytesToHex, hexToBytes } from "../protocol/hex.ts";
 import { networkByName } from "../protocol/network.ts";
 import { intentProgram, predictVaultProgram, vaultProgram } from "../protocol/programs.ts";
 import { openSqliteStorage } from "../protocol/sqlite-storage.ts";
 import { createOracle } from "../oracle/service.ts";
-import { parseOracleBeacon } from "../settle/oracle.ts";
-import { refundQuote, settleQuote } from "../settle/vault.ts";
+import { fetchOracleFixing, parseOracleBeacon } from "../settle/oracle.ts";
+import { refundQuote, settlePredictQuote, settleQuote } from "../settle/vault.ts";
 
 /**
  * Option covenant on a local arkade-regtest stack (bitcoin regtest + arkd + emulator).
@@ -320,8 +320,15 @@ test("a prediction fills from the desk float, pays the bettor above the line, an
   });
   const bettorClient = await connect(bettor);
   const deskClient = await connect(desk);
-  const booted = await bootOracle(regtestDir, oracleSecret, indexer, emulator, bettorClient.emulatorKey!);
-  const { oracle, wallet, storage, parsed, issueTxid, beaconScript } = booted;
+  const oracleDir = await mkdtemp(path.join(tmpdir(), "arkade-options-predict-oracle-"));
+  const oracle = await createOracle({
+    dataDir: oracleDir,
+    adminToken: ADMIN,
+    oracleKey: hexToBytes(oracleSecret),
+    stateless: true,
+  });
+  const oraclePk = await SingleKey.fromHex(oracleSecret).xOnlyPublicKey();
+  const oraclePkHex = bytesToHex(oraclePk);
   try {
     const initial = await fetchPinnedIntent();
     const line = centsOf(initial.price) - 50_000n;
@@ -334,7 +341,6 @@ test("a prediction fills from the desk float, pays the bettor above the line, an
     // The page pays the bettor at the taproot key of their own Arkade address.
     const bettorVtxo = payoutVtxo(await bettor.xOnlyPublicKey(), serverKey, EXIT);
     const bettorKey = bettorVtxo.tweakedPublicKey;
-    const beacon = beaconIdOf(asset.AssetId.fromString(parsed.beacon.assetId));
     const shared = {
       kind: 2 as const,
       strike: line,
@@ -345,8 +351,8 @@ test("a prediction fills from the desk float, pays the bettor above the line, an
       writerPk: deskPk,
       holderPk: bettorKey,
       holderPayoutKey: bettorKey,
-      beacon,
-      readFee: BEACON_READ_FEE,
+      oraclePk,
+      readFee: PREDICT_READ_FEE,
       serverKey,
       emulatorKey: bettorClient.emulatorKey!,
     };
@@ -377,7 +383,7 @@ test("a prediction fills from the desk float, pays the bettor above the line, an
 
     const deskBefore = ids(await scriptCoins(indexer, deskScript.pkScript));
     const row: QuoteRow = {
-      ...quoteRow(fill, now, Number(now + 3_600n), deskPk, bettorKey, issueTxid),
+      ...quoteRow(fill, now, Number(now + 3_600n), deskPk, bettorKey, "00".repeat(32)),
       collateral: payout.toString(),
       premium: stake.toString(),
       kind: 2,
@@ -385,6 +391,7 @@ test("a prediction fills from the desk float, pays the bettor above the line, an
       expiry: Number(expiry),
       writerPkScript: bytesToHex(fill.writerPkScript),
       holderPkScript: bytesToHex(fill.holderPkScript),
+      oraclePubkey: oraclePkHex,
     };
     const filled = await fillQuote({
       client: deskClient,
@@ -402,7 +409,7 @@ test("a prediction fills from the desk float, pays the bettor above the line, an
     await waitFor(async () => (await scriptCoins(indexer, deskScript.pkScript)).some((coin) => BigInt(coin.value) >= payout), "desk float for void");
 
     const voidRow: QuoteRow = {
-      ...quoteRow(voidFill, now, Number(now + 3_600n), deskPk, bettorKey, issueTxid),
+      ...quoteRow(voidFill, now, Number(now + 3_600n), deskPk, bettorKey, "00".repeat(32)),
       rfqId: "fe".repeat(32),
       collateral: payout.toString(),
       premium: stake.toString(),
@@ -411,6 +418,7 @@ test("a prediction fills from the desk float, pays the bettor above the line, an
       expiry: Number(voidTerms.expiry),
       writerPkScript: bytesToHex(voidFill.writerPkScript),
       holderPkScript: bytesToHex(voidFill.holderPkScript),
+      oraclePubkey: oraclePkHex,
     };
     const voidFilled = await fillQuote({
       client: deskClient,
@@ -479,7 +487,7 @@ test("a prediction fills from the desk float, pays the bettor above the line, an
     await waitFor(async () => fresh(await scriptCoins(indexer, deskScript.pkScript), deskBeforeVoid, payout - stake), "void house share");
     await waitFor(async () => (await voidVault.getUtxos()).length === 0, "predict void vault spent");
 
-    const expiryLag = Number(parsed.beacon.expiryLag);
+    const expiryLag = 60;
     await sleepUntil(Number(expiry), "predict sample");
     const intent = await fetchWindowIntent(Number(expiry), expiryLag);
     const sample = (await oracleCall(oracle.url, "/api/intent", {
@@ -491,19 +499,15 @@ test("a prediction fills from the desk float, pays the bettor above the line, an
     })).json;
     const cents = centsOf(intent.price);
     assert.equal(sample.price, cents.toString(), `sample ${JSON.stringify(sample)}`);
-    await sleepUntil(Number(expiry) + expiryLag, "predict publish");
-    const published = (await oracleCall(oracle.url, "/api/publish", { expiry: Number(expiry) })).json;
-    console.log("predict publish", published.txid, published.price);
-    assert.equal(published.price, cents.toString());
-    await waitFor(async () => {
-      const page = await indexer.getVtxos({ scripts: [beaconScript], spendableOnly: true });
-      return (page.vtxos ?? []).some((coin) => holdsUnit(coin, parsed.beacon.assetId) && BigInt(coin.value) === DUST_SATS);
-    }, "beacon after predict publish");
+    await sleepUntil(Number(expiry) + expiryLag + 31, "predict fixing");
+    const fetched = await fetchOracleFixing(oracle.url, Number(expiry), oraclePkHex);
+    assert.ok(fetched.fixing, `fixing missing: ${fetched.error ?? fetched.status}`);
+    assert.equal(fetched.fixing.cents, cents);
 
     const bettorBefore = ids(await scriptCoins(indexer, fill.holderPkScript));
-    let settled: Awaited<ReturnType<typeof settleQuote>> | undefined;
+    let settled: Awaited<ReturnType<typeof settlePredictQuote>> | undefined;
     for (let attempt = 1; attempt <= 20; attempt += 1) {
-      settled = await settleQuote({
+      settled = await settlePredictQuote({
         chain: indexer,
         serverKey,
         emulatorKey: bettorClient.emulatorKey!,
@@ -511,7 +515,7 @@ test("a prediction fills from the desk float, pays the bettor above the line, an
         checkpoint: deskClient.checkpoint,
         fillTxid: filled.txid,
         terms: { ...shared, deadline: now + 3_600n },
-        beacon: parsed.beacon,
+        fixing: fetched.fixing,
         now: Math.floor(Date.now() / 1000),
       });
       console.log("predict settle", settled.result, "txid" in settled ? settled.txid : "", `(${attempt})`);
@@ -521,18 +525,16 @@ test("a prediction fills from the desk float, pays the bettor above the line, an
     assert.ok(settled && settled.result === "settled" && settled.price != null, `settle ${settled?.result}`);
     if (!settled || settled.result !== "settled" || settled.price == null) return;
     assert.equal(settled.price, cents);
-    assert.equal(settled.holder, payout - BEACON_READ_FEE);
+    assert.equal(settled.holder, payout);
     assert.equal(settled.writer, 0n);
     await waitFor(
-      async () => fresh(await scriptCoins(indexer, fill.holderPkScript), bettorBefore, payout - BEACON_READ_FEE),
+      async () => fresh(await scriptCoins(indexer, fill.holderPkScript), bettorBefore, payout),
       "payout to the bettor",
     );
     await waitFor(async () => (await vault.getUtxos()).length === 0, "predict vault spent");
     console.log("predict settled", settled.txid, "bettor", settled.holder?.toString());
   } finally {
     await oracle.close();
-    await wallet.dispose();
-    storage.db.close();
   }
 });
 

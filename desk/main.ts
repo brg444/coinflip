@@ -55,7 +55,8 @@ import { countFill, countQuote, emptyHour, hourLine, msUntilNextHour } from "./d
 import { finalizeDeskSpends, pendingOutpoints } from "./finalize.ts";
 import { maintainDeskCoins } from "./maintain.ts";
 import { fillQuote, type PredictFillVerdict } from "./fill.ts";
-import { beaconExpiryRefusal, coinOutlives, minCoinExpiry, minFillCoinExpiry, parseRatchetMargin, predictFillAllowed, predictSpot } from "./guards.ts";
+import { adverseSpotCents, beaconExpiryRefusal, coinOutlives, minCoinExpiry, minFillCoinExpiry, parseRatchetMargin, predictFillAllowed, predictSpot } from "./guards.ts";
+import { openQuoteCapRefusal, RfqLimiter } from "./rate-limit.ts";
 import { spotCents } from "./spot.ts";
 
 /**
@@ -101,6 +102,7 @@ if (secret.length !== 32) throw new Error("DESK_KEY must be 32 bytes");
 const requestedNetwork = process.env.NETWORK?.trim();
 const defaults = networkProfile(requestedNetwork);
 const dataDir = process.env.DATA_DIR?.trim() || "data";
+const host = process.env.HOST?.trim() || "127.0.0.1";
 const port = Number(process.env.PORT ?? "8788");
 const arkUrl = process.env.ARK_URL?.trim() || defaults.arkUrl;
 const emulatorUrl = process.env.EMULATOR_URL?.trim() || defaults.emulatorUrl;
@@ -278,6 +280,7 @@ function backupPubkeyFromEnv(defaultKey: Uint8Array, deskKey: Uint8Array, isMain
   const hex = raw || primaryHex;
   if (!/^[0-9a-f]{64}$/.test(hex)) throw new Error("BACKUP_EMULATOR_PUBKEY must be 64-hex x-only");
   if (hex === bytesToHex(xOnly(deskKey))) throw new Error("BACKUP_EMULATOR_PUBKEY must not match DESK_KEY");
+  if (envOraclePubkey && hex === envOraclePubkey) throw new Error("BACKUP_EMULATOR_PUBKEY must not match ORACLE_PUBKEY");
   return hex;
 }
 const backupPubkeyHex = backupPubkeyFromEnv(client.emulatorKey, holderPk, netProfile.isMainnet);
@@ -439,7 +442,15 @@ async function offer(row: QuoteRow, from: string) {
  * watch most of the window before paying.
  */
 async function onPredict(message: RfqRequest & { profile: PredictRequestProfile }, from: string, now: number) {
+  if (oracleKeyMismatch || !oraclePubkey || oraclePubkey === backupPubkeyHex) {
+    await refuse(from, message.rfq_id, oracleKeyMismatch ? "oracle mismatch" : "oracle");
+    return;
+  }
   await refreshOracleStatus();
+  if (oracleKeyMismatch || !oraclePubkey || oraclePubkey === backupPubkeyHex) {
+    await refuse(from, message.rfq_id, oracleKeyMismatch ? "oracle mismatch" : "oracle");
+    return;
+  }
   let tick;
   try {
     tick = await spotCents();
@@ -466,11 +477,12 @@ async function onPredict(message: RfqRequest & { profile: PredictRequestProfile 
     }
   }
   const kind = message.profile.kind;
+  const quoteSpot = adverseSpotCents(kind, priced.cents, tick.cents);
   let multiplier: number | null;
   if (volOverride != null) {
     multiplier = predictMultiplier({
       kind,
-      spotCents: Number(priced.cents),
+      spotCents: Number(quoteSpot),
       lineCents: message.profile.strike,
       years: Math.max(message.profile.expiry - now, 1) / (365 * 24 * 60 * 60),
       vol: volOverride,
@@ -489,7 +501,7 @@ async function onPredict(message: RfqRequest & { profile: PredictRequestProfile 
       lineCents: message.profile.strike,
       expiry: message.profile.expiry,
       now,
-      spotCents: Number(priced.cents),
+      spotCents: Number(quoteSpot),
       points,
       edge,
     });
@@ -554,6 +566,8 @@ async function onPredict(message: RfqRequest & { profile: PredictRequestProfile 
   await offer(row, from);
 }
 
+const rfqLimiter = new RfqLimiter();
+
 async function onRequest(message: RfqRequest, from: string) {
   const now = Math.floor(Date.now() / 1000);
   const existing = book.get(message.rfq_id);
@@ -565,6 +579,15 @@ async function onRequest(message: RfqRequest, from: string) {
   }
   if (draining) {
     await refuse(from, message.rfq_id, "draining");
+    return;
+  }
+  if (!rfqLimiter.allow(from)) {
+    await refuse(from, message.rfq_id, "rate limit");
+    return;
+  }
+  const capRefusal = openQuoteCapRefusal(book.list(), from, now);
+  if (capRefusal) {
+    await refuse(from, message.rfq_id, capRefusal);
     return;
   }
   const bad = requestRefusal(message, now, quoteLimits);
@@ -680,13 +703,14 @@ async function onRequest(message: RfqRequest, from: string) {
 
 async function onStatus(rfqId: string, from: string) {
   const row = book.get(rfqId);
-  const message: RfqStatus = row
+  const owned = row && row.clientPubkey === from ? row : undefined;
+  const message: RfqStatus = owned
     ? {
       v: 1,
       type: "rfq_status",
       rfq_id: rfqId,
-      status: row.status,
-      ...(row.fillTxid ? { txid: row.fillTxid } : {}),
+      status: owned.status,
+      ...(owned.fillTxid ? { txid: owned.fillTxid } : {}),
     }
     : { v: 1, type: "rfq_status", rfq_id: rfqId, status: "expired" };
   await transport.publish(from, message);
@@ -704,16 +728,23 @@ async function onMessage({ from, message }: Incoming) {
 let beaconExpiryLag: bigint | null = null;
 let beaconExpiry: number | null = null;
 let oraclePubkey: string | null = envOraclePubkey;
+let oracleKeyMismatch = false;
 let oracleSpot: OracleLatest | null = null;
 let oracleStatusAt = 0;
 
 async function refreshOracleStatus(force = false) {
-  if (!force && oraclePubkey && (!beaconDisplay || beaconExpiryLag != null) && Date.now() - oracleStatusAt < 10_000) return;
+  if (!force && oraclePubkey && !oracleKeyMismatch && (!beaconDisplay || beaconExpiryLag != null) && Date.now() - oracleStatusAt < 10_000) return;
   try {
     const body = await fetchOracleStatus(oracleUrl, AbortSignal.timeout(10_000));
     const keyInfo = parseOracleKey(body);
     if (keyInfo) {
-      if (!envOraclePubkey || envOraclePubkey === keyInfo.oraclePkHex) {
+      if (envOraclePubkey && envOraclePubkey !== keyInfo.oraclePkHex) {
+        if (!oracleKeyMismatch) {
+          console.error(`oracle pubkey mismatch: expected ${envOraclePubkey} got ${keyInfo.oraclePkHex}, refusing predict quotes`);
+        }
+        oracleKeyMismatch = true;
+      } else {
+        oracleKeyMismatch = false;
         oraclePubkey = keyInfo.oraclePkHex;
       }
       beaconExpiryLag = keyInfo.expiryLag;
@@ -940,20 +971,22 @@ function queueFill(rfqId: string) {
 
 async function checkPredictFill(row: QuoteRow, now: number): Promise<PredictFillVerdict> {
   if (!isPredict(row.kind)) return "allow";
-  await refreshOracleStatus();
+  await refreshOracleStatus(true);
+  if (oracleKeyMismatch) return "decline";
   let tick;
   try {
-    tick = await spotCents();
+    tick = await spotCents(Date.now(), { fresh: true });
     spot = tick;
   } catch {
     return "retry";
   }
   const priced = predictSpot({ oracle: oracleSpot, exchangeCents: tick.cents, now });
   if (!priced.ok) return priced.reason === "price basis" ? "decline" : "retry";
+  const evalSpot = adverseSpotCents(row.kind, priced.cents, tick.cents);
   let vol = volOverride;
   if (vol == null) {
     try {
-      vol = predictVol(await fetchSurface(), Number(priced.cents) / 100, now);
+      vol = predictVol(await fetchSurface(), Number(evalSpot) / 100, now);
     } catch {
       return "retry";
     }
@@ -961,7 +994,7 @@ async function checkPredictFill(row: QuoteRow, now: number): Promise<PredictFill
   }
   return predictFillAllowed({
     kind: row.kind,
-    spotCents: Number(priced.cents),
+    spotCents: Number(evalSpot),
     lineCents: Number(row.strike),
     expiry: row.expiry,
     now,
@@ -1077,7 +1110,16 @@ async function housekeeping() {
       queueFill(row.rfqId);
     }
     const finished = book.prune(Math.floor(Date.now() / 1000));
-    for (const row of finished) await forgetScript(row.rfqId);
+    for (const row of finished) {
+      await forgetScript(row.rfqId);
+      announced.delete(row.rfqId);
+      shortLogged.delete(row.rfqId);
+    }
+    while (announced.size > 5_000) {
+      const oldest = announced.values().next().value;
+      if (oldest === undefined) break;
+      announced.delete(oldest);
+    }
     if (dropped || finished.length) {
       await book.save();
       if (dropped) console.log("dropped", dropped, "quotes with no beacon");
@@ -1195,7 +1237,14 @@ function deskAuthorized(header: string | undefined): boolean {
 }
 
 const server = http.createServer((req, res) => {
-  const parsed = new URL(req.url ?? "/", "http://127.0.0.1");
+  let parsed: URL;
+  try {
+    parsed = new URL(req.url ?? "/", "http://127.0.0.1");
+  } catch {
+    res.writeHead(400, { "content-type": "application/json", "cache-control": "no-store" });
+    res.end(JSON.stringify({ error: "bad request" }));
+    return;
+  }
   const path = parsed.pathname;
   let status = 200;
   let body: string;
@@ -1220,18 +1269,18 @@ const server = http.createServer((req, res) => {
   }
   res.writeHead(status, {
     "content-type": "application/json",
-    "access-control-allow-origin": "*",
+    "cache-control": "no-store",
   });
   res.end(body);
 });
 
-server.listen(port, () => {
+server.listen(port, host, () => {
   console.log(`commit ${revision()}`);
   console.log(`desk ${pubkey}`);
   console.log(`address ${address}`);
   if (oraclePubkey) console.log(`oracle ${oraclePubkey}`);
   if (beaconDisplay) console.log(`beacon ${beaconDisplay.txid}:${beaconDisplay.gidx}`);
-  console.log(`status http://127.0.0.1:${port}/status`);
+  console.log(`status http://${host}:${port}/status`);
 });
 
 const timer = setInterval(() => {

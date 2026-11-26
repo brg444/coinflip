@@ -51,6 +51,7 @@ const positionsFile = process.env.POSITIONS?.trim() || "";
 const oracleUrl = serviceOrigin(required("ORACLE_URL"));
 const oracleAdmin = process.env.ORACLE_ADMIN?.trim() ?? "";
 const dataDir = process.env.DATA_DIR?.trim() || "data";
+const host = process.env.HOST?.trim() || "127.0.0.1";
 const port = Number(process.env.PORT ?? "8790");
 const arkUrl = process.env.ARK_URL?.trim() || defaults.arkUrl;
 const emulatorUrl = process.env.EMULATOR_URL?.trim() || defaults.emulatorUrl;
@@ -93,8 +94,13 @@ function matchesOurOracle(oraclePkHex: string | undefined): boolean {
   return oraclePkHex.toLowerCase() === oraclePkFilter;
 }
 
+const MAX_NOTED_KEYS = 2_000;
 function once(key: string, line: string, error = false) {
   if (noted.has(key)) return;
+  if (noted.size >= MAX_NOTED_KEYS) {
+    const oldest = noted.values().next().value;
+    if (oldest !== undefined) noted.delete(oldest);
+  }
   noted.add(key);
   if (error) console.error(line);
   else console.log(line);
@@ -245,6 +251,9 @@ async function progressDue() {
 
   const lag = Number(keyInfo?.expiryLag ?? (parsedBeacon.ok ? parsedBeacon.beacon.expiryLag : 60n));
   const nowMs = Date.now();
+  for (const [exp, entry] of asked) {
+    if (nowMs - entry.at > 2 * 60 * 60 * 1000) asked.delete(exp);
+  }
   let blockedExpiry: number | null = null;
   const fixingCache = new Map<number, { status: number; fixing: OracleFixing | null; error?: string }>();
 
@@ -418,13 +427,20 @@ async function tick() {
 }
 
 const server = http.createServer((req, res) => {
-  const url = req.url?.split("?")[0];
-  if (url !== "/" && url !== "/status") {
-    res.writeHead(404, { "content-type": "application/json" });
+  let pathname: string;
+  try {
+    pathname = new URL(req.url ?? "/", "http://127.0.0.1").pathname;
+  } catch {
+    res.writeHead(400, { "content-type": "application/json", "cache-control": "no-store" });
+    res.end(JSON.stringify({ error: "bad request" }));
+    return;
+  }
+  if (pathname !== "/" && pathname !== "/status") {
+    res.writeHead(404, { "content-type": "application/json", "cache-control": "no-store" });
     res.end(JSON.stringify({ error: "not found" }));
     return;
   }
-  res.writeHead(200, { "content-type": "application/json", "access-control-allow-origin": "*" });
+  res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
   res.end(JSON.stringify({
     commit: revision(),
     network: profile.id,
@@ -435,11 +451,11 @@ const server = http.createServer((req, res) => {
   }));
 });
 
-server.listen(port, () => {
+server.listen(port, host, () => {
   console.log(`commit ${revision()}`);
   console.log(`oracle ${oracleUrl}`);
   console.log(`relay ${relay}`);
-  console.log(`status http://127.0.0.1:${port}/status`);
+  console.log(`status http://${host}:${port}/status`);
 });
 
 try {

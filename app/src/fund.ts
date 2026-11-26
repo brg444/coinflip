@@ -273,15 +273,21 @@ export function verifiedSignerKey(
     : undefined;
 }
 
+let ephemeralSessionHex: string | null = null;
+
+/** In-memory throwaway key required only to satisfy Arkade.connect for unsigned/permissionless browser paths. */
 function sessionHex(): string {
-  const existing = storedHex(SESSION_KEY);
-  if (existing) return existing;
+  try {
+    globalThis.localStorage?.removeItem(SESSION_KEY);
+  } catch {
+    // Ignore restricted storage environments.
+  }
+  if (ephemeralSessionHex) return ephemeralSessionHex;
   const bytes = new Uint8Array(32);
   crypto.getRandomValues(bytes);
   if (bytes.every((byte) => byte === 0)) bytes[0] = 1;
-  const hex = bytesToHex(bytes);
-  globalThis.localStorage?.setItem(SESSION_KEY, hex);
-  return hex;
+  ephemeralSessionHex = bytesToHex(bytes);
+  return ephemeralSessionHex;
 }
 
 export async function writerBinding(address: string, pubkey?: string, exit: bigint = ACTIVE_PROFILE.exit): Promise<WriterBinding> {

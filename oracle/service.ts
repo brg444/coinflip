@@ -16,7 +16,7 @@ import { centsOf, intentSigned, type DiaIntent } from "../protocol/dia.ts";
 import { bytesToHex, hexToBytes } from "../protocol/hex.ts";
 import type { OptionPosition } from "../protocol/messages.ts";
 import { positionFromAnnouncement, termsFor } from "../settle/positions.ts";
-import { chooseSample as pickSample, loadStore, pruneSamples, saveStore, type StoredSample } from "./store.ts";
+import { chooseSample as pickSample, chooseStrictSample, loadStore, pruneFixings, pruneSamples, saveStore, windowSettled, type StoredSample } from "./store.ts";
 
 /**
  * Testnet publisher. It keeps a day of DIA OracleUpdate intents and spends
@@ -307,7 +307,13 @@ export async function createOracle(deps: OracleDeps) {
         adminPk: adminPk ? bytesToHex(adminPk) : null,
         exit: Number(exitDelay),
       },
-      fixings: store.fixings,
+      fixings: store.fixings.slice(-20).map(({ expiry, price, time, txid }) => ({
+        expiry,
+        price,
+        ...(time != null ? { time } : {}),
+        txid,
+      })),
+      fixingCount: store.fixings.length,
       samples: store.samples.length,
       latest,
     };
@@ -419,7 +425,9 @@ export async function createOracle(deps: OracleDeps) {
   }
 
   function keepRecent() {
-    store.samples = pruneSamples(store.samples, now());
+    const current = now();
+    store.samples = pruneSamples(store.samples, current);
+    store.fixings = pruneFixings(store.fixings, current);
   }
 
   async function recordIntent(intent: DiaIntent) {
@@ -501,6 +509,7 @@ export async function createOracle(deps: OracleDeps) {
     if (!Number.isSafeInteger(expiryN)) throw new HttpError(400, "expiry");
     if (BigInt(now()) < expiry + EXPIRY_LAG) throw new HttpError(400, "before expiry time");
 
+    keepRecent();
     const existing = store.fixings.find(
       (row) => row.expiry === expiryN && typeof row.time === "number" && row.raw && row.sig && row.nonce && typeof row.intentExpiry === "number",
     );
@@ -525,10 +534,12 @@ export async function createOracle(deps: OracleDeps) {
       };
     }
 
-    const chosen = chooseSample(expiryN);
+    if (!windowSettled(store.samples, expiryN, Number(EXPIRY_LAG), now())) {
+      throw new HttpError(425, "waiting for close print");
+    }
+
+    const chosen = chooseStrictSample(store.samples, expiryN, Number(EXPIRY_LAG));
     if (!chosen) throw new HttpError(404, "no sample");
-    if (chosen.time < expiryN) throw new HttpError(404, "sample before expiry");
-    if (chosen.time > expiryN + Number(EXPIRY_LAG)) throw new HttpError(404, "sample after close");
     if (!chosen.raw || !chosen.sig || !chosen.nonce || typeof chosen.intentExpiry !== "number") {
       throw new HttpError(404, "no sample");
     }
@@ -767,7 +778,13 @@ export async function createOracle(deps: OracleDeps) {
   }
 
   async function handle(req: http.IncomingMessage, res: http.ServerResponse) {
-    const parsed = new URL(req.url ?? "/", "http://oracle");
+    let parsed: URL;
+    try {
+      parsed = new URL(req.url ?? "/", "http://oracle");
+    } catch {
+      sendJson(res, 400, { error: "bad request" });
+      return;
+    }
     const url = parsed.pathname;
     try {
       if (req.method === "GET" && url === "/") return sendFile(res, "index.html", "text/html; charset=utf-8");

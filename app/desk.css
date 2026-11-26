@@ -313,6 +313,8 @@ button.chip.fixed:hover { transform: none; background: var(--lav); }
 .acts { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 18px; margin-top: 18px; }
 .status { margin: 12px 0 0; color: var(--ink2); font-size: 14px; line-height: 1.45; }
 .status:empty { display: none; }
+.warn { margin: 10px 0 0; padding: 9px 12px; background: var(--peach); color: var(--ink); box-shadow: inset 3px 0 0 var(--orange); font-size: 13.5px; line-height: 1.45; }
+.warn:empty { display: none; }
 .fault { display: block; margin-top: 6px; font: 400 12px/1.45 var(--mono); color: var(--ink); white-space: pre-wrap; overflow-wrap: anywhere; user-select: all; }
 .pill { display: inline-flex; align-items: center; height: 26px; padding: 0 10px; background: var(--fill); color: var(--ink2); font: 500 12.5px/1 var(--mono); white-space: nowrap; }
 .pill.ok { background: var(--lav); color: var(--purple); }

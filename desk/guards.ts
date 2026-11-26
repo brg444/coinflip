@@ -6,8 +6,8 @@ const YEAR = 365 * 24 * 60 * 60;
 
 export const COIN_EXPIRY_MARGIN_S = 300;
 export const BEACON_RATCHET_MARGIN_S = 0;
-export const ORACLE_SPOT_MAX_AGE_S = 180;
-export const BASIS_MAX_BPS = 100;
+export const ORACLE_SPOT_MAX_AGE_S = 90;
+export const BASIS_MAX_BPS = 50;
 
 export function parseRatchetMargin(raw?: string): number {
   const trimmed = raw?.trim();
@@ -65,7 +65,16 @@ export function predictSpot(opts: {
   return { ok: true, cents: opts.oracle.cents };
 }
 
-// Refuse fills whose expected desk payout exceeds the bettor's stake after a favorable move during the 60s lock.
+/**
+ * Most adverse spot for the desk between DIA and live exchange median:
+ * higher spot favors a Higher (kind 2) bettor; lower spot favors a Lower (kind 3) bettor.
+ */
+export function adverseSpotCents(kind: PredictKind, oracleCents: bigint, exchangeCents: bigint): bigint {
+  if (kind === 2) return oracleCents >= exchangeCents ? oracleCents : exchangeCents;
+  return oracleCents <= exchangeCents ? oracleCents : exchangeCents;
+}
+
+// Refuse fills whose expected desk payout exceeds the bettor's stake after a favorable move during the lock.
 export function predictFillAllowed(opts: {
   kind: PredictKind;
   spotCents: number;

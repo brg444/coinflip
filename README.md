@@ -4,9 +4,9 @@ Predict whether Bitcoin closes higher or lower than a line in five minutes. Each
 
 Forked from [ArkLabsHQ/arkade-options](https://github.com/ArkLabsHQ/arkade-options), which keeps its cash-settled covered calls and limited puts. Predictions are in [Predict](#predict); `pnpm demo` runs the full stack on one machine ([Demo](#demo)).
 
-The contracts are the engine. `PredictVault` (`PredictVaultV2`), `OptionVault`, `OptionIntent`, and `AttestationBeacon` live in [contracts/](contracts/) (see [contracts/README.md](contracts/README.md)) and export through `arkade-options/contracts`.
+The contracts are the engine. `PredictVault` (`PredictVaultV3`), `OptionVault`, `OptionIntent`, and `AttestationBeacon` live in [contracts/](contracts/) (see [contracts/README.md](contracts/README.md)) and export through `arkade-options/contracts`.
 
-Day-to-day work is maintaining desk float and monitoring renewal alerts. The oracle streams DIA `BTC/USD` prints and attests one canonical fixing per 5-minute close; the settler spends each expired vault with the beacon; an automatic watcher renews the beacon VTXO before its 30-day batch expiry. See [docs/mainnet-runbook.md](docs/mainnet-runbook.md) for Bitcoin mainnet operations and [docs/runbook.md](docs/runbook.md) for general bootstrap steps.
+Day-to-day work is maintaining desk float and monitoring alerts. The stateless Predict oracle streams DIA `BTC/USD` prints and serves one canonical Schnorr-signed fixing per 5-minute close (`GET /api/fixing?expiry=...`) once the close window settles; the settler spends each expired `PredictVaultV3` standalone (1 input, zero read fee). See [docs/mainnet-runbook.md](docs/mainnet-runbook.md) for Bitcoin mainnet operations and [docs/runbook.md](docs/runbook.md) for general bootstrap steps.
 
 ## Live (Bitcoin Mainnet Canary)
 
@@ -47,11 +47,9 @@ railway ssh --service coinflip-mainnet -- wget -qO- http://127.0.0.1:8788/status
 railway ssh --service coinflip-mainnet -- wget -qO- http://127.0.0.1:8790/status
 ```
 
-- **Balances.** Oracle `balance` is spendable sats on the admin wallet (the 1-unit beacon coin is separate). Desk `balance` is the float available to lock full payouts (`collateral`) for predictions; the desk refuses quotes it cannot cover with `float short`.
-- **DIA feed & canonical fixing.** The oracle streams DIA `OracleUpdate` prints for `BTC/USD` and retains 24 hours of history (`GET /api/prices?from=<unix>&to=<unix>`). Once `expiry + 60` has passed, `attest` records the last DIA sample in `[expiry, expiry + 60]` on the beacon. Each `attest` requires **both** the pinned DIA EIP-712 signature and an `adminPk` Schnorr signature, enforces the 5-minute grid (`expiry % 300 == 0`), and enforces strictly advancing close times (`expiry > lastExpiry`) so nobody can front-run a close or flush and overwrite an earlier fixing.
-- **Chronological settlement.** The beacon retains the eight newest fixings, and because closes advance monotonically an evicted close cannot be re-attested. Both the oracle (`publishAnnounced`) and settler (`progressDue`) process due closes strictly oldest-first and pause advancing past transient failures so a later close cannot lock out an earlier one. The settler spends each expired vault together with the beacon coin (`1,000`-sat read fee comes out of vault collateral); anyone can run a settler (`ORACLE_URL=... pnpm settle`) with no keys or fee wallet.
-- **Automated 30-day beacon renewal.** `scripts/beacon-renewal.mjs` runs every 15 minutes inside `scripts/demo.mjs`. When `beaconExpiry` is within `BEACON_RENEW_BEFORE_S` (default 5 days on mainnet, inside the `<= 29`-day free renewal window), it pauses quoting (`POST /drain?enabled=1`), waits until live quotes and open vaults settle (`POST /api/renew` refuses with `409 live vault open` while any filled vault VTXO is still unspent), runs `reboard` + `reseed` (preserving `BEACON_TXID`, incrementing `round`, and keeping monotonic `lastExpiry`), and always resumes quoting in `finally`. Failures, `beaconExpiry == 0`, or upcoming `arkd` `deprecatedSigners` cutoffs emit `[ALERT]` logs and optional `ALERT_WEBHOOK_URL` webhooks.
-- **Manual admin controls.** Inside the container, `POST /drain?enabled=1|0` on port `8788`, `POST /api/publish` and `POST /api/renew` on port `8789` all require `Authorization: Bearer $ORACLE_ADMIN`. See [docs/mainnet-runbook.md](docs/mainnet-runbook.md) for manual renewal, `scripts/migrate-beacon.ts`, and `scripts/backup-refund.ts`.
+- **Balances.** The stateless Predict oracle needs no on-Arkade funding or beacon coin. Desk `balance` is the float available to lock full payouts (`collateral`) for predictions; the desk refuses quotes it cannot cover with `float short`.
+- **DIA feed & canonical fixing.** The oracle streams DIA `OracleUpdate` prints for `BTC/USD` and retains 24 hours of sample history (`GET /api/prices?from=<unix>&to=<unix>`) and 48 hours of canonical fixings. Once a print strictly past `expiry + 60` arrives (or a 30-second fallback grace period elapses), `GET /api/fixing?expiry=<unix>` freezes the newest in-window DIA sample in `[expiry, expiry + 60]` and co-signs `predictFixDigest` with `ORACLE_KEY`. Each `PredictVaultV3.settle()` verifies **both** the pinned DIA EIP-712 signature and `oraclePk`'s Schnorr signature directly on the stack (1 input, zero read fee, parallel settlement); anyone can run a settler (`ORACLE_URL=... pnpm settle`) with no keys or fee wallet.
+- **Manual admin controls.** Inside the container, `POST /drain?enabled=1|0` on port `8788` and oracle admin routes on port `8789` require `Authorization: Bearer $ORACLE_ADMIN`. All internal service ports (`8788`, `8789`, `8790`) bind to `127.0.0.1` by default. See [docs/mainnet-runbook.md](docs/mainnet-runbook.md) for operational controls and `scripts/backup-refund.ts`.
 - **Desk logs.** One line per UTC hour (`hour N quotes, N filled, N premium paid, N collateral locked`), plus immediate logs on fills. Set `DESK_LOG=debug` to log every quote.
 
 ## Beacon args
@@ -82,24 +80,24 @@ railway ssh --service coinflip-mainnet -- wget -qO- http://127.0.0.1:8790/status
 
 ## Predict
 
-All-or-nothing calls on where Bitcoin closes at the end of a 5-minute window: higher (kind `2`) or lower (kind `3`) than the window's opening line. The page route is `#/predict`.
+All-or-nothing calls on where Bitcoin closes at the end of a 5-minute (or 15-minute) window: higher (kind `2`) or lower (kind `3`) than your strike line. The page route is `#/predict`.
 
-- **Contract (`PredictVaultV2`).** [contracts/predict_vault.ark](contracts/predict_vault.ark) reads the single committed fixing in `AttestationBeacon` (`1,000`-sat read fee) so neither side can cherry-pick among DIA prints in `[expiry, expiry + 60]`. Above the line (higher) or below it (lower), the holder receives `collateral - readFee`; an exact tie pays the desk. Three-tier exit/void model:
-  - **Tier 1 (Arkade):** `settle()`, `reboard()` (v2 intent proof via `executord` or page), `refund()` after `expiry + 24h` (`voidAfter = 86,400s`), and cooperative 2-of-2 `close()`.
+- **Contract (`PredictVaultV3`).** [contracts/predict_vault.ark](contracts/predict_vault.ark) settles standalone (1 input, zero read fee) by verifying both the pinned DIA EIP-712 price signature and `oraclePk`'s Schnorr signature over `sha256("BTCUSD-FIX" || "fix" || expiry || cents || time)` directly on the stack. Above the line (higher) or below it (lower), the holder receives the full `collateral`; an exact tie pays the desk. Three-tier exit/void model:
+  - **Tier 1 (Arkade):** `settle(price, time, nonce, intentExpiry, sig, oracleSig)`, `reboard()` (v2 intent proof via `executord` or page), `refund()` after `expiry + 24h` (`voidAfter = 86,400s`), and cooperative 2-of-2 `close()`.
   - **Tier 2 (Bitcoin L1 backup):** `refundBackup(backupSig)` via tweaked `backupPk` after `fallbackDelay` (`605,184s` / 7d on mainnet; `22,016s` / ~6.1h on Mutinynet). Because Bitcoin L1 does not execute the Arkade VM, after `fallbackDelay` the backup key custodian is trusted to sign only valid void refunds (`scripts/backup-refund.ts`).
   - **Tier 3 (Bitcoin L1 mutual):** 2-of-2 `unilateral(writerSig, holderSig)` after `finalExitDelay` (`691,200s` / 8d on mainnet; `108,032s` / ~30h on Mutinynet).
-- **Fill & auto-refund.** `OptionIntent` side `1`. The bettor funds the intent with `stake`; the desk `finalize`s by taking `stake` and locking full `collateral` in `PredictVaultV2`. Unfilled stakes can be cancelled after `deadline` via `cancel()` (`OP_CHECKTIME`) or automatically via `executord` (`cancelCltv`).
-- **Windows & lines.** Closes sit on the 5-minute grid, 2 to 60 minutes ahead, with a 60-second payment lock (`PREDICT_LOCK_S`). In `DESK_LINE_MODE=window` (default in `scripts/demo.mjs`), every prediction in a window shares the oracle's opening DIA sample for that window.
-- **Pricing & limits.** Multiplier is `floor(((1 - edge) / p) * 100) / 100` from Deribit ATM IV and DIA spot (checked against Coinbase/Kraken/Binance median and re-checked before fill so favorable moves during the 60s lock cannot snipe the desk). Default `DESK_EDGE = 0.05` (`1.90×` at even odds); multipliers outside `1.05×–10×` or payouts that do not beat `stake` after the `1,000`-sat fee are refused. Mainnet launch defaults: `STAKE_MIN = 10,000`, `STAKE_MAX = 100,000`, `DESK_STRIKE_CAP = 5,000,000`, `DESK_TOTAL_CAP = 20,000,000`, `Q_MAX = 50,000,000` sats (override via `DESK_STAKE_MAX`, `DESK_STRIKE_CAP`, `DESK_TOTAL_CAP`).
-- **Delegations & guards.** Quotes fail closed unless `beaconExpiry` outlives settlement and, on mainnet, unless an independent `BACKUP_EMULATOR_PUBKEY` is pinned on both desk and page. The desk registers `reboard` delegations on fill and the page registers `cancel` + `reboard` delegations on placement with `EXECUTOR_URL`.
-- **Page & phones.** The page proxies read-only DIA samples via `GET /oracle/prices`, supports responsive mobile drawers and standalone home-screen handoff (`/handoff/<id>`), and drops the Mutinynet warning banner on Bitcoin mainnet builds.
+- **Fill & auto-refund.** `OptionIntent` side `1`. The bettor funds the intent with `stake`; the desk `finalize`s by taking `stake` and locking full `collateral` in `PredictVaultV3`. Unfilled stakes can be cancelled after `deadline` via `cancel()` (`OP_CHECKTIME`) or automatically via `executord` (`cancelCltv`).
+- **Windows & lines.** Closes sit on the 5-minute grid, 1 to 60 minutes ahead (`PREDICT_MIN_LEFT_S = 30`, `PREDICT_LOCK_S = 30`, 60-second cutoff before close). In `DESK_LINE_MODE=any` (default), bets are always open against live spot lines; set `DESK_LINE_MODE=window` to restrict every bet in a window to the opening DIA sample.
+- **Pricing & limits.** Multiplier is `floor(((1 - edge) / p) * 100) / 100` from Deribit ATM IV and the more adverse of DIA spot and Coinbase/Kraken/Binance median (freshly re-fetched and re-checked before fill so adverse moves during the 30s lock cannot snipe the desk). Default `DESK_EDGE = 0.05` (`1.90×` at even odds); multipliers outside `1.05×–10×` or payouts `<= stake` are refused. Mainnet launch defaults: `STAKE_MIN = 10,000`, `STAKE_MAX = 100,000`, `DESK_STRIKE_CAP = 5,000,000`, `DESK_TOTAL_CAP = 20,000,000`, `Q_MAX = 50,000,000` sats (override via `DESK_STAKE_MAX`, `DESK_STRIKE_CAP`, `DESK_TOTAL_CAP`).
+- **Delegations & guards.** On mainnet, both desk and page fail closed unless `ORACLE_PUBKEY` matches the live oracle and an independent `BACKUP_EMULATOR_PUBKEY` (distinct from desk, oracle, and primary emulator) is pinned. The desk enforces per-pubkey/global RFQ rate limits and open-quote caps, registers `reboard` delegations on fill, and the page registers `cancel` + `reboard` delegations on placement with `EXECUTOR_URL`.
+- **Page & phones.** The page proxies read-only DIA samples (`GET /oracle/prices`) and canonical signed fixings (`GET /oracle/fixing?expiry=...`), emits strict CSP/security headers, supports responsive mobile drawers and standalone home-screen handoff (`/handoff/<id>`), and drops the Mutinynet warning banner on Bitcoin mainnet builds.
 
 ## Demo
 
-`pnpm demo` runs the full stack locally against Mutinynet (oracle + beacon, desk, settler, and built page) using Node 22.12+ and `pnpm install`:
+`pnpm demo` runs the full stack locally against Mutinynet (stateless oracle, desk, settler, and built page) using Node 22.12+ and `pnpm install`:
 
 - Serves the page at <http://127.0.0.1:4173/> (and opens a `trycloudflare.com` quick tunnel if `cloudflared` is installed; pass `--no-tunnel` for local-only, or `--pages` for Cloudflare Pages).
-- Walks through funding the oracle (`10,000` Mutinynet sats) and desk float via a header pill until live.
+- Walks through funding the desk float via a header pill until live.
 - Stores keys, sqlite DBs, and logs in `~/.coinflip-demo` (`COINFLIP_DEMO_DIR` to relocate). Delete the directory to start fresh.
 
 ## Deploy
@@ -138,14 +136,15 @@ docker run --rm -p 8080:80 coinflip-site
 
 ## Check
 
-Unit & integration tests (142 tests) and typecheck:
+Unit & integration tests, typecheck, and page build (all enforced in `.github/workflows/check.yml`):
 
 ```bash
 pnpm exec tsc --noEmit
 pnpm test
+pnpm build
 ```
 
-Go Arkade VM contract tests (10 tests, including TS↔Go Taproot parity and `reboard`/`reseed`):
+Go Arkade VM contract tests (including `PredictVaultV3` direct-signature adversarial checks and TS↔Go Taproot parity):
 
 ```bash
 (cd contracts/go && go test -v ./...)

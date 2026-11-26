@@ -22,7 +22,7 @@ await esbuild.build({
   target: "es2022",
   alias: { "node:crypto": path.join(root, "app/src/browser-crypto.ts") },
   minify: true,
-  sourcemap: true,
+  sourcemap: !isMainnet && process.env.SOURCEMAP !== "0",
   logLevel: "info",
   define: {
     __COINFLIP_DEMO__: JSON.stringify(demo),
@@ -33,7 +33,9 @@ await esbuild.build({
 mkdirSync(dist, { recursive: true });
 const hash = createHash("sha256").update(readFileSync(path.join(dist, "app.js"))).digest("hex").slice(0, 10);
 const cssHash = createHash("sha256").update(readFileSync(path.join(root, "app/desk.css"))).digest("hex").slice(0, 10);
+const bootHash = createHash("sha256").update(readFileSync(path.join(root, "app/boot.js"))).digest("hex").slice(0, 10);
 let html = readFileSync(path.join(root, "app/index.html"), "utf8")
+  .replace('src="./boot.js"', `src="./boot.js?${bootHash}"`)
   .replace('src="./app.js"', `src="./app.js?${hash}"`)
   .replace('href="desk.css"', `href="desk.css?${cssHash}"`);
 if (isMainnet) {
@@ -49,6 +51,7 @@ if (isMainnet) {
     );
 }
 writeFileSync(path.join(dist, "index.html"), html);
+cpSync(path.join(root, "app/boot.js"), path.join(dist, "boot.js"));
 cpSync(path.join(root, "app/desk.css"), path.join(dist, "desk.css"));
 writeFileSync(path.join(dist, ".nojekyll"), "");
 const cname = process.env.PAGES_CNAME?.trim();

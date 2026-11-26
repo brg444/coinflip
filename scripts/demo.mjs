@@ -16,14 +16,13 @@
 
 import { spawn, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { createReadStream, existsSync, mkdirSync, openSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import http from "node:http";
+import { createWriteStream, existsSync, mkdirSync, openSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { createGzip } from "node:zlib";
 
 import { getPublicKey } from "nostr-tools/pure";
+import { startPageServer } from "./page-server.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const home = path.resolve(process.env.COINFLIP_DEMO_DIR?.trim() || path.join(os.homedir(), ".coinflip-demo"));
@@ -47,6 +46,7 @@ const oracleUrl = `http://127.0.0.1:${PORTS.oracle}`;
 const deskUrl = `http://127.0.0.1:${PORTS.desk}`;
 
 const children = [];
+const logStreams = [];
 let stopping = false;
 /** What the page shows while the demo sets itself up. Served at /demo.json (minimal healthcheck on mainnet). */
 const setup = {
@@ -68,6 +68,7 @@ function die(line) {
 function stop(code = 0) {
   if (stopping) return;
   stopping = true;
+  for (const writer of logStreams) writer.close();
   if (children.length === 0) process.exit(code);
   for (const child of children) child.kill("SIGTERM");
   setTimeout(() => process.exit(code), 400);
@@ -98,7 +99,9 @@ function keys() {
     const backup = process.env.BACKUP_EMULATOR_PUBKEY?.trim().toLowerCase() || "";
     if (!/^[0-9a-f]{64}$/.test(backup)) die("Bitcoin mainnet requires a 64-hex x-only BACKUP_EMULATOR_PUBKEY env var.");
     const deskPub = getPublicKey(Uint8Array.from(Buffer.from(envDesk, "hex")));
+    const oraclePub = getPublicKey(Uint8Array.from(Buffer.from(envOracle, "hex")));
     if (backup === deskPub) die("BACKUP_EMULATOR_PUBKEY must differ from DESK_KEY pubkey.");
+    if (backup === oraclePub) die("BACKUP_EMULATOR_PUBKEY must differ from ORACLE_KEY pubkey.");
     return { oracleKey: envOracle, deskKey: envDesk, admin: envAdmin };
   }
   if (envOracle && envDesk && envAdmin) {
@@ -124,9 +127,53 @@ function networkEnv() {
   return extra;
 }
 
+const MAX_LOG_BYTES = 10 * 1024 * 1024;
+
+function createRotatingLog(logPath, maxBytes = MAX_LOG_BYTES) {
+  let written = 0;
+  try {
+    if (existsSync(logPath)) written = statSync(logPath).size;
+  } catch {
+    written = 0;
+  }
+  const open = () => {
+    const stream = createWriteStream(logPath, { flags: "a" });
+    stream.on("error", () => {});
+    return stream;
+  };
+  let stream = open();
+  let closed = false;
+  const writer = {
+    write(chunk) {
+      if (closed) return;
+      const buf = typeof chunk === "string" ? Buffer.from(chunk, "utf8") : chunk;
+      written += buf.length;
+      if (written > maxBytes) {
+        const prev = stream;
+        prev.end();
+        try {
+          renameSync(logPath, `${logPath}.1`);
+        } catch {
+          // Best-effort rotation; continue writing to a fresh stream.
+        }
+        written = buf.length;
+        stream = open();
+      }
+      stream.write(buf);
+    },
+    close() {
+      if (closed) return;
+      closed = true;
+      stream.end();
+    },
+  };
+  logStreams.push(writer);
+  return writer;
+}
+
 function start(name, script, env) {
   const log = path.join(home, "logs", `${name}.log`);
-  const out = openSync(log, "a");
+  const out = server ? null : openSync(log, "a");
   const child = spawn(process.execPath, ["--experimental-strip-types", "--experimental-eventsource", "--no-warnings", script], {
     cwd: root,
     env: { ...process.env, ...env },
@@ -134,10 +181,11 @@ function start(name, script, env) {
   });
   if (server) {
     // The host's log viewer is where a server is read, so each line goes there too.
+    const writer = createRotatingLog(log);
     const relay = (stream) => {
       let rest = "";
       stream.on("data", (chunk) => {
-        writeFileSync(out, chunk);
+        writer.write(chunk);
         const lines = (rest + chunk.toString()).split("\n");
         rest = lines.pop() ?? "";
         for (const line of lines) if (line.trim()) say(`[${name}] ${line}`);
@@ -305,119 +353,14 @@ function buildPage(key, oracle) {
 }
 
 function servePage() {
-  const site = path.join(home, "site");
-  const types = {
-    ".html": "text/html; charset=utf-8",
-    ".js": "text/javascript; charset=utf-8",
-    ".css": "text/css; charset=utf-8",
-    ".map": "application/json",
-  };
-  return new Promise((resolve) => {
-    const handoffs = new Map();
-    http.createServer((req, res) => {
-      const url = new URL(req.url ?? "/", "http://localhost");
-      if (url.pathname === "/demo.json") {
-        res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
-        const body = isMainnet ? { ok: true, network: netId, stage: setup.stage } : setup;
-        res.end(JSON.stringify(body));
-        return;
-      }
-      // The wallet's return, relayed: a home-screen app opens the wallet in Safari and the return lands
-      // there. That window posts it under the request's random id; the app that asked reads it once.
-      const relay = /^\/handoff\/([0-9a-f]{32})$/.exec(url.pathname);
-      if (relay) {
-        const id = relay[1];
-        const now = Date.now();
-        for (const [key, entry] of handoffs) if (now - entry.at > 10 * 60_000) handoffs.delete(key);
-        const reply = (status, body) => {
-          res.writeHead(status, { "content-type": "application/json", "cache-control": "no-store", "x-handoff": "1" });
-          res.end(body == null ? "" : JSON.stringify(body));
-        };
-        if (req.method === "GET") {
-          const entry = handoffs.get(id);
-          if (!entry) return reply(204);
-          handoffs.delete(id);
-          return reply(200, { search: entry.search });
-        }
-        if (req.method === "POST") {
-          let raw = "";
-          req.setEncoding("utf8");
-          req.on("data", (chunk) => {
-            raw += chunk;
-            if (raw.length > 8_000) req.destroy();
-          });
-          req.on("end", () => {
-            let search = "";
-            try {
-              search = String(JSON.parse(raw)?.search ?? "");
-            } catch {
-              return reply(400, { error: "body" });
-            }
-            if (!search.startsWith("?") || search.length > 6_000 || handoffs.size > 500) return reply(400, { error: "search" });
-            handoffs.set(id, { search, at: now });
-            reply(200, { ok: true });
-          });
-          return;
-        }
-        return reply(405, { error: "method" });
-      }
-      // The oracle's samples, read-only, so the page can show a result at the fixing time instead of
-      // waiting for the settlement. The oracle itself stays on loopback.
-      if (url.pathname === "/oracle/fixing" && req.method === "GET") {
-        const expiry = url.searchParams.get("expiry");
-        if (!expiry || !/^[0-9]{1,12}$/.test(expiry)) {
-          res.writeHead(400, { "content-type": "application/json", "cache-control": "no-store" });
-          res.end(JSON.stringify({ error: "expiry" }));
-          return;
-        }
-        fetch(`${oracleUrl}/api/fixing?expiry=${expiry}`, { signal: AbortSignal.timeout(8_000) })
-          .then(async (upstream) => {
-            res.writeHead(upstream.status, { "content-type": "application/json", "cache-control": "no-store" });
-            res.end(await upstream.text());
-          })
-          .catch(() => {
-            res.writeHead(502, { "content-type": "application/json", "cache-control": "no-store" });
-            res.end(JSON.stringify({ error: "oracle" }));
-          });
-        return;
-      }
-      if (url.pathname === "/oracle/prices" && req.method === "GET") {
-        const query = new URLSearchParams();
-        for (const key of ["from", "to", "limit"]) {
-          const value = url.searchParams.get(key);
-          if (value != null && /^[0-9]{1,12}$/.test(value)) query.set(key, value);
-        }
-        fetch(`${oracleUrl}/api/prices?${query}`, { signal: AbortSignal.timeout(8_000) })
-          .then(async (upstream) => {
-            res.writeHead(upstream.ok ? 200 : 502, { "content-type": "application/json", "cache-control": "no-store" });
-            res.end(upstream.ok ? await upstream.text() : JSON.stringify({ error: "oracle" }));
-          })
-          .catch(() => {
-            res.writeHead(502, { "content-type": "application/json", "cache-control": "no-store" });
-            res.end(JSON.stringify({ error: "oracle" }));
-          });
-        return;
-      }
-      let rel = decodeURIComponent(url.pathname);
-      if (rel.endsWith("/")) rel += "index.html";
-      const file = path.resolve(site, rel.replace(/^\//, ""));
-      if (!file.startsWith(site + path.sep) || !existsSync(file) || !statSync(file).isFile()) {
-        res.writeHead(404);
-        res.end("not found");
-        return;
-      }
-      const ext = path.extname(file);
-      const hashed = (ext === ".js" || ext === ".css") && url.search.length > 1;
-      const gzip = (ext === ".html" || ext === ".js" || ext === ".css") && /\bgzip\b/i.test(String(req.headers["accept-encoding"] ?? ""));
-      const headers = {
-        "content-type": types[ext] ?? "application/octet-stream",
-        "cache-control": hashed ? "public, max-age=31536000, immutable" : "no-store",
-        ...(gzip ? { "content-encoding": "gzip", vary: "Accept-Encoding" } : {}),
-      };
-      res.writeHead(200, headers);
-      const stream = createReadStream(file);
-      (gzip ? stream.pipe(createGzip()) : stream).pipe(res);
-    }).listen(PORTS.page, server ? "0.0.0.0" : "127.0.0.1", resolve);
+  return startPageServer({
+    siteDir: path.join(home, "site"),
+    oracleUrl,
+    isMainnet,
+    netId,
+    getSetup: () => setup,
+    port: PORTS.page,
+    host: server ? "0.0.0.0" : "127.0.0.1",
   });
 }
 
@@ -428,7 +371,7 @@ function tunnel() {
     say("cloudflared is not installed, so there is no public URL. Install it with: brew install cloudflared");
     return Promise.resolve(null);
   }
-  const log = openSync(path.join(home, "logs", "tunnel.log"), "a");
+  const writer = createRotatingLog(path.join(home, "logs", "tunnel.log"));
   const child = spawn("cloudflared", ["tunnel", "--no-autoupdate", "--url", `http://127.0.0.1:${PORTS.page}`], {
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -437,11 +380,7 @@ function tunnel() {
     let done = false;
     const read = (chunk) => {
       const text = chunk.toString();
-      try {
-        writeFileSync(log, text, { flag: "a" });
-      } catch {
-        // The tunnel log is a convenience.
-      }
+      writer.write(chunk);
       const match = /https:\/\/[a-z0-9-]+\.trycloudflare\.com/.exec(text);
       if (match && !done) {
         done = true;

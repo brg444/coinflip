@@ -10,13 +10,8 @@ import { bytesToHex, hexToBytes, xOnly } from "../../protocol/hex.ts";
 import { isPredictQuote, payoutRefusal, type RfqQuote, type RfqRefusal, type RfqRequest } from "../../protocol/messages.ts";
 import { payoutMultiplier } from "../../protocol/pricing.ts";
 import { collectReplies } from "../../protocol/nostr.ts";
-import { parseOracleBeacon } from "../../settle/oracle.ts";
 import { LIVE_BEACON_STATUS } from "./beacon-status.ts";
 import { ACTIVE_PROFILE, ACTIVE_Q_MAX, writerBinding } from "./fund.ts";
-
-export function quoteMatchesBeacon(beaconTxid: string, beaconGidx: number, status: unknown = LIVE_BEACON_STATUS, expectedHrp: string = ACTIVE_PROFILE.hrp): boolean {
-  return parseOracleBeacon(status, beaconTxid, beaconGidx, expectedHrp).ok;
-}
 
 export function oracleKeyMatches(quoteOraclePk: string, pinnedOraclePk: string | null = LIVE_BEACON_STATUS.args.adminPk): boolean {
   const candidate = quoteOraclePk.trim().toLowerCase();

@@ -12,6 +12,7 @@
  *     node --experimental-strip-types scripts/backup-refund.ts
  */
 import { readFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
 
 import { schnorr, secp256k1 } from "@noble/curves/secp256k1.js";
 import { sha256 } from "@noble/hashes/sha2.js";
@@ -23,7 +24,7 @@ import {
 } from "@arkade-os/sdk";
 
 import { DUST_SATS, PREDICT_READ_FEE } from "../protocol/constants.ts";
-import { bindContracts } from "../protocol/contracts.ts";
+import { bindContracts, type Terms } from "../protocol/contracts.ts";
 import { bytesToHex, hexToBytes, xOnly } from "../protocol/hex.ts";
 import { parsePosition } from "../protocol/messages.ts";
 import { networkProfile } from "../protocol/network.ts";
@@ -54,7 +55,7 @@ function bigIntToBytes32(value: bigint): Uint8Array {
   return out;
 }
 
-function tapLeafHash(script: Uint8Array, version = 0xc0): Uint8Array {
+export function tapLeafHash(script: Uint8Array, version = 0xc0): Uint8Array {
   const tag = sha256(new TextEncoder().encode("TapLeaf"));
   const len = script.length < 0xfd
     ? Uint8Array.of(script.length)
@@ -69,7 +70,7 @@ function tapLeafHash(script: Uint8Array, version = 0xc0): Uint8Array {
 }
 
 /** Compute Arkade script-tweaked secret matching `computeArkadeScriptPublicKey(backupPk, refundScript)`. */
-function tweakedBackupSecret(rawSecret: Uint8Array, refundScript: Uint8Array): { secret: Uint8Array; xOnlyPub: Uint8Array } {
+export function tweakedBackupSecret(rawSecret: Uint8Array, refundScript: Uint8Array): { secret: Uint8Array; xOnlyPub: Uint8Array } {
   const compressed = secp256k1.getPublicKey(rawSecret, true);
   let d = bytesToBigInt(rawSecret);
   if (compressed[0] === 0x03) d = N - d;
@@ -85,65 +86,6 @@ function tweakedBackupSecret(rawSecret: Uint8Array, refundScript: Uint8Array): {
   return { secret, xOnlyPub };
 }
 
-const profile = networkProfile(process.env.NETWORK);
-const backupKeyHex = requiredEnv("BACKUP_KEY").toLowerCase();
-if (!/^[0-9a-f]{64}$/.test(backupKeyHex)) throw new Error("BACKUP_KEY must be 64-hex");
-const backupSecret = hexToBytes(backupKeyHex);
-const backupPubHex = bytesToHex(schnorr.getPublicKey(backupSecret));
-
-const rawPos = JSON.parse(readFileSync(requiredEnv("POSITION_FILE"), "utf8"));
-const pos = parsePosition(rawPos);
-if (!pos) throw new Error("POSITION_FILE is not a valid OptionPosition");
-const watched = positionFromAnnouncement(pos);
-if (!watched || !watched.stake) throw new Error("position is not a PredictVault");
-if (pos.backup_pubkey?.toLowerCase() !== backupPubHex) {
-  throw new Error(`BACKUP_KEY pubkey ${backupPubHex} does not match position backup_pubkey ${pos.backup_pubkey}`);
-}
-
-const serverKeyHex = process.env.SERVER_KEY?.trim()
-  || bytesToHex(xOnly(hexToBytes((await new RestArkProvider(process.env.ARK_URL?.trim() || profile.arkUrl).getInfo()).signerPubkey)));
-const serverKey = xOnly(hexToBytes(serverKeyHex));
-const emulatorKey = hexToBytes(process.env.EMULATOR_KEY?.trim() || defaultEmulatorPubkey(profile.network));
-const terms = termsFor(watched, serverKey, emulatorKey, PREDICT_READ_FEE, profile.hrp);
-const bound = bindContracts(terms);
-if (bound.vaultAddress !== pos.vault_address) {
-  throw new Error(`derived vaultAddress ${bound.vaultAddress} != position ${pos.vault_address}`);
-}
-
-const utxoTxid = requiredEnv("UTXO_TXID").toLowerCase();
-if (!/^[0-9a-f]{64}$/.test(utxoTxid)) throw new Error("UTXO_TXID must be 64-hex");
-const utxoVout = Number(requiredEnv("UTXO_VOUT"));
-const utxoValue = BigInt(requiredEnv("UTXO_VALUE"));
-const feeSats = BigInt(process.env.FEE_SATS?.trim() || "1000");
-if (utxoValue <= feeSats + DUST_SATS) throw new Error("UTXO_VALUE too small for fee");
-
-const script = new arkade.ArkadeProgramScript(predictVaultProgram(), bound.vault, { serverKey, emulatorKey });
-const refundFn = script.functionByName("refund");
-const backupFn = script.functionByName("refundBackup");
-if (!refundFn?.arkadeScript || !backupFn) throw new Error("PredictVault refund/refundBackup missing");
-
-const tweaked = tweakedBackupSecret(backupSecret, refundFn.arkadeScript);
-const fallbackDelay = terms.fallbackDelay ?? profile.fallbackDelay;
-const voidAfter = terms.voidAfter ?? profile.voidAfter;
-const spendable = utxoValue - feeSats;
-const stake = watched.stake;
-const house = spendable - stake;
-
-const tx = new Transaction({ version: 2, lockTime: Number(terms.expiry + voidAfter) });
-tx.addInput({
-  txid: hexToBytes(utxoTxid),
-  index: utxoVout,
-  sequence: Number(exitSequence(fallbackDelay)),
-  witnessUtxo: { script: bound.vaultPkScript, amount: utxoValue },
-  tapLeafScript: [backupFn.tapLeafScript],
-});
-if (house > DUST_SATS) {
-  tx.addOutput({ script: bound.holderPkScript, amount: stake });
-  tx.addOutput({ script: bound.writerPkScript, amount: house });
-} else {
-  tx.addOutput({ script: bound.holderPkScript, amount: spendable });
-}
-
 function encodeControlBlock(cb: { version: number; internalKey: Uint8Array; merklePath: Uint8Array[] }): Uint8Array {
   const out = new Uint8Array(1 + 32 + cb.merklePath.length * 32);
   out[0] = cb.version;
@@ -152,31 +94,138 @@ function encodeControlBlock(cb: { version: number; internalKey: Uint8Array; merk
   return out;
 }
 
-const leafScript = backupFn.tapLeafScript[1];
-const controlBlock = encodeControlBlock(backupFn.tapLeafScript[0] as { version: number; internalKey: Uint8Array; merklePath: Uint8Array[] });
-const sighash = tx.preimageWitnessV1(
-  0,
-  [bound.vaultPkScript],
-  0, // SigHash.DEFAULT
-  [utxoValue],
-  undefined,
-  tapLeafHash(leafScript),
-);
-const sig = schnorr.sign(sighash, tweaked.secret);
-if (!schnorr.verify(sig, sighash, tweaked.xOnlyPub)) {
-  throw new Error("generated signature failed local BIP340 verification");
-}
-tx.updateInput(0, {
-  finalScriptWitness: [sig, leafScript, controlBlock],
-});
+export type BackupRefundInput = {
+  backupSecret: Uint8Array;
+  terms: Terms;
+  stake: bigint;
+  utxoTxid: string;
+  utxoVout: number;
+  utxoValue: bigint;
+  feeSats: bigint;
+  fallbackDelay: bigint;
+  voidAfter: bigint;
+};
 
-console.log(JSON.stringify({
-  network: profile.id,
-  txid: tx.id,
-  lockTime: Number(terms.expiry + voidAfter),
-  sequence: Number(exitSequence(fallbackDelay)),
-  holderSats: (house > DUST_SATS ? stake : spendable).toString(),
-  writerSats: (house > DUST_SATS ? house : 0n).toString(),
-  feeSats: feeSats.toString(),
-  rawTxHex: bytesToHex(tx.extract()),
-}));
+export function buildBackupRefundTx(input: BackupRefundInput) {
+  if (input.utxoValue <= input.feeSats + DUST_SATS) throw new Error("UTXO_VALUE too small for fee");
+  const bound = bindContracts(input.terms);
+  const script = new arkade.ArkadeProgramScript(predictVaultProgram(), bound.vault, {
+    serverKey: xOnly(input.terms.serverKey),
+    emulatorKey: input.terms.emulatorKey,
+  });
+  const refundFn = script.functionByName("refund");
+  const backupFn = script.functionByName("refundBackup");
+  if (!refundFn?.arkadeScript || !backupFn) throw new Error("PredictVault refund/refundBackup missing");
+
+  const tweaked = tweakedBackupSecret(input.backupSecret, refundFn.arkadeScript);
+  const spendable = input.utxoValue - input.feeSats;
+  if (spendable < input.stake) throw new Error("spendable value below stake");
+  const house = spendable - input.stake;
+
+  const lockTime = Number(input.terms.expiry + input.voidAfter);
+  const sequence = Number(exitSequence(input.fallbackDelay));
+  const tx = new Transaction({ version: 2, lockTime });
+  tx.addInput({
+    txid: hexToBytes(input.utxoTxid),
+    index: input.utxoVout,
+    sequence,
+    witnessUtxo: { script: bound.vaultPkScript, amount: input.utxoValue },
+    tapLeafScript: [backupFn.tapLeafScript],
+  });
+  if (house > DUST_SATS) {
+    tx.addOutput({ script: bound.holderPkScript, amount: input.stake });
+    tx.addOutput({ script: bound.writerPkScript, amount: house });
+  } else {
+    tx.addOutput({ script: bound.holderPkScript, amount: spendable });
+  }
+
+  const leafScript = backupFn.tapLeafScript[1];
+  const controlBlock = encodeControlBlock(backupFn.tapLeafScript[0] as { version: number; internalKey: Uint8Array; merklePath: Uint8Array[] });
+  const sighash = tx.preimageWitnessV1(
+    0,
+    [bound.vaultPkScript],
+    0, // SigHash.DEFAULT
+    [input.utxoValue],
+    undefined,
+    tapLeafHash(leafScript),
+  );
+  const sig = schnorr.sign(sighash, tweaked.secret);
+  if (!schnorr.verify(sig, sighash, tweaked.xOnlyPub)) {
+    throw new Error("generated signature failed local BIP340 verification");
+  }
+  tx.updateInput(0, {
+    finalScriptWitness: [sig, leafScript, controlBlock],
+  });
+  return {
+    tx,
+    txid: tx.id,
+    lockTime,
+    sequence,
+    holderSats: house > DUST_SATS ? input.stake : spendable,
+    writerSats: house > DUST_SATS ? house : 0n,
+    feeSats: input.feeSats,
+    tweakedPubHex: bytesToHex(tweaked.xOnlyPub),
+    leafScriptHex: bytesToHex(leafScript),
+    rawTxHex: bytesToHex(tx.extract()),
+  };
+}
+
+async function main() {
+  const profile = networkProfile(process.env.NETWORK);
+  const backupKeyHex = requiredEnv("BACKUP_KEY").toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(backupKeyHex)) throw new Error("BACKUP_KEY must be 64-hex");
+  const backupSecret = hexToBytes(backupKeyHex);
+  const backupPubHex = bytesToHex(schnorr.getPublicKey(backupSecret));
+
+  const rawPos = JSON.parse(readFileSync(requiredEnv("POSITION_FILE"), "utf8"));
+  const pos = parsePosition(rawPos);
+  if (!pos) throw new Error("POSITION_FILE is not a valid OptionPosition");
+  const watched = positionFromAnnouncement(pos);
+  if (!watched || !watched.stake) throw new Error("position is not a PredictVault");
+  if (pos.backup_pubkey?.toLowerCase() !== backupPubHex) {
+    throw new Error(`BACKUP_KEY pubkey ${backupPubHex} does not match position backup_pubkey ${pos.backup_pubkey}`);
+  }
+
+  const serverKeyHex = process.env.SERVER_KEY?.trim()
+    || bytesToHex(xOnly(hexToBytes((await new RestArkProvider(process.env.ARK_URL?.trim() || profile.arkUrl).getInfo()).signerPubkey)));
+  const serverKey = xOnly(hexToBytes(serverKeyHex));
+  const emulatorKey = hexToBytes(process.env.EMULATOR_KEY?.trim() || defaultEmulatorPubkey(profile.network));
+  const terms = termsFor(watched, serverKey, emulatorKey, PREDICT_READ_FEE, profile.hrp);
+  const bound = bindContracts(terms);
+  if (bound.vaultAddress !== pos.vault_address) {
+    throw new Error(`derived vaultAddress ${bound.vaultAddress} != position ${pos.vault_address}`);
+  }
+
+  const utxoTxid = requiredEnv("UTXO_TXID").toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(utxoTxid)) throw new Error("UTXO_TXID must be 64-hex");
+  const utxoVout = Number(requiredEnv("UTXO_VOUT"));
+  const utxoValue = BigInt(requiredEnv("UTXO_VALUE"));
+  const feeSats = BigInt(process.env.FEE_SATS?.trim() || "1000");
+
+  const built = buildBackupRefundTx({
+    backupSecret,
+    terms,
+    stake: watched.stake,
+    utxoTxid,
+    utxoVout,
+    utxoValue,
+    feeSats,
+    fallbackDelay: terms.fallbackDelay ?? profile.fallbackDelay,
+    voidAfter: terms.voidAfter ?? profile.voidAfter,
+  });
+
+  console.log(JSON.stringify({
+    network: profile.id,
+    txid: built.txid,
+    lockTime: built.lockTime,
+    sequence: built.sequence,
+    holderSats: built.holderSats.toString(),
+    writerSats: built.writerSats.toString(),
+    feeSats: built.feeSats.toString(),
+    rawTxHex: built.rawTxHex,
+  }));
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  await main();
+}

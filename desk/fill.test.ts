@@ -119,6 +119,26 @@ test("selectFloat skips coins expiring before the required settlement margin", (
   assert.deepEqual(selectFloat([short, long], 50_000n, minExpiry), [long]);
   assert.equal(selectFloat([short], 50_000n, minExpiry), null);
   assert.deepEqual(selectFloat([short, noExpiry], 50_000n, minExpiry), [noExpiry]);
+
+  // SEC-09: prefers a single fitting coin over combining many small coins, picks largest-first, and enforces maxInputs.
+  const tiny = Array.from({ length: 10 }, (_, i) => ({ txid: i.toString(16).padStart(64, "0"), vout: 0, value: 10_000 }));
+  const medium = { txid: "dd".repeat(32), vout: 0, value: 95_000 };
+  const huge = { txid: "ee".repeat(32), vout: 0, value: 500_000 };
+  assert.deepEqual(selectFloat([...tiny, huge, medium], 90_000n), [medium]);
+
+  // Largest-first combination fits within maxInputs instead of failing on small coins first.
+  const mixed = [...tiny, { txid: "f1".repeat(32), vout: 0, value: 60_000 }, { txid: "f2".repeat(32), vout: 0, value: 50_000 }];
+  const combined = selectFloat(mixed, 105_000n, undefined, { maxInputs: 2 });
+  assert.equal(combined?.length, 2);
+  assert.equal(combined!.reduce((s, c) => s + c.value, 0), 110_000);
+  // Fragmented coins that exceed maxInputs return null instead of exceeding tx weight.
+  assert.equal(selectFloat(tiny, 50_000n, undefined, { maxInputs: 4 }), null);
+
+  // Predict fills merge desk change with user stake on output 0, so small change (<= 330 sats) does not add extra inputs.
+  const nearExact = { txid: "aa".repeat(32), vout: 0, value: 95_100 };
+  const extra = { txid: "bb".repeat(32), vout: 0, value: 20_000 };
+  assert.deepEqual(selectFloat([nearExact, extra], 95_000n, undefined, { allowSmallChange: true }), [nearExact]);
+  assert.equal(selectFloat([nearExact, extra], 95_000n, undefined, { allowSmallChange: false })?.length, 2);
 });
 
 async function predictFixture(expiry: number, deadline: number) {
