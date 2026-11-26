@@ -6,7 +6,7 @@ import test from "node:test";
 
 import { schnorr } from "@noble/curves/secp256k1.js";
 import { base64 } from "@scure/base";
-import { arkade, CSVMultisigTapscript, Extension, SingleKey, Transaction } from "@arkade-os/sdk";
+import { CSVMultisigTapscript, Extension, SingleKey, Transaction } from "@arkade-os/sdk";
 
 import {
   EXIT,
@@ -22,15 +22,10 @@ import { predictSettlePriceCents, refundOutputs } from "../protocol/cospend.ts";
 import { centsOf, SCALE, type DiaIntent } from "../protocol/dia.ts";
 import { predictFixDigest } from "../protocol/fixing.ts";
 import { bytesToHex, hexToBytes } from "../protocol/hex.ts";
-import { classifyIntent } from "../protocol/intent-state.ts";
 import { parsePosition, parseWire, payoutRefusal, predictRefusal, requestRefusal, type RfqRequest } from "../protocol/messages.ts";
-import { positionEvent, readPosition } from "../protocol/nostr.ts";
 import { parseOracleFixing, parseOracleKey, parseOracleLatest, serviceOrigin, type OracleFixing } from "../protocol/oracle-client.ts";
-import { holderPayoff, settlementOutputs } from "../protocol/payoff.ts";
 import { duePositions, manualPositions, positionFromAnnouncement, termsFor } from "../protocol/positions.ts";
-import { payoutMultiplier, predictMultiplier, predictPayout, probAbove } from "../protocol/pricing.ts";
-import { predictVaultProgram } from "../protocol/programs.ts";
-import { refundQuote, settlePayouts, settlePredictQuote, type ChainCoin } from "../protocol/vault-ops.ts";
+import { refundQuote, settlePredictQuote, type ChainCoin } from "../protocol/vault-ops.ts";
 import { Progress } from "./progress.ts";
 
 const CHECKPOINT = "03080040b27520dfcaec558c7e78cf3e38b898ba8a43cfb5727266bae32c5c5b3aeb32c558aa0bac";
@@ -78,60 +73,6 @@ function coinTx(outputs: { script: Uint8Array; amount: bigint }[], packets: Para
   if (packets.length > 0) tx.addOutput(Extension.create(packets).txOut());
   return tx;
 }
-
-test("predict is all or nothing, and a close on the line pays the desk", () => {
-  assert.equal(holderPayoff(2, LINE + 1n, LINE, PAYOUT), PAYOUT);
-  assert.equal(holderPayoff(2, LINE, LINE, PAYOUT), 0n);
-  assert.equal(holderPayoff(2, LINE - 1n, LINE, PAYOUT), 0n);
-  assert.equal(holderPayoff(3, LINE - 1n, LINE, PAYOUT), PAYOUT);
-  assert.equal(holderPayoff(3, LINE, LINE, PAYOUT), 0n);
-  assert.equal(holderPayoff(3, LINE + 1n, LINE, PAYOUT), 0n);
-  assert.deepEqual(settlementOutputs(PAYOUT, PAYOUT), { mode: "holder", holder: 95_000n, writer: 0n });
-  assert.deepEqual(settlementOutputs(0n, PAYOUT), { mode: "writer", holder: 0n, writer: 95_000n });
-});
-
-test("PredictVault exposes three-tier exit leaves and direct-signature settle opcodes", async () => {
-  const predict = predictVaultProgram();
-  assert.equal(predict.name, "PredictVault");
-  assert.deepEqual(
-    Object.keys(predict.functions).sort(),
-    ["close", "reboard", "refund", "refundBackup", "settle", "unilateral"],
-  );
-  const asm = predict.functions.settle?.arkadeScript?.asm ?? [];
-  const count = (name: string) => asm.filter((token) => token === name).length;
-  assert.equal(count("MUL"), 0);
-  assert.equal(count("DIV"), 1);
-  assert.equal(count("CHECKTIME"), 1);
-  assert.equal(count("INSPECTINASSETLOOKUP"), 0);
-  assert.equal(count("INSPECTINPUTPACKET"), 0);
-  assert.equal(count("CHECKSIGFROMSTACK"), 2);
-  assert.equal(count("DIGEST"), 2);
-
-  assert.ok((predict.functions.refund?.arkadeScript?.asm ?? []).includes("CHECKTIME"));
-  assert.ok((predict.functions.reboard?.arkadeScript?.asm ?? []).includes("TUNNEL"));
-  assert.ok((predict.functions.reboard?.arkadeScript?.asm ?? []).includes("INSPECTINTENTMESSAGE"));
-  assert.ok(PREDICT_FINAL_EXIT_DELAY > PREDICT_VOID_AFTER);
-
-  const terms = await predictTerms(2);
-  const backupA = await key(30).xOnlyPublicKey();
-  const backupB = await key(31).xOnlyPublicKey();
-  const boundA = bindContracts({ ...terms, backupPk: backupA });
-  const boundB = bindContracts({ ...terms, backupPk: backupB });
-  assert.notEqual(boundA.vaultAddress, boundB.vaultAddress);
-
-  const scriptA = new arkade.ArkadeProgramScript(predict, boundA.vault, { serverKey: terms.serverKey, emulatorKey: terms.emulatorKey });
-  const refundLeaf = scriptA.functionByName("refund");
-  const refundBackupLeaf = scriptA.functionByName("refundBackup");
-  const unilateralLeaf = scriptA.functionByName("unilateral");
-  assert.ok(refundLeaf?.arkadeScript);
-  assert.ok(refundBackupLeaf);
-  assert.ok(unilateralLeaf);
-  const tweakedBackup = arkade.computeArkadeScriptPublicKey(backupA, refundLeaf.arkadeScript);
-  assert.ok(bytesToHex(refundBackupLeaf.tapLeafScript[1]).includes(bytesToHex(tweakedBackup)));
-  assert.equal(unilateralLeaf.def.tapscript.signatures?.length, 2);
-  assert.ok(bytesToHex(unilateralLeaf.tapLeafScript[1]).includes(bytesToHex(terms.writerPk)));
-  assert.ok(bytesToHex(unilateralLeaf.tapLeafScript[1]).includes(bytesToHex(terms.holderPk)));
-});
 
 test("a prediction binds intent side 1: the bettor holds, the desk writes", async () => {
   const terms = await predictTerms();
@@ -226,44 +167,6 @@ test("a payout has to beat the stake", () => {
   assert.equal(payoutRefusal(PAYOUT, STAKE), "");
   assert.equal(payoutRefusal(STAKE, STAKE), "payout");
   assert.equal(payoutRefusal(STAKE + 1n, STAKE), "");
-});
-
-test("the multiplier is 1.90 at even odds, pays more for the far line, and refuses long shots", () => {
-  const years = 161 / (365 * 24 * 3600);
-  const at = (kind: 2 | 3, line: number) => predictMultiplier({ kind, spotCents: 8_231_500, lineCents: line, years, vol: 0.45 });
-  assert.equal(at(2, 8_231_500), 1.9);
-  assert.ok(at(2, 8_236_500)! > at(2, 8_231_500)!);
-  assert.ok(at(3, 8_226_500)! > at(3, 8_231_500)!);
-  assert.ok(at(2, 8_226_500)! < 1.9);
-  assert.equal(at(2, 8_300_000), null);
-  assert.equal(at(2, 8_100_000), null);
-  assert.ok(Math.abs(probAbove(100, 100, years, 0.45) - 0.5) < 0.001);
-  assert.equal(predictPayout(STAKE, 1.9), PAYOUT);
-  assert.equal(predictPayout(33_333n, 3.45), 114_998n);
-  assert.equal(payoutMultiplier(STAKE, PAYOUT), 1.9);
-});
-
-test("a prediction's fill funds the vault, and the stake back is a refund", () => {
-  const user = "51200a";
-  const vault = "51200b";
-  const desk = "51200c";
-  const coin = { value: STAKE, spent: true, spentBy: "aa".repeat(32), txid: "bb".repeat(32) };
-  const base = { coins: [coin], collateral: PAYOUT, premium: STAKE, writerScript: user, now: 0, deadline: 10, side: 1 as const, vaultScript: vault };
-  const filled = classifyIntent({
-    ...base,
-    spends: { [coin.spentBy]: [{ script: desk, amount: STAKE }, { script: vault, amount: PAYOUT }] },
-  });
-  assert.equal(filled.phase, "filled");
-  assert.equal(filled.closeTxid, coin.spentBy);
-  const refunded = classifyIntent({ ...base, spends: { [coin.spentBy]: [{ script: user, amount: STAKE }] } });
-  assert.equal(refunded.phase, "refunded");
-  const live = classifyIntent({ ...base, coins: [{ ...coin, spent: false, spentBy: "" }], spends: {} });
-  assert.equal(live.phase, "funded");
-  const short = classifyIntent({
-    ...base,
-    spends: { [coin.spentBy]: [{ script: desk, amount: STAKE }, { script: vault, amount: PAYOUT - 1n }] },
-  });
-  assert.equal(short.phase, "open");
 });
 
 test("oracle client helpers parse status, verify real dual-signed fixings, and reject tampering", async () => {
@@ -426,12 +329,6 @@ test("a filled prediction settles standalone via signed fixing to the bettor abo
     fill_txid: vaultTx.id,
   });
   assert.ok(announcement);
-  const deskEvent = positionEvent(hexToBytes(key(21).toHex()), announcement, EXPIRY);
-  assert.deepEqual(readPosition(deskEvent), announcement);
-  const bettorEvent = positionEvent(hexToBytes(key(22).toHex()), announcement, EXPIRY);
-  assert.deepEqual(readPosition(bettorEvent), announcement);
-  const strangerEvent = positionEvent(hexToBytes(key(23).toHex()), announcement, EXPIRY);
-  assert.equal(readPosition(strangerEvent), null);
   const { holder_pk_script: _dropped, ...withoutHolder } = announcement;
   assert.equal(parsePosition(withoutHolder), null);
   const watched = positionFromAnnouncement(announcement)!;
@@ -477,29 +374,6 @@ test("a filled prediction settles standalone via signed fixing to the bettor abo
   assert.equal(kept.inputsLength, 1);
   assert.equal(bytesToHex(kept.getOutput(0)!.script!), bytesToHex(bound.writerPkScript));
   assert.equal(predictSettlePriceCents(kept), LINE);
-
-  const lower = settlePayouts({
-    kind: 3,
-    price: LINE - 1n,
-    strike: LINE,
-    collateral: PAYOUT,
-    locked: PAYOUT,
-    holderScript: bound.holderPkScript,
-    writerScript: bound.writerPkScript,
-  });
-  assert.ok("payouts" in lower);
-  if ("payouts" in lower) assert.deepEqual(lower.payouts, [{ script: bound.holderPkScript, amount: 95_000n }]);
-
-  const under = settlePayouts({
-    kind: 2,
-    price: LINE + 1n,
-    strike: LINE,
-    collateral: PAYOUT,
-    locked: PAYOUT - 1n,
-    holderScript: bound.holderPkScript,
-    writerScript: bound.writerPkScript,
-  });
-  assert.deepEqual(under, { error: "underfunded" });
 
   const earlyRefund = await refundQuote({ ...env, now: EXPIRY + Number(PREDICT_VOID_AFTER) - 1 });
   assert.deepEqual(earlyRefund, { result: "waiting", reason: "early" });

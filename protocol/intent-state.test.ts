@@ -220,4 +220,17 @@ test("double payment reports filled while flagging the leftover coin refundable 
     vaultScript: vault,
   });
   assert.deepEqual(afterRefund, { phase: "filled", refundable: false, fundingTxid: fillFunding, closeTxid: fillTx });
+
+  const shortVault = classifyIntent({
+    coins: [{ value: 50_000n, spent: true, spentBy: fillTx, txid: fillFunding }],
+    spends: { [fillTx]: [{ amount: 50_000n, script: desk }, { amount: 94_999n, script: vault }] },
+    collateral: 95_000n,
+    premium: 50_000n,
+    writerScript: writer,
+    now: 500,
+    deadline: 1_000,
+    side: 1,
+    vaultScript: vault,
+  });
+  assert.equal(shortVault.phase, "open");
 });

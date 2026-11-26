@@ -1,7 +1,6 @@
 import {
   ACTIVE_PROFILE,
   ACTIVE_STAKE_MAX as STAKE_MAX,
-  btcAmount,
   cancelIntent,
   clearAddress,
   depositAddress,
@@ -39,8 +38,49 @@ import { predictPayout } from "../protocol/pricing.ts";
 import { openingSample, WINDOW_LINE_WITHIN_S } from "../protocol/window-line.ts";
 import { parseOracleFixing } from "../protocol/oracle-client.ts";
 import { PINNED_BACKUP_PUBKEY, PINNED_DESKS, PINNED_ORACLE_PUBKEY, RELAYS } from "./rfq-config.js";
+import { drawMarket, drawRace, drawStep } from "./src/charts.ts";
+import { startSetupWatch } from "./src/demo-setup.ts";
+import {
+  action,
+  betIcon,
+  closeGlyph,
+  copyToClipboard,
+  el,
+  markStep,
+  renderStatus,
+  setFigure,
+  svgEl,
+  themeIcon,
+  txLink,
+} from "./src/dom.ts";
 import { explainError } from "./src/explain.ts";
-import { settlementKnown, usdFromCents } from "./src/position-status.ts";
+import {
+  amount,
+  betFault,
+  capital,
+  clipDetail,
+  DIR,
+  fmtBtc,
+  int,
+  lineNote,
+  lineTag,
+  localTime,
+  mmss,
+  OTHER,
+  parseStake,
+  parseUsd,
+  shortAddress,
+  timesX,
+  usd0,
+  usd2,
+  usdFig,
+  usdLine,
+  usdStake,
+  utcTime,
+  whenDay,
+  worth,
+} from "./src/format.ts";
+import { settlementKnown } from "./src/position-status.ts";
 import { reboardVaultFromPage, refundVaultFromPage } from "./src/settle.ts";
 import { addressBalance, pkScriptOf, readIntent, readKept, watchIntents } from "./src/watch.ts";
 
@@ -151,52 +191,7 @@ function persist() {
   localStorage.setItem(STORE, JSON.stringify(rows));
 }
 
-function fmtBtc(sats) {
-  const neg = sats < 0n;
-  const body = btcAmount(neg ? -sats : sats);
-  return neg ? `-${body}` : body;
-}
-
 const spotUsd = () => Number(state.spotCents) / 100;
-const int = (n) => BigInt(n).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
-const usd0 = (x) => `$${Math.round(x).toLocaleString("en-US")}`;
-/** A line in whole dollars, or to the cent when it has cents, as a window's opening price usually does. */
-const usdLine = (x) => (Math.round(x * 100) % 100 === 0 ? usd0(x) : usd2(x));
-const usd2 = (x) => `$${x.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-const worth = (sats, usd) => (Number(sats) * usd) / 1e8;
-const capital = (text) => text[0].toUpperCase() + text.slice(1);
-const mmss = (s) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
-const hhmm = (d) => `${String(d.getUTCHours()).padStart(2, "0")}:${String(d.getUTCMinutes()).padStart(2, "0")}`;
-
-function whenDay(unix) {
-  return new Date(Number(unix) * 1000).toLocaleDateString("en-US", { timeZone: "UTC", month: "short", day: "numeric" });
-}
-
-function shortAddress(address) {
-  if (!address || address.length < 20) return address || "";
-  return `${address.slice(0, 12)}…${address.slice(-6)}`;
-}
-
-function markStep(item, kind, busy = false) {
-  item.className = kind;
-  if (!busy) return;
-  const spin = el("span", "spin");
-  spin.setAttribute("aria-hidden", "true");
-  item.append(spin);
-}
-
-function clipDetail(text) {
-  const line = String(text ?? "").split("\n").map((row) => row.trim()).find(Boolean) ?? "";
-  return line.replace(/(bearer|token|authorization|secret|password)\s*[:=]?\s*\S+/gi, "$1 …").slice(0, 240);
-}
-
-function renderStatus(node, sentence, detail) {
-  if (!node) return;
-  node.replaceChildren();
-  if (sentence) node.append(document.createTextNode(sentence));
-  const shown = detail && detail !== sentence ? clipDetail(detail) : "";
-  if (shown) node.append(el("code", "fault", shown));
-}
 
 function mine(position) {
   if (position.holderAddress) return position.holderAddress === state.address;
@@ -208,27 +203,6 @@ const isPredict = (kind) => kind === 2 || kind === 3;
 
 function visiblePositions() {
   return state.positions.filter((p) => isPredict(p.kind) && mine(p));
-}
-
-function svgEl(name, attrs, text) {
-  const node = document.createElementNS("http://www.w3.org/2000/svg", name);
-  for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, String(value));
-  if (text != null) node.textContent = text;
-  return node;
-}
-
-function el(tag, className = "", text) {
-  const node = document.createElement(tag);
-  if (className) node.className = className;
-  if (text != null) node.textContent = text;
-  return node;
-}
-
-function action(className, text, fn) {
-  const node = el("button", className, text);
-  node.type = "button";
-  node.addEventListener("click", fn);
-  return node;
 }
 
 function pageHash(view) {
@@ -428,45 +402,6 @@ function voidRefundButton(position) {
   return action("btn sm quiet", "Void & refund stake", (event) => {
     void voidRefundPosition(position, event.currentTarget);
   });
-}
-
-function txLink(label, txid) {
-  if (!/^[0-9a-f]{64}$/.test(txid || "")) return null;
-  const row = el("p", "tx-link");
-  const link = el("a", "", `${txid.slice(0, 8)}…${txid.slice(-4)}`);
-  link.href = `${EXPLORER_TX_URL}${txid}`;
-  link.target = "_blank";
-  link.rel = "noopener";
-  row.append(el("span", "", label), link);
-  return row;
-}
-
-let copiedUntil = 0;
-
-async function copyToClipboard(button, text) {
-  if (!text) return;
-  const previous = button.textContent;
-  copiedUntil = Date.now() + 1200;
-  button.textContent = "Copied";
-  try {
-    await navigator.clipboard.writeText(text);
-  } catch {
-    const area = document.createElement("textarea");
-    area.value = text;
-    area.setAttribute("readonly", "");
-    document.body.append(area);
-    area.select();
-    const ok = document.execCommand("copy");
-    area.remove();
-    if (!ok) {
-      copiedUntil = 0;
-      button.textContent = "Copy failed";
-      return;
-    }
-  }
-  setTimeout(() => {
-    if (button.isConnected && Date.now() >= copiedUntil) button.textContent = previous;
-  }, 1200);
 }
 
 function connectAddress() {
@@ -1003,9 +938,6 @@ function readUnit() {
 }
 
 const inUsd = () => state.bet.unit === "usd";
-/** Dollars, with cents under $100 so a small payout still reads. */
-const usdFig = (x) => (x >= 100 ? usd0(x) : `$${x.toFixed(2)}`);
-const usdStake = (x) => (Number.isInteger(x) ? `$${x.toLocaleString("en-US")}` : `$${x.toFixed(2)}`);
 /** Sats for a dollar amount at the current price, to the nearest 100. */
 const usdToSats = (usd) => BigInt(Math.round((usd * 1e8) / spotUsd() / 100) * 100);
 /** An amount as the bet reads it: dollars at the current price, or sats and ₿. */
@@ -1061,21 +993,13 @@ const LINE_STEPS = [-100, -50, 0, 50, 100];
 const CLOSE_LEAD_S = PREDICT_LOCK_S + PREDICT_MIN_LEFT_S + 10;
 const INDEX_MS = 2_000;
 const TICKS_KEPT = 400;
-const DIR = { 2: "above", 3: "below" };
-const OTHER = { 2: "below", 3: "above" };
 
 let betGen = 0;
 let indexTimer = null;
 let ticksSavedAt = 0;
 /** Index prices this page has seen, newest last: [unix, cents]. */
 const seen = [];
-
-const localTime = (unix) => new Date(Number(unix) * 1000).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
-const utcTime = (unix) => `${hhmm(new Date(Number(unix) * 1000))} UTC`;
-const usdCents = (cents) => `$${usdFromCents(BigInt(cents))}`;
-const timesX = (m) => `${m.toFixed(2)}×`;
 const won = (payout) => payout;
-const amount = (sats) => (sats < 100_000n ? `${int(sats)} sats` : `₿${fmtBtc(sats)}`);
 
 /** The next closes on the 5-minute grid, then the quarter hours after them. */
 function closes(now = Math.floor(Date.now() / 1000)) {
@@ -1219,16 +1143,6 @@ function betPayout(stake, multiplier) {
 }
 
 const beats = (payout, stake) => payout != null && won(payout) > stake;
-
-function lineNote(step) {
-  if (step === 0) return "Current price";
-  return `$${Math.abs(step)} ${step > 0 ? "above" : "under"} current price`;
-}
-
-function lineTag(step) {
-  if (step === 0) return "now";
-  return `${step > 0 ? "+" : "−"}$${Math.abs(step)}`;
-}
 
 function closeClock(node) {
   const left = Number(node.dataset.close) - Math.floor(Date.now() / 1000);
@@ -1511,22 +1425,6 @@ function renderBetPop(focus = false) {
   if (target) (pop.querySelector(`[data-pick="${target}"]`) || $(target))?.focus();
 }
 
-/** "25" or "12.50" → dollars. Two decimals at most. */
-function parseUsd(raw) {
-  const text = String(raw).trim().replace(/^\$/, "").replace(/,/g, "");
-  if (!/^\d*\.?\d{0,2}$/.test(text) || !/\d/.test(text)) return null;
-  const usd = Number(text);
-  return usd > 0 ? usd : null;
-}
-
-/** "0.0005" → 50,000 sats. Eight decimals at most. */
-function parseStake(raw) {
-  const text = String(raw).trim().replace(",", ".");
-  if (!/^\d*\.?\d{0,8}$/.test(text) || !/\d/.test(text)) return null;
-  const [whole, frac = ""] = text.split(".");
-  return BigInt(whole || "0") * 100_000_000n + BigInt(frac.padEnd(8, "0"));
-}
-
 function onBetPick(event) {
   const btn = event.target.closest("[data-pick]");
   if (!btn || btn.getAttribute("aria-disabled") === "true") return;
@@ -1665,12 +1563,6 @@ function pullToReload() {
   document.addEventListener("touchcancel", reset);
 }
 
-function closeGlyph() {
-  const svg = svgEl("svg", { viewBox: "0 0 14 14", "aria-hidden": "true" });
-  svg.append(svgEl("path", { d: "M2.5 2.5l9 9M11.5 2.5l-9 9" }));
-  return svg;
-}
-
 /** Phones: a drawer follows a finger down and closes past 90px, as the wallet's do. */
 function dragToClose(node, close) {
   let from = null;
@@ -1786,20 +1678,6 @@ function renderBet() {
   renderBetFoot();
 }
 
-function betFault(note) {
-  const detail = clipDetail(note);
-  if (note.includes("float short")) return ["The desk can’t cover this payout right now. Stake less, or try again later.", detail];
-  if (/refused: (spot|deribit) unavailable/.test(note)) return ["We can’t get a fair price right now. Try again in a moment.", detail];
-  if (note.includes("refused: expiry")) return ["That window is closing too soon. Pick a later close.", detail];
-  if (note.includes("refused: window line")) return ["The window’s opening price has moved on. Review the prediction again.", detail];
-  if (note.includes("refused: line")) return ["The desk doesn’t quote this line right now. Pick one nearer the current price.", detail];
-  if (note.includes("refused: payout")) return ["This payout doesn’t beat your stake. Stake more or pick a further line.", detail];
-  if (note.includes("refused: stake")) return [`Stake between ${fmtBtc(STAKE_MIN)} and ${fmtBtc(STAKE_MAX)} BTC.`, detail];
-  if (note.includes("exposure")) return ["The desk has taken all it can for now. Try a smaller stake or a later close.", detail];
-  if (note.includes("did not answer")) return ["The desk didn’t answer. Try again in a moment.", detail];
-  return ["Try again in a moment.", detail];
-}
-
 /** The button, the firm multiplier and its ring. Runs every second while the drawer is open. */
 function renderBetFoot() {
   if (!state.bet.checkout) return;
@@ -1835,7 +1713,7 @@ function renderBetFoot() {
     detail = "offer expired";
   } else if (state.bet.quoteNote) {
     label = "Try again";
-    [sentence, detail] = betFault(state.bet.quoteNote);
+    [sentence, detail] = betFault(state.bet.quoteNote, STAKE_MIN, STAKE_MAX);
   }
   const pastedWarn = $("bet-pasted-warn");
   if (pastedWarn) {
@@ -2053,15 +1931,6 @@ function betStatusLabel(p) {
   if (p.status === "expired") return "Time ran out";
   if (p.status === "refunded") return "Refunded";
   return "Open";
-}
-
-function betIcon(kind) {
-  const svg = svgEl("svg", { viewBox: "0 0 20 20", "aria-hidden": "true" });
-  svg.append(
-    svgEl("path", { d: kind === 2 ? "M2.5 15.5l4.5-4.5 3 2.5 6-8" : "M2.5 4.5l4.5 4.5 3-2.5 6 8" }),
-    svgEl("path", { d: kind === 2 ? "M13 5.5h3.5V9" : "M13 14.5h3.5V11" }),
-  );
-  return svg;
 }
 
 function betRow(p) {
@@ -2370,7 +2239,7 @@ function renderPrediction(p) {
     ["Refund", p.status === "refunded" ? p.closeTxid : ""],
     ["Payout tx", p.settleTxid && p.settleTxid !== p.closeTxid ? p.settleTxid : ""],
   ]) {
-    const link = txLink(label, txid);
+    const link = txLink(label, txid, EXPLORER_TX_URL);
     if (link) txs.append(link);
   }
   const more = el("details", "more");
@@ -2419,117 +2288,6 @@ function renderPrediction(p) {
 function payoutMultiplierOf(p) {
   const stake = BigInt(p.premiumSats);
   return stake > 0n ? Number((BigInt(p.collateral) * 100n) / stake) / 100 : 0;
-}
-
-/** Payout steps: nothing at or past the line on the losing side, the whole payout on the winning side. */
-function drawStep(host, { kind, line, stake, payout, now }) {
-  const W = Math.max(260, Math.floor(host.clientWidth));
-  const H = 190;
-  const top = 34;
-  const span = Math.max(300, Math.round(line * 0.004 / 50) * 50);
-  const x0 = line - span;
-  const x1 = line + span;
-  const back = payout > 0n ? Number(won(payout)) : 0;
-  const ymax = Math.max(back, Number(stake)) * 1.12 || 1;
-  const X = (p) => 2 + ((p - x0) / (x1 - x0)) * (W - 4);
-  const Y = (s) => top + (1 - s / ymax) * (H - top - 26);
-  const yb = Y(0);
-  const ys = Y(Number(stake));
-  const yw = Y(back);
-  const xl = X(line);
-  const winLeft = kind === 3;
-  const svg = svgEl("svg", {
-    width: W,
-    height: H,
-    viewBox: `0 0 ${W} ${H}`,
-    role: "img",
-    "aria-label": `You get back ${int(back)} sats if BTC closes ${DIR[kind]} ${usdLine(line)}, and nothing at or ${OTHER[kind]} it.`,
-  });
-  const winX = winLeft ? [2, xl] : [xl, W - 2];
-  const loseX = winLeft ? [xl, W - 2] : [2, xl];
-  const curve = winLeft
-    ? `M2 ${yw}H${xl}V${yb}H${W - 2}`
-    : `M2 ${yb}H${xl}V${yw}H${W - 2}`;
-  svg.append(
-    svgEl("rect", { x: winX[0], y: yw, width: winX[1] - winX[0], height: yb - yw, class: "area" }),
-    svgEl("rect", { x: winX[0], y: yw, width: winX[1] - winX[0], height: Math.max(0, ys - yw), class: "more" }),
-    svgEl("rect", { x: loseX[0], y: ys, width: loseX[1] - loseX[0], height: yb - ys, class: "less" }),
-    svgEl("line", { x1: 2, x2: W - 2, y1: ys, y2: ys, class: "lock" }),
-    svgEl("path", { d: curve, class: "curve" }),
-    svgEl("line", { x1: 2, x2: W - 2, y1: yb, y2: yb, class: "base" }),
-    svgEl("line", { x1: xl, x2: xl, y1: 4, y2: yb, class: "mark" }),
-    svgEl("text", { x: winLeft ? xl - 7 : xl + 7, y: 14, "text-anchor": winLeft ? "end" : "start", class: "mark-label" }, `Your line${now ? " = now" : ""} · ${usdLine(line)}`),
-    svgEl("text", { x: winLeft ? 8 : W - 8, y: yw - 8, "text-anchor": winLeft ? "start" : "end", class: "paid" }, `${int(back)} back`),
-    svgEl("text", { x: winLeft ? W - 8 : 8, y: ys - 7, "text-anchor": winLeft ? "end" : "start" }, `You put in ${int(stake)}`),
-    svgEl("text", { x: winLeft ? W - 8 : 8, y: yb - 9, "text-anchor": winLeft ? "end" : "start", class: "nothing" }, "Nothing back"),
-    svgEl("text", { x: 2, y: yb + 18, class: "tick" }, usd0(x0)),
-    svgEl("text", { x: W - 2, y: yb + 18, "text-anchor": "end", class: "tick" }, usd0(x1)),
-  );
-  host.replaceChildren(svg);
-}
-
-/** BTC against the line over the window. The zone above or below the line is the bettor's. */
-function drawRace(host, { kind, line, start, expiry, ticks, fixing, now }) {
-  const W = Math.max(260, Math.floor(host.clientWidth));
-  const H = 240;
-  const top = 26;
-  const points = ticks.filter(([t]) => t >= start - 5).map(([t, c]) => [t, c / 100]);
-  const t0 = Math.min(start, points[0]?.[0] ?? start);
-  const t1 = Math.max(expiry + 30, Math.min(now, expiry + 120));
-  const prices = [line, ...points.map(([, p]) => p), ...(fixing != null ? [fixing] : [])];
-  let lo = Math.min(...prices);
-  let hi = Math.max(...prices);
-  const pad = Math.max((hi - lo) * 0.25, 25);
-  lo -= pad;
-  hi += pad;
-  const X = (t) => 2 + ((t - t0) / (t1 - t0)) * (W - 4);
-  const Y = (p) => top + (1 - (p - lo) / (hi - lo)) * (H - top - 26);
-  const yl = Y(line);
-  const yb = H - 26;
-  const xe = X(expiry);
-  const mine = kind === 2 ? [top, yl] : [yl, yb];
-  const desk = kind === 2 ? [yl, yb] : [top, yl];
-  const svg = svgEl("svg", {
-    width: W,
-    height: H,
-    viewBox: `0 0 ${W} ${H}`,
-    role: "img",
-    "aria-label": fixing != null
-      ? `BTC against your ${usdLine(line)} line. The fixing was ${usd2(fixing)}.`
-      : `BTC against your ${usdLine(line)} line until ${localTime(expiry)}.`,
-  });
-  svg.append(
-    svgEl("rect", { x: 2, y: mine[0], width: W - 4, height: Math.max(0, mine[1] - mine[0]), class: "win" }),
-    svgEl("rect", { x: 2, y: desk[0], width: W - 4, height: Math.max(0, desk[1] - desk[0]), class: "desk" }),
-    svgEl("line", { x1: 2, x2: W - 2, y1: yl, y2: yl, class: "lock" }),
-    svgEl("text", { x: 8, y: kind === 2 ? yl - 7 : yl + 17, class: "halo" }, `Your line ${usdLine(line)}`),
-    svgEl("line", { x1: xe, x2: xe, y1: top - 14, y2: yb, class: "mark" }),
-    svgEl("text", { x: xe - 6, y: top - 4, "text-anchor": "end", class: "mark-label" }, `Closes ${localTime(expiry)}`),
-    svgEl("line", { x1: 2, x2: W - 2, y1: yb, y2: yb, class: "base" }),
-    svgEl("text", { x: 2, y: yb + 18, class: "tick" }, localTime(t0)),
-    svgEl("text", { x: W - 2, y: yb + 18, "text-anchor": "end", class: "tick" }, localTime(t1)),
-  );
-  if (points.length > 1) {
-    const path = points.map(([t, p], i) => `${i ? "L" : "M"}${X(t).toFixed(1)} ${Y(p).toFixed(1)}`).join("");
-    svg.append(svgEl("path", { d: path, class: "price" }));
-  }
-  const last = points.at(-1);
-  if (last && fixing == null) {
-    svg.append(
-      svgEl("circle", { cx: X(last[0]), cy: Y(last[1]), r: 5, class: "dot" }),
-      svgEl("text", { x: Math.min(W - 8, X(last[0]) + 9), y: Y(last[1]) - 8, "text-anchor": X(last[0]) > W - 90 ? "end" : "start", class: "today-label halo" }, usd0(last[1])),
-    );
-  }
-  if (fixing != null) {
-    svg.append(
-      svgEl("circle", { cx: xe, cy: Y(fixing), r: 6, class: "dot fixing" }),
-      svgEl("text", { x: xe - 10, y: Y(fixing) + (Y(fixing) < yl ? -10 : 20), "text-anchor": "end", class: "today-label halo" }, `Fixing ${usd2(fixing)}`),
-    );
-  }
-  if (points.length < 2) {
-    svg.append(svgEl("text", { x: W / 2, y: (top + yb) / 2, "text-anchor": "middle", class: "tick" }, "The price draws here while this page is open."));
-  }
-  host.replaceChildren(svg);
 }
 
 // ----- the index, sampled while it matters -----
@@ -2604,7 +2362,6 @@ function betTick(now) {
 // ----- the market panel: the price, its last minutes, the line and the close -----
 
 const HISTORY_URL = "https://www.deribit.com/api/v2/public/get_index_chart_data?index_name=btc_usd&range=1h";
-const MARKET_SPAN_S = 8 * 60;
 let historyLoaded = false;
 
 /** The last hour of prices, so the chart has a past on first paint: the oracle's, or the index's. */
@@ -2639,22 +2396,6 @@ async function loadHistory() {
   }
 }
 
-/** Swap the figure's characters, rolling the ones that changed in the direction of the move. */
-function setFigure(node, text) {
-  const prev = node.dataset.text || "";
-  if (prev === text) return;
-  const value = (raw) => Number(raw.replace(/[^0-9.]/g, ""));
-  const up = value(text) >= value(prev);
-  const animate = prev.length === text.length;
-  node.replaceChildren(...[...text].map((ch, i) => {
-    const span = el("span", "digit", ch);
-    if (animate && prev[i] !== ch && /\d/.test(ch)) span.classList.add(up ? "roll-up" : "roll-down");
-    return span;
-  }));
-  node.dataset.text = text;
-  node.setAttribute("aria-label", text);
-}
-
 function renderMarket() {
   if (state.view !== "predict") return;
   const now = Math.floor(Date.now() / 1000);
@@ -2686,7 +2427,16 @@ function renderMarket() {
       const ahead = kind === 2 ? gap > 0 : gap < 0;
       sub.replaceChildren(arrow, el("b", "", usd2(Math.abs(gap))), ` ${gap >= 0 ? "above" : "below"} the opening price · ${ahead ? "you’re ahead" : "you’re behind"}`);
     }
-    drawMarket($("mkt-chart"), { points: seen, line: cents == null ? null : cents / 100, kind, close: shownClose, now, showLine: cents != null });
+    drawMarket($("mkt-chart"), {
+      points: seen,
+      line: cents == null ? null : cents / 100,
+      kind,
+      close: shownClose,
+      now,
+      showLine: cents != null,
+      windowed: true,
+      readyForFit: priced() && state.view === "predict",
+    });
     return;
   }
   $("mkt-close").textContent = `Closes ${localTime(close)}`;
@@ -2696,7 +2446,7 @@ function renderMarket() {
   arrow.setAttribute("aria-hidden", "true");
   const ahead = kind === 2 ? gap > 0 : gap < 0;
   sub.replaceChildren(arrow, el("b", "", usd2(Math.abs(gap))), ` ${gap >= 0 ? "above" : "below"} your ${usd0(line)} line${Math.abs(gap) >= 0.01 ? ` · ${ahead ? "you’d win" : "the desk would win"} now` : ""}`);
-  drawMarket($("mkt-chart"), { points: seen, line, kind, close, now });
+  drawMarket($("mkt-chart"), { points: seen, line, kind, close, now, windowed, readyForFit: priced() && state.view === "predict" });
 }
 
 function marketClock(now) {
@@ -2706,117 +2456,6 @@ function marketClock(now) {
   const w = lineMode() === "window" ? currentWindow(now) : null;
   const left = (w?.waiting ? w.open : betClose()) - now;
   node.textContent = left > 0 ? mmss(left) : "0:00";
-}
-
-/**
- * Chart height for the space the card has. Beside the bet it grows until the
- * card ends level with the bet column, as long as the sticky card still fits
- * on screen. Above the bet it takes a share of the width and of the screen.
- * Phones keep a short chart so the bet and its button fit.
- */
-let marketFit = { key: "", height: 0 };
-
-function chartHeight(host, W) {
-  if (W < 520 && host.closest(".market")) {
-    // Phones: the market chart takes the room the page leaves above the tab bar, between a floor and a
-    // ceiling. It is measured once per screen size, so the card never grows or shrinks as the price moves.
-    const view = document.documentElement;
-    // Measured again once the fonts have loaded, since the text settles to its real height then.
-    const key = `${view.clientWidth}x${view.clientHeight}|${document.fonts?.status ?? "loaded"}`;
-    if (marketFit.key === key) return marketFit.height;
-    const predict = $("predict");
-    const page = $("main");
-    const nav = document.querySelector(".nav");
-    const floor = nav && getComputedStyle(nav).position === "fixed" ? nav.getBoundingClientRect().top + window.scrollY : view.clientHeight;
-    // The page's own bottom padding counts too; leaving it out made the view taller than the screen.
-    const padding = page ? parseFloat(getComputedStyle(page).paddingBottom) || 0 : 0;
-    const end = predict && !predict.hidden ? predict.getBoundingClientRect().bottom + window.scrollY + padding : floor;
-    const spare = Math.min(view.clientHeight, floor) - end - 4;
-    const base = host.offsetHeight > 0 ? host.offsetHeight : 120;
-    const height = Math.round(Math.min(W < 420 ? 260 : 280, Math.max(120, base + spare)));
-    // Keep it only once the page is priced, when the sentence has its final length.
-    if (priced() && state.view === "predict") marketFit = { key, height };
-    return height;
-  }
-  if (W < 420) return 104;
-  if (W < 520) return 128;
-  const card = host.closest(".market");
-  // Everything in the card that is not the chart: head, legend, padding, margins.
-  const rest = card ? card.offsetHeight - host.offsetHeight : 170;
-  const screen = window.innerHeight;
-  if (window.matchMedia("(min-width: 1101px)").matches) {
-    const compose = card?.parentElement?.querySelector(".compose");
-    const level = compose ? compose.offsetHeight - rest : 212;
-    const onScreen = screen - 96 - 24 - rest;
-    return Math.round(Math.max(212, Math.min(level, onScreen, W * 0.75)));
-  }
-  return Math.round(Math.max(160, Math.min(W * 0.3, screen * 0.28, 280)));
-}
-
-function drawMarket(host, { points, line, kind, close, now, showLine = true }) {
-  const W = Math.max(280, Math.floor(host.clientWidth));
-  const H = chartHeight(host, W);
-  const top = 14;
-  const bottom = H - 24;
-  const t0 = now - MARKET_SPAN_S;
-  const t1 = Math.max(close + 20, now + 60);
-  const pts = points.filter(([t]) => t >= t0 - 12).map(([t, c]) => [t, c / 100]);
-  if (pts.length < 2) {
-    const skel = el("div", "skel");
-    skel.style.height = `${H}px`;
-    host.replaceChildren(skel);
-    return;
-  }
-  const prices = showLine ? [line, ...pts.map(([, p]) => p)] : pts.map(([, p]) => p);
-  let lo = Math.min(...prices);
-  let hi = Math.max(...prices);
-  const pad = Math.max((hi - lo) * 0.2, 8);
-  lo -= pad;
-  hi += pad;
-  const X = (t) => ((t - t0) / (t1 - t0)) * W;
-  const Y = (p) => top + (1 - (p - lo) / (hi - lo)) * (bottom - top);
-  const yl = showLine ? Y(line) : 0;
-  const xn = X(pts.at(-1)[0]);
-  const xc = X(close);
-  const svg = svgEl("svg", {
-    width: W,
-    height: H,
-    viewBox: `0 0 ${W} ${H}`,
-    role: "img",
-    "aria-label": `BTC over the last ${MARKET_SPAN_S / 60} minutes against your ${usdLine(line)} line, closing at ${localTime(close)}.`,
-  });
-  const defs = svgEl("defs", {});
-  const fade = svgEl("linearGradient", { id: "mkt-fade", x1: 0, y1: 0, x2: 0, y2: 1 });
-  fade.append(
-    svgEl("stop", { offset: "0%", style: "stop-color: var(--ink); stop-opacity: .14" }),
-    svgEl("stop", { offset: "100%", style: "stop-color: var(--ink); stop-opacity: 0" }),
-  );
-  defs.append(fade);
-  const path = pts.map(([t, p], i) => `${i ? "L" : "M"}${X(t).toFixed(1)} ${Y(p).toFixed(1)}`).join("");
-  const area = `${path}L${xn.toFixed(1)} ${bottom}L${X(pts[0][0]).toFixed(1)} ${bottom}Z`;
-  const zone = kind === 2 ? [top - 14, yl] : [yl, bottom];
-  // Narrow screens name the line by its price alone, so the tag fits in the time still to come.
-  const tagText = W < 520 ? usdLine(line) : `${lineMode() === "window" ? "Opening price" : "Your line"} ${usdLine(line)}`;
-  const tagW = tagText.length * 7.2 + 14;
-  // The tag sits in the time still to come, unless now is too close to the edge.
-  const tagX = xn + 12 + tagW <= W - 10 ? W - tagW - 10 : 10;
-  const tagY = Math.min(bottom - 22, Math.max(top - 6, yl - 11));
-  const tag = svgEl("g", { class: "mkt-tag" });
-  tag.append(svgEl("rect", { x: tagX, y: tagY, width: tagW, height: 22 }), svgEl("text", { x: tagX + 7, y: tagY + 15 }, tagText));
-  svg.append(
-    defs,
-    ...(showLine ? [svgEl("rect", { x: 0, y: zone[0], width: W, height: Math.max(0, zone[1] - zone[0]), class: "mkt-zone" })] : []),
-    svgEl("rect", { x: xn, y: top - 14, width: Math.max(0, W - xn), height: bottom - top + 14, class: "mkt-future" }),
-    svgEl("line", { x1: xc, x2: xc, y1: top - 14, y2: bottom, class: "mkt-close" }),
-    svgEl("path", { d: area, class: "mkt-area" }),
-    svgEl("path", { d: path, class: "mkt-line" }),
-    ...(showLine ? [svgEl("line", { x1: 0, x2: W, y1: yl, y2: yl, class: "mkt-level" }), tag] : []),
-    svgEl("circle", { cx: xn, cy: Y(pts.at(-1)[1]), r: 4, class: "mkt-pulse" }),
-    svgEl("circle", { cx: xn, cy: Y(pts.at(-1)[1]), r: 4, class: "mkt-now" }),
-    svgEl("text", { x: 16, y: H - 6, class: "tick" }, localTime(t0)),
-    svgEl("text", { x: Math.min(W - 16, xc), y: H - 6, "text-anchor": xc > W - 60 ? "end" : "middle", class: "tick" }, `close ${localTime(close)}`),
-  );
-  host.replaceChildren(svg);
 }
 
 /** Live rows: the bar is how much of the window has gone. */
@@ -2837,20 +2476,6 @@ function effectiveTheme() {
   const set = document.documentElement.dataset.theme;
   if (set === "light" || set === "dark") return set;
   return window.matchMedia?.("(prefers-color-scheme: dark)").matches ? "dark" : "light";
-}
-
-/** The toggle shows where it goes: a moon in light, a sun in dark. */
-function themeIcon(theme) {
-  const svg = svgEl("svg", { viewBox: "0 0 20 20", "aria-hidden": "true", fill: "none", stroke: "currentColor", "stroke-width": "1.5", "stroke-linecap": "square" });
-  if (theme === "dark") {
-    svg.append(svgEl("circle", { cx: 10, cy: 10, r: 3.5 }));
-    for (const [x1, y1, x2, y2] of [[10, 1.5, 10, 3.5], [10, 16.5, 10, 18.5], [1.5, 10, 3.5, 10], [16.5, 10, 18.5, 10], [4, 4, 5.4, 5.4], [14.6, 14.6, 16, 16], [4, 16, 5.4, 14.6], [14.6, 5.4, 16, 4]]) {
-      svg.append(svgEl("line", { x1, y1, x2, y2 }));
-    }
-  } else {
-    svg.append(svgEl("path", { d: "M16.5 12.2A6.75 6.75 0 0 1 7.8 3.5a6.75 6.75 0 1 0 8.7 8.7z" }));
-  }
-  return svg;
 }
 
 function syncTheme() {
@@ -2879,121 +2504,6 @@ function bindTheme() {
   });
 }
 
-
-// ----- demo setup: the page walks through funding a `pnpm demo` system -----
-
-const DEMO_SETUP = typeof __COINFLIP_DEMO__ !== "undefined" && __COINFLIP_DEMO__?.setup;
-let setupSeen = "";
-
-async function readSetup() {
-  if (!DEMO_SETUP) return;
-  let next = null;
-  try {
-    const res = await fetch("/demo.json", { cache: "no-store" });
-    if (res.ok) next = await res.json();
-  } catch {
-    next = null;
-  }
-  if (!next) {
-    $("setup-pill").hidden = true;
-    $("demo-setup").hidden = true;
-    return;
-  }
-  // The page is rebuilt once the oracle and desk are up; pick that build up when setup finishes.
-  if (next.stage === "ready" && setupSeen && setupSeen !== "ready") {
-    location.reload();
-    return;
-  }
-  setupSeen = next.stage;
-  renderSetup(next);
-}
-
-/** Shorten an address for the panel; the copy button copies it whole. */
-function shortAddress12(address) {
-  return address.length > 24 ? `${address.slice(0, 12)}…${address.slice(-8)}` : address;
-}
-
-function setupStep(index, { title, note, address, balance, need, done, busy }) {
-  const item = el("li", done ? "done" : "");
-  const head = el("div", "setup-head");
-  head.append(el("span", "setup-n", String(index)), el("b", "", title));
-  head.append(el("span", done ? "pill ok" : "pill", done ? (busy ? "Setting up" : "Received") : address ? "Waiting" : "Next"));
-  item.append(head, el("p", "sub", note));
-  if (address && !done) {
-    const row = el("div", "setup-addr");
-    const code = el("code", "", shortAddress12(address));
-    code.title = address;
-    row.append(code, action("btn sm quiet", "Copy", (event) => {
-      void copyToClipboard(event.currentTarget, address);
-    }));
-    item.append(row, el("p", "setup-bal", `${int(BigInt(balance || 0))} of ${int(BigInt(need))} sats`));
-  }
-  return item;
-}
-
-let setupOpen = false;
-
-function renderSetup(next) {
-  const pill = $("setup-pill");
-  const panel = $("demo-setup");
-  if (next.stage === "ready") {
-    pill.hidden = true;
-    panel.hidden = true;
-    return;
-  }
-  const deskDone = BigInt(next.desk?.balance || 0) >= BigInt(next.desk?.need || 0) / 4n;
-  const count = Number(deskDone);
-  pill.hidden = false;
-  $("setup-pill-text").replaceChildren(el("span", "long", "Fund demo "), `${count}/1`);
-  pill.setAttribute("aria-label", `Demo setup, ${count} of 1 deposit in`);
-  pill.setAttribute("aria-expanded", String(setupOpen));
-  const steps = el("ol", "setup-steps");
-  steps.append(
-    setupStep(1, {
-      title: "Desk",
-      note: next.desk?.address
-        ? `Send about ${int(BigInt(next.desk.need))} sats. It pays winning predictions.`
-        : "Starting the desk…",
-      address: next.desk?.address || "",
-      balance: next.desk?.balance || "0",
-      need: next.desk?.need || "0",
-      done: deskDone,
-    }),
-  );
-  const open = el("a", "textbtn", `Open your ${ACTIVE_PROFILE.label} wallet`);
-  open.href = next.wallet || WALLET_URL;
-  open.target = "_blank";
-  open.rel = "noopener";
-  const title = el("p", "setup-title", "One deposit before the first prediction");
-  title.id = "setup-title";
-  const foot = el("p", "setup-foot");
-  foot.append(open, " · updates as it lands");
-  panel.replaceChildren(title, steps, foot);
-  panel.hidden = !setupOpen;
-}
-
-function toggleSetup(open = !setupOpen) {
-  setupOpen = open;
-  const panel = $("demo-setup");
-  panel.style.top = `${Math.round($("bar").getBoundingClientRect().bottom) + 8}px`;
-  panel.hidden = !open;
-  $("setup-pill").setAttribute("aria-expanded", String(open));
-}
-
-function startSetupWatch() {
-  if (!DEMO_SETUP) return;
-  listen("setup-pill", "click", () => toggleSetup());
-  document.addEventListener("click", (event) => {
-    if (setupOpen && !event.target.closest("#demo-setup, #setup-pill")) toggleSetup(false);
-  });
-  document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape" && setupOpen) toggleSetup(false);
-  });
-  void readSetup();
-  setInterval(() => {
-    if (setupSeen !== "ready") void readSetup();
-  }, 4_000);
-}
 
 function bindBet() {
   document.querySelectorAll("[data-call]").forEach((btn) => {
@@ -3234,5 +2744,9 @@ if (!consumeWalletHandoff()) {
   setInterval(() => {
     void loadPrices();
   }, REFRESH_MS);
-  startSetupWatch();
+  startSetupWatch({
+    enabled: Boolean(typeof __COINFLIP_DEMO__ !== "undefined" && __COINFLIP_DEMO__?.setup),
+    networkLabel: ACTIVE_PROFILE.label,
+    defaultWalletUrl: WALLET_URL,
+  });
 }

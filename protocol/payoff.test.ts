@@ -50,10 +50,17 @@ test("settlePayouts rejects underfunded vaults and builds single-winner outputs"
   );
 });
 
-test("predict pricing computes 1.90x at even odds and clamps outside bounds", () => {
-  const years = 300 / (365 * 24 * 3600);
-  assert.ok(Math.abs(probAbove(100, 100, years, 0.5) - 0.5) < 0.001);
-  assert.equal(predictMultiplier({ kind: 2, spotCents: 9_000_000, lineCents: 9_000_000, years, vol: 0.5 }), 1.9);
+test("predict pricing computes 1.90x at even odds, scales by distance, and clamps extremes", () => {
+  const years = 161 / (365 * 24 * 3600);
+  const at = (kind: 2 | 3, lineCents: number) => predictMultiplier({ kind, spotCents: 8_231_500, lineCents, years, vol: 0.45 });
+  assert.ok(Math.abs(probAbove(100, 100, years, 0.45) - 0.5) < 0.001);
+  assert.equal(at(2, 8_231_500), 1.9);
+  assert.ok(at(2, 8_236_500)! > 1.9);
+  assert.ok(at(3, 8_226_500)! > 1.9);
+  assert.ok(at(2, 8_226_500)! < 1.9);
+  assert.equal(at(2, 8_300_000), null);
+  assert.equal(at(2, 8_100_000), null);
   assert.equal(predictPayout(50_000n, 1.9), 95_000n);
+  assert.equal(predictPayout(33_333n, 3.45), 114_998n);
   assert.equal(payoutMultiplier(50_000n, 95_000n), 1.9);
 });

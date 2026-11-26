@@ -179,11 +179,7 @@ function openSession(identity: SingleKey): Promise<Session> {
   return pending;
 }
 
-export function btcAmount(sats: bigint) {
-  const whole = sats / 100_000_000n;
-  const frac = (sats % 100_000_000n).toString().padStart(8, "0").replace(/0+$/, "");
-  return frac ? `${whole}.${frac}` : whole.toString();
-}
+export { btcAmount } from "./format.ts";
 
 export function paymentUri(address: string, sats: bigint): string {
   return BIP21.create({ ark: address, amount: Number(sats) / 1e8 });
