@@ -1,7 +1,8 @@
 import { arkade } from "@arkade-os/sdk";
 
-import intentArtifact from "../contracts/option_intent.artifact.json" with { type: "json" };
-import predictArtifact from "../contracts/predict_vault.artifact.json" with { type: "json" };
+import { optionIntentArtifact, predictVaultArtifact } from "../contracts/index.ts";
+
+export { optionIntentArtifact, predictVaultArtifact };
 
 // BIP68 time-based relative locktime: bit 22 set, value in 512-second units.
 export function exitSequence(seconds: bigint): bigint {
@@ -18,9 +19,13 @@ function loadArtifact(artifact: arkade.ContractArtifact): ReturnType<typeof arka
 }
 
 export function predictVaultProgram() {
-  return loadArtifact(predictArtifact as arkade.ContractArtifact);
+  return loadArtifact(predictVaultArtifact as arkade.ContractArtifact);
 }
 
 export function intentProgram() {
-  return loadArtifact(intentArtifact as arkade.ContractArtifact);
+  return loadArtifact(intentArtifactCast(optionIntentArtifact));
+}
+
+function intentArtifactCast(artifact: unknown): arkade.ContractArtifact {
+  return artifact as arkade.ContractArtifact;
 }

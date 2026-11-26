@@ -37,7 +37,7 @@ import {
 } from "../protocol/constants.ts";
 import { predictPayout } from "../protocol/pricing.ts";
 import { openingSample, WINDOW_LINE_WITHIN_S } from "../protocol/window-line.ts";
-import { parseOracleFixing } from "../settle/oracle.ts";
+import { parseOracleFixing } from "../protocol/oracle-client.ts";
 import { PINNED_BACKUP_PUBKEY, PINNED_DESKS, PINNED_ORACLE_PUBKEY, RELAYS } from "./rfq-config.js";
 import { explainError } from "./src/explain.ts";
 import { settlementKnown, usdFromCents } from "./src/position-status.ts";

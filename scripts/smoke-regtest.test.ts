@@ -31,8 +31,8 @@ import { FIX_EXPIRY_LAG } from "../protocol/fixing.ts";
 import { bytesToHex, hexToBytes } from "../protocol/hex.ts";
 import { networkByName } from "../protocol/network.ts";
 import { intentProgram, predictVaultProgram } from "../protocol/programs.ts";
-import { fetchOracleFixing } from "../settle/oracle.ts";
-import { refundQuote, settlePredictQuote } from "../settle/vault.ts";
+import { fetchOracleFixing } from "../protocol/oracle-client.ts";
+import { refundQuote, settlePredictQuote } from "../protocol/vault-ops.ts";
 
 /**
  * Standalone PredictVaultV3 end-to-end smoke test on a local arkade-regtest stack

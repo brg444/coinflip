@@ -3,11 +3,11 @@ import test from "node:test";
 
 import { SingleKey, type arkade } from "@arkade-os/sdk";
 
-import predictArtifact from "../../contracts/predict_vault.artifact.json" with { type: "json" };
 import { EXIT } from "../../protocol/constants.ts";
 import { bindContracts } from "../../protocol/contracts.ts";
 import { cancelIntentDelegation, executorArtifact, reboardVaultDelegation, scriptNumHex } from "../../protocol/executor.ts";
 import { bytesToHex } from "../../protocol/hex.ts";
+import { predictVaultArtifact as predictArtifact } from "../../protocol/programs.ts";
 import { MUTINYNET_ORACLE_PUBKEY } from "../rfq-config.js";
 import { explainError } from "./explain.ts";
 import { backupKeyMatches, oracleKeyMatches } from "./rfq.ts";

@@ -29,7 +29,7 @@ import { bytesToHex, hexToBytes, xOnly } from "../protocol/hex.ts";
 import { parsePosition } from "../protocol/messages.ts";
 import { networkProfile } from "../protocol/network.ts";
 import { exitSequence, predictVaultProgram } from "../protocol/programs.ts";
-import { positionFromAnnouncement, termsFor } from "../settle/positions.ts";
+import { positionFromAnnouncement, termsFor } from "../protocol/positions.ts";
 
 const N = 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141n;
 

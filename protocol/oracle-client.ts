@@ -1,11 +1,13 @@
 import { schnorr } from "@noble/curves/secp256k1.js";
 
-import { centsOf, intentSigned } from "../protocol/dia.ts";
-import { FIX_EXPIRY_LAG, predictFixDigest } from "../protocol/fixing.ts";
-import { bytesToHex } from "../protocol/hex.ts";
+import { centsOf, intentSigned } from "./dia.ts";
+import { FIX_EXPIRY_LAG, predictFixDigest } from "./fixing.ts";
+import { bytesToHex } from "./hex.ts";
+import type { OracleFeedPort } from "./ports.ts";
 
 /**
- * Client helpers for the stateless fixing oracle (`/api/status`, `/api/prices`, `/api/fixing`).
+ * Client & cryptographic verifier for the stateless fixing oracle
+ * (`/api/status`, `/api/prices`, `/api/fixing`).
  */
 
 export type OracleLatest = { cents: bigint; time: number };
@@ -28,6 +30,8 @@ export type OracleFixing = {
   oraclePk: Uint8Array;
   oraclePkHex: string;
 };
+
+export type OracleSample = { price: string; time: number };
 
 const HEX = /^[0-9a-fA-F]+$/;
 
@@ -60,8 +64,6 @@ export function serviceOrigin(raw: string): string {
   if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error("URL must be an http(s) origin");
   return url.origin;
 }
-
-export type OracleSample = { price: string; time: number };
 
 /** Samples from `GET /api/prices`. Rows that are not a price and a time are skipped. */
 export async function fetchOraclePrices(origin: string, from: number, to: number, signal?: AbortSignal): Promise<OracleSample[]> {
@@ -158,4 +160,14 @@ export async function fetchOracleFixing(
   const fixing = parseOracleFixing(raw, expectedOraclePkHex);
   if (!fixing) return { status: 502, fixing: null, error: "invalid fixing signature" };
   return { status: 200, fixing };
+}
+
+/** HTTP adapter implementing `OracleFeedPort` against an oracle origin. */
+export function createHttpOracleClient(rawOrigin: string): OracleFeedPort {
+  const origin = serviceOrigin(rawOrigin);
+  return {
+    fetchStatus: (signal) => fetchOracleStatus(origin, signal),
+    fetchPrices: (from, to, signal) => fetchOraclePrices(origin, from, to, signal),
+    fetchFixing: (expiry, expectedOraclePkHex, signal) => fetchOracleFixing(origin, expiry, expectedOraclePkHex, signal),
+  };
 }

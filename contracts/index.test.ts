@@ -5,33 +5,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { compileContract } from "./compile.mjs";
-
-import { bindContracts as bindContractsFromProtocol } from "../protocol/contracts.ts";
-import {
-  buildPredictSettle as buildPredictSettleFromProtocol,
-  buildRefund as buildRefundFromProtocol,
-  predictSettlePriceCents as predictSettlePriceCentsFromProtocol,
-  submit as submitFromProtocol,
-} from "../protocol/cospend.ts";
-import { predictFixDigest as predictFixDigestFromProtocol } from "../protocol/fixing.ts";
-import {
-  intentProgram as intentProgramFromProtocol,
-  predictVaultProgram as predictVaultProgramFromProtocol,
-} from "../protocol/programs.ts";
-import { settlePayouts as settlePayoutsFromSettle } from "../settle/vault.ts";
-import {
-  bindContracts,
-  buildPredictSettle,
-  buildRefund,
-  intentProgram,
-  optionIntentArtifact,
-  predictFixDigest,
-  predictSettlePriceCents,
-  predictVaultArtifact,
-  predictVaultProgram,
-  settlePayouts,
-  submit,
-} from "./index.ts";
+import { CONTRACT_ARTIFACTS, optionIntentArtifact, predictVaultArtifact } from "./index.ts";
 
 type Artifact = {
   contractName: string;
@@ -58,7 +32,9 @@ function api(artifact: Artifact) {
   };
 }
 
-test("the two artifacts publish the PredictVault and OptionIntent functions", () => {
+test("the two Layer-0 artifacts publish the PredictVault and OptionIntent functions", () => {
+  assert.equal(CONTRACT_ARTIFACTS.PredictVault, predictVaultArtifact);
+  assert.equal(CONTRACT_ARTIFACTS.OptionIntent, optionIntentArtifact);
   assert.deepEqual(api(predictVaultArtifact as Artifact), {
     name: "PredictVault",
     constructor: [
@@ -105,20 +81,6 @@ test("the two artifacts publish the PredictVault and OptionIntent functions", ()
       { name: "unilateral", inputs: ["userSig"] },
     ],
   });
-});
-
-test("the import surface exposes the PredictVault and OptionIntent helpers", () => {
-  assert.equal(bindContracts, bindContractsFromProtocol);
-  assert.equal(predictFixDigest, predictFixDigestFromProtocol);
-  assert.equal(buildPredictSettle, buildPredictSettleFromProtocol);
-  assert.equal(buildRefund, buildRefundFromProtocol);
-  assert.equal(predictSettlePriceCents, predictSettlePriceCentsFromProtocol);
-  assert.equal(submit, submitFromProtocol);
-  assert.equal(intentProgram, intentProgramFromProtocol);
-  assert.equal(predictVaultProgram, predictVaultProgramFromProtocol);
-  assert.equal(settlePayouts, settlePayoutsFromSettle);
-  assert.deepEqual(Object.keys(intentProgram().functions).sort(), ["cancel", "cancelCltv", "finalize", "unilateral"]);
-  assert.deepEqual(Object.keys(predictVaultProgram().functions).sort(), ["close", "reboard", "refund", "refundBackup", "settle", "unilateral"]);
 });
 
 test("committed contract artifacts match compiled .ark sources", async () => {

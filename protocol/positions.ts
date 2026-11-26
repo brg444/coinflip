@@ -1,11 +1,11 @@
-import { PREDICT_VAULT_PROGRAM_ID, type PredictKind } from "../protocol/constants.ts";
-import { directPayoutKey, type Terms } from "../protocol/contracts.ts";
-import { hexToBytes } from "../protocol/hex.ts";
-import { parsePosition, type OptionPosition } from "../protocol/messages.ts";
+import { PREDICT_VAULT_PROGRAM_ID, type PredictKind } from "./constants.ts";
+import { directPayoutKey, type Terms } from "./contracts.ts";
+import { hexToBytes } from "./hex.ts";
+import { parsePosition, type OptionPosition } from "./messages.ts";
 
 /**
- * A filled PredictVault announced on Nostr. The settler rebuilds the contract
- * from these fields without calling a desk.
+ * A filled PredictVault announced publicly. Any permissionless settler or
+ * recovery script rebuilds the exact contract from these fields without calling a desk.
  */
 export type WatchPosition = {
   id: string;
@@ -33,7 +33,7 @@ export type WatchPosition = {
 };
 
 /**
- * Vaults handed to the process directly. Accepts one position, an array, or
+ * Vaults handed to a settler directly. Accepts one position, an array, or
  * `{ positions: [...] }`. Rows that are not a filled-vault record are skipped.
  */
 export function manualPositions(body: unknown): OptionPosition[] {

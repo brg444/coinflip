@@ -1,14 +1,16 @@
 import { arkade, Transaction, type CSVMultisigTapscript, type EmulatorProvider } from "@arkade-os/sdk";
 import { base64 } from "@scure/base";
 
-import { holderPayoff, settlementOutputs } from "../app/settle-math.js";
-import { PREDICT_VOID_AFTER, type PredictKind } from "../protocol/constants.ts";
-import { bindContracts, type Terms } from "../protocol/contracts.ts";
-import { buildPredictSettle, buildRefund, refundOutputs, submit } from "../protocol/cospend.ts";
-import { FIX_EXPIRY_LAG } from "../protocol/fixing.ts";
-import { bytesToHex, xOnly } from "../protocol/hex.ts";
-import { predictVaultProgram } from "../protocol/programs.ts";
-import type { OracleFixing } from "./oracle.ts";
+import { PREDICT_VOID_AFTER } from "./constants.ts";
+import { bindContracts, type Terms } from "./contracts.ts";
+import { buildPredictSettle, buildRefund, refundOutputs, submit } from "./cospend.ts";
+import { FIX_EXPIRY_LAG } from "./fixing.ts";
+import { bytesToHex, xOnly } from "./hex.ts";
+import type { OracleFixing } from "./oracle-client.ts";
+import { settlePayouts } from "./payoff.ts";
+import { predictVaultProgram } from "./programs.ts";
+
+export { settlePayouts };
 
 export type ChainCoin = {
   txid: string;
@@ -39,32 +41,6 @@ export type SettleOutcome =
     holder?: bigint;
     writer?: bigint;
   };
-
-/** Payout outputs for a standalone PredictVaultV3 settlement. Amounts sum to `locked`. */
-export function settlePayouts(input: {
-  kind: PredictKind;
-  price: bigint;
-  strike: bigint;
-  collateral: bigint;
-  locked: bigint;
-  holderScript: Uint8Array;
-  writerScript: Uint8Array;
-}): { payouts: { script: Uint8Array; amount: bigint }[] } | { error: string } {
-  if (input.locked < input.collateral) return { error: "underfunded" };
-  const ph = holderPayoff(input.kind, input.price, input.strike, input.collateral);
-  if (ph > input.collateral) return { error: "holder overpaid" };
-  const split = settlementOutputs(ph, input.locked);
-  if (split.mode === "split") {
-    return {
-      payouts: [
-        { script: input.holderScript, amount: split.holder },
-        { script: input.writerScript, amount: split.writer },
-      ],
-    };
-  }
-  if (split.mode === "writer") return { payouts: [{ script: input.writerScript, amount: split.writer }] };
-  return { payouts: [{ script: input.holderScript, amount: split.holder }] };
-}
 
 function spent(coin: ChainCoin): boolean {
   return Boolean(coin.isSpent) || Boolean(coin.spentBy) || Boolean(coin.isUnrolled);

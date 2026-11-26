@@ -1,14 +1,14 @@
 import optionIntentArtifact from "./option_intent.artifact.json" with { type: "json" };
 import predictVaultArtifact from "./predict_vault.artifact.json" with { type: "json" };
 
+/**
+ * Layer 0 contract artifacts (`coinflip/contracts`).
+ * Strictly dependency-free: imports nothing from `protocol/`, services, or SDKs.
+ * For contract binding, fixing digests, and settlement builders, import `coinflip/protocol`.
+ */
 export { optionIntentArtifact, predictVaultArtifact };
 
-export { intentProgram, predictVaultProgram } from "../protocol/programs.ts";
-
-export { bindContracts, type Bound as PredictBound, type Terms } from "../protocol/contracts.ts";
-
-export { predictFixDigest } from "../protocol/fixing.ts";
-
-export { buildPredictSettle, buildRefund, predictSettlePriceCents, submit } from "../protocol/cospend.ts";
-
-export { settlePayouts } from "../settle/vault.ts";
+export const CONTRACT_ARTIFACTS = {
+  PredictVault: predictVaultArtifact,
+  OptionIntent: optionIntentArtifact,
+} as const;

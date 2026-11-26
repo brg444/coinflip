@@ -1,5 +1,5 @@
-import { fetchOracleFixing } from "../../settle/oracle.ts";
-import { reboardPredictVault, refundQuote, settlePredictQuote, type RefundOutcome, type SettleOutcome } from "../../settle/vault.ts";
+import { fetchOracleFixing } from "../../protocol/oracle-client.ts";
+import { reboardPredictVault, refundQuote, settlePredictQuote, type RefundOutcome, type SettleOutcome } from "../../protocol/vault-ops.ts";
 import { openContract, type FundRequest } from "./fund.ts";
 
 /** Settle a filled standalone PredictVaultV3 directly from the page. */

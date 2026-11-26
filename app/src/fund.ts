@@ -12,14 +12,17 @@ import {
   type ContractEvent,
 } from "@arkade-os/sdk";
 
-import intentArtifact from "../../contracts/option_intent.artifact.json" with { type: "json" };
-import predictArtifact from "../../contracts/predict_vault.artifact.json" with { type: "json" };
 import { DUST_SATS, type PredictKind } from "../../protocol/constants.ts";
 import { assertServerExit, bindContracts, payoutVtxo, type Terms } from "../../protocol/contracts.ts";
 import { cancelIntentDelegation, cancelIntentTemplate, Executor, reboardVaultDelegation, reboardVaultTemplate } from "../../protocol/executor.ts";
 import { bytesToHex, hexToBytes, xOnly } from "../../protocol/hex.ts";
 import { networkByName, networkProfile, type NetworkProfile } from "../../protocol/network.ts";
-import { intentProgram, predictVaultProgram } from "../../protocol/programs.ts";
+import {
+  intentProgram,
+  optionIntentArtifact as intentArtifact,
+  predictVaultArtifact as predictArtifact,
+  predictVaultProgram,
+} from "../../protocol/programs.ts";
 
 type DemoConfig = {
   network?: string;

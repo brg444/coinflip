@@ -3,6 +3,7 @@ import { getConversationKey, encrypt, decrypt } from "nostr-tools/nip44";
 
 import { POSITION_KIND, POSITION_TAG, RFQ_KIND } from "./constants.ts";
 import { parsePosition, parseWire, type OptionPosition, type Wire } from "./messages.ts";
+import type { RfqMessage, RfqTransport } from "./ports.ts";
 
 const ARKADE_RELAY = "wss://nostr.arkade.sh";
 
@@ -49,17 +50,9 @@ export function openSealed(secretKey: Uint8Array, event: { pubkey: string; conte
   }
 }
 
-export type Incoming = {
-  from: string;
-  message: Wire;
-};
+export type Incoming = RfqMessage;
 
-export type Transport = {
-  publish(recipientPubkey: string, payload: Wire): Promise<void>;
-  /** Public, stored record of a filled vault. A third party can read it. */
-  publishPosition(position: OptionPosition): Promise<void>;
-  close(): void;
-};
+export type Transport = RfqTransport;
 
 /** Signed NIP-78 event. `d` is the rfq id, so a later publish replaces this one. */
 export function positionEvent(secretKey: Uint8Array, position: OptionPosition, now = Math.floor(Date.now() / 1000)): Sealed {

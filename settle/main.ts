@@ -13,11 +13,11 @@ import { bindContracts } from "../protocol/contracts.ts";
 import type { OptionPosition } from "../protocol/messages.ts";
 import { assertNetworkMatch, networkProfile } from "../protocol/network.ts";
 import { quoteRelay, watchPositions } from "../protocol/nostr.ts";
+import { fetchOracleFixing, fetchOracleStatus, parseOracleKey, serviceOrigin, type OracleFixing } from "../protocol/oracle-client.ts";
+import { duePositions, manualPositions, settlementPositions, termsFor } from "../protocol/positions.ts";
 import { revision } from "../protocol/sqlite-storage.ts";
-import { fetchOracleFixing, fetchOracleStatus, parseOracleKey, serviceOrigin, type OracleFixing } from "./oracle.ts";
-import { duePositions, manualPositions, settlementPositions, termsFor } from "./positions.ts";
+import { refundQuote, settlePredictQuote } from "../protocol/vault-ops.ts";
 import { Progress } from "./progress.ts";
-import { refundQuote, settlePredictQuote } from "./vault.ts";
 
 /**
  * Permissionless settler for standalone PredictVaultV3 positions.

@@ -1,6 +1,6 @@
 # Contracts
 
-Short-window binary BTC/USD predictions on Arkade. The compiler artifacts are committed in this directory. Consumers import those artifacts and the protocol library from one module, `contracts/index.ts` (package export `coinflip/contracts`).
+Short-window binary BTC/USD predictions on Arkade. This directory is **Layer 0** (`coinflip/contracts`)—strictly dependency-free `.ark` sources, compiled `.artifact.json` files, compiler harness, and Go Arkade VM tests. Runtime binding, digests, and transaction builders live in **Layer 1** (`coinflip/protocol`).
 
 ## PredictVault
 
@@ -34,7 +34,13 @@ Constructor: `kind`, `writerPk`, `holderPk`, `writerScript`, `holderScript`, `st
 
 ## Import
 
-`predict_vault.artifact.json` and `option_intent.artifact.json` are the committed artifacts. The protocol library is `protocol/`. New code takes both from `contracts/index.ts`:
+`predict_vault.artifact.json` and `option_intent.artifact.json` are the dependency-free Layer 0 artifacts (`coinflip/contracts`):
+
+```ts
+import { optionIntentArtifact, predictVaultArtifact } from "coinflip/contracts";
+```
+
+The Layer 1 protocol SDK (`coinflip/protocol`) re-exports the artifacts together with contract binding, fixing digests, payoff math, transaction builders, and pluggable transport/feed ports:
 
 ```ts
 import {
@@ -49,7 +55,7 @@ import {
   predictSettlePriceCents,
   submit,
   settlePayouts,
-} from "coinflip/contracts";
+} from "coinflip/protocol";
 ```
 
 `predictVaultProgram()` and `intentProgram()` load the committed artifacts. `bindContracts` derives the intent and vault a desk quotes. `predictFixDigest` builds the 32-byte digest `oraclePk` signs. `buildPredictSettle` and `buildRefund` construct standalone settlement and void-refund spends, `submit` sends them to the Arkade emulator, and `settlePayouts` computes the winner payout.

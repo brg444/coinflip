@@ -11,7 +11,7 @@ import { hex } from "@scure/base";
 import { centsOf, intentSigned, SCALE, type DiaIntent } from "../protocol/dia.ts";
 import { predictFixDigest } from "../protocol/fixing.ts";
 import { bytesToHex } from "../protocol/hex.ts";
-import { parseOracleFixing } from "../settle/oracle.ts";
+import { parseOracleFixing } from "../protocol/oracle-client.ts";
 import { createOracle } from "./service.ts";
 import {
   chooseSample,

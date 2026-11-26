@@ -8,7 +8,6 @@ import { schnorr } from "@noble/curves/secp256k1.js";
 import { base64 } from "@scure/base";
 import { arkade, CSVMultisigTapscript, Extension, SingleKey, Transaction } from "@arkade-os/sdk";
 
-import { holderPayoff, settlementOutputs } from "../app/settle-math.js";
 import {
   EXIT,
   PAIR,
@@ -26,13 +25,13 @@ import { bytesToHex, hexToBytes } from "../protocol/hex.ts";
 import { classifyIntent } from "../protocol/intent-state.ts";
 import { parsePosition, parseWire, payoutRefusal, predictRefusal, requestRefusal, type RfqRequest } from "../protocol/messages.ts";
 import { positionEvent, readPosition } from "../protocol/nostr.ts";
+import { parseOracleFixing, parseOracleKey, parseOracleLatest, serviceOrigin, type OracleFixing } from "../protocol/oracle-client.ts";
+import { holderPayoff, settlementOutputs } from "../protocol/payoff.ts";
+import { duePositions, manualPositions, positionFromAnnouncement, termsFor } from "../protocol/positions.ts";
 import { payoutMultiplier, predictMultiplier, predictPayout, probAbove } from "../protocol/pricing.ts";
 import { predictVaultProgram } from "../protocol/programs.ts";
-import { outlay, openPremium, type QuoteRow } from "../desk/book.ts";
-import { parseOracleFixing, parseOracleKey, parseOracleLatest, serviceOrigin, type OracleFixing } from "./oracle.ts";
-import { duePositions, manualPositions, positionFromAnnouncement, termsFor } from "./positions.ts";
+import { refundQuote, settlePayouts, settlePredictQuote, type ChainCoin } from "../protocol/vault-ops.ts";
 import { Progress } from "./progress.ts";
-import { refundQuote, settlePayouts, settlePredictQuote, type ChainCoin } from "./vault.ts";
 
 const CHECKPOINT = "03080040b27520dfcaec558c7e78cf3e38b898ba8a43cfb5727266bae32c5c5b3aeb32c558aa0bac";
 const EXPIRY = 1_700_000_100;
@@ -242,18 +241,6 @@ test("the multiplier is 1.90 at even odds, pays more for the far line, and refus
   assert.equal(predictPayout(STAKE, 1.9), PAYOUT);
   assert.equal(predictPayout(33_333n, 3.45), 114_998n);
   assert.equal(payoutMultiplier(STAKE, PAYOUT), 1.9);
-});
-
-test("the desk's float covers the whole payout of an open prediction", () => {
-  const row = (kind: 2 | 3, premium: string, collateral: string): QuoteRow => ({
-    rfqId: "ab".repeat(32), collateral, premium, kind, strike: "1", expiry: EXPIRY, deadline: EXPIRY, validUntil: EXPIRY,
-    exit: 2048, writerPubkey: "", writerPkScript: "", holderPubkey: "", holderPkScript: "", oraclePubkey: "44".repeat(32),
-    backupPubkey: "33".repeat(32), voidAfter: Number(PREDICT_VOID_AFTER),
-    fallbackDelay: Number(PREDICT_FALLBACK_DELAY), finalExitDelay: Number(PREDICT_FINAL_EXIT_DELAY),
-    intentAddress: "", vaultAddress: "", status: "open", createdAt: 0, clientPubkey: "",
-  });
-  assert.equal(outlay(row(2, "50000", "95000")), 95_000n);
-  assert.equal(openPremium([row(2, "50000", "95000"), row(3, "20000", "38000")], EXPIRY - 1), 133_000n);
 });
 
 test("a prediction's fill funds the vault, and the stake back is a refund", () => {

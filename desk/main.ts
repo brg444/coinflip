@@ -11,7 +11,6 @@ import {
   Wallet,
 } from "@arkade-os/sdk";
 
-import predictArtifact from "../contracts/predict_vault.artifact.json" with { type: "json" };
 import {
   DEFAULT_RELAYS,
   PAIR,
@@ -35,11 +34,11 @@ import {
 } from "../protocol/messages.ts";
 import { assertNetworkMatch, networkProfile } from "../protocol/network.ts";
 import { connectTransport, nostrPubkey, type Incoming } from "../protocol/nostr.ts";
+import { fetchOraclePrices, fetchOracleStatus, parseOracleKey, parseOracleLatest, serviceOrigin, type OracleLatest } from "../protocol/oracle-client.ts";
 import { predictMultiplier, predictPayout } from "../protocol/pricing.ts";
-import { intentProgram } from "../protocol/programs.ts";
+import { intentProgram, predictVaultArtifact as predictArtifact } from "../protocol/programs.ts";
 import { openSqliteStorage, revision } from "../protocol/sqlite-storage.ts";
 import { openingSample, WINDOW_LINE_WITHIN_S, windowOpen } from "../protocol/window-line.ts";
-import { fetchOraclePrices, fetchOracleStatus, parseOracleKey, parseOracleLatest, serviceOrigin, type OracleLatest } from "../settle/oracle.ts";
 import { Book, hasOracle, outlay, pageQuotes, quoteCounts, type QuoteFilter, type QuoteRow } from "./book.ts";
 import { countFill, countQuote, emptyHour, hourLine, msUntilNextHour } from "./digest.ts";
 import { fillQuote, type PredictFillVerdict } from "./fill.ts";
