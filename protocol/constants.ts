@@ -33,9 +33,9 @@ export function vaultProgramId(kind: number): string {
 }
 
 export const PREDICT_GRID_S = 300;
-// Shorter than options' 180s lock to limit free-look time inside a 5-minute window.
-export const PREDICT_LOCK_S = 60;
-export const PREDICT_MIN_LEFT_S = 60;
+// Shorter than options' 180s lock to limit free-look time and keep 5-minute closes open until T-60s.
+export const PREDICT_LOCK_S = 30;
+export const PREDICT_MIN_LEFT_S = 30;
 export const PREDICT_MAX_AHEAD_S = 3600;
 export const STAKE_MIN = 10_000n;
 export const STAKE_MAX = 1_000_000n;

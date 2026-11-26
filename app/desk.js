@@ -1119,7 +1119,7 @@ const windowAsked = new Map();
 let windowKey = "";
 
 function lineMode() {
-  return oracleReadable && state.spotSource !== "deribit" ? "window" : "pick";
+  return "pick";
 }
 
 function currentWindow(now = Math.floor(Date.now() / 1000)) {

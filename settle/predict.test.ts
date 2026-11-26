@@ -208,8 +208,8 @@ test("a predict close is on the 5-minute grid, far enough out, and at most an ho
   const now = EXPIRY - 300;
   assert.equal(predictRefusal(EXPIRY, STAKE, now), "");
   assert.equal(predictRefusal(EXPIRY + 60, STAKE, now), "expiry");
-  assert.equal(predictRefusal(EXPIRY, STAKE, EXPIRY - 119), "expiry");
-  assert.equal(predictRefusal(EXPIRY, STAKE, EXPIRY - 120), "");
+  assert.equal(predictRefusal(EXPIRY, STAKE, EXPIRY - 59), "expiry");
+  assert.equal(predictRefusal(EXPIRY, STAKE, EXPIRY - 60), "");
   assert.equal(predictRefusal(EXPIRY + 3600, STAKE, now), "expiry");
   assert.equal(predictRefusal(EXPIRY, STAKE_MIN - 1n, now), "stake");
   assert.equal(predictRefusal(EXPIRY, 1_000_001n, now), "stake");

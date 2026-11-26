@@ -227,8 +227,8 @@ async function deskUp(key, oracle) {
     ORACLE_PUBKEY: oraclePubkey,
     ORACLE_URL: oracleUrl,
     ...(backupPubkey ? { BACKUP_EMULATOR_PUBKEY: backupPubkey } : {}),
-    // The page serves the oracle's samples, so it predicts against each window's opening price; the desk checks it.
-    DESK_LINE_MODE: process.env.DESK_LINE_MODE?.trim() || "window",
+    // Always-open live-spot strikes ("any"): users can bet anytime against current BTC spot on the 5-minute grid.
+    DESK_LINE_MODE: process.env.DESK_LINE_MODE?.trim() || "any",
     DATA_DIR: path.join(home, "desk"),
     PORT: String(PORTS.desk),
   };

@@ -522,7 +522,7 @@ async function onPredict(message: RfqRequest & { profile: PredictRequestProfile 
     kind,
     strike: String(message.profile.strike),
     expiry: message.profile.expiry,
-    deadline: now + PREDICT_LOCK_S,
+    deadline: Math.min(now + PREDICT_LOCK_S, message.profile.expiry - 30),
     validUntil: now + QUOTE_TTL_S,
     exit: Number(netProfile.exit),
     writerPubkey: bytesToHex(holderPk),
