@@ -15,7 +15,7 @@ import {
 } from "@arkade-os/sdk";
 
 import { beaconIdOf } from "../../protocol/beacon-id.ts";
-import { BEACON_READ_FEE, DUST_SATS, isPredict, type Kind } from "../../protocol/constants.ts";
+import { BEACON_READ_FEE, DUST_SATS, isPredict, PREDICT_READ_FEE, type Kind } from "../../protocol/constants.ts";
 import { assertServerExit, bindContracts, payoutVtxo, type Terms } from "../../protocol/contracts.ts";
 import { cancelIntentDelegation, cancelIntentTemplate, Executor, reboardVaultDelegation, reboardVaultTemplate } from "../../protocol/executor.ts";
 import { bytesToHex, hexToBytes, xOnly } from "../../protocol/hex.ts";
@@ -76,11 +76,13 @@ export type FundRequest = {
   holderPubkey?: string;
   /** Predict: the desk's key. */
   writerPkHex?: string;
+  /** Predict: the oracle's x-only pubkey co-signing canonical fixings. */
+  oraclePkHex?: string;
   backupPkHex?: string;
   voidAfter?: bigint;
   fallbackDelay?: bigint;
   finalExitDelay?: bigint;
-  /** Display txid of the beacon identity asset. */
+  /** Options: display txid of the beacon identity asset. */
   beaconTxidHex?: string;
   beaconGidx?: number;
   exit?: bigint;
@@ -95,6 +97,7 @@ export type Deposit = {
   holderPkHex: string;
   /** Predict: the desk's key. */
   writerPkHex: string;
+  oraclePkHex: string;
   beaconTxidHex: string;
   beaconGidx: number;
   exit: number;
@@ -364,13 +367,13 @@ async function build(req: FundRequest) {
   if (intent.address !== bound.intentAddress || vault.address !== bound.vaultAddress) {
     throw new Error("The contract address does not match the local derivation.");
   }
-  return { bound, intent, vault, deskPk: holderPk, beaconTxidHex, beaconGidx, exit, client, terms };
+  return { bound, intent, vault, deskPk: holderPk, oraclePkHex: "", beaconTxidHex, beaconGidx, exit, client, terms };
 }
 
 /** Predict: the bettor holds, and their address is paid. The desk writes. */
 async function buildPredict(req: FundRequest) {
-  if (!req.writerPkHex || !req.beaconTxidHex) {
-    throw new Error("A prediction needs a desk quote that names the beacon.");
+  if (!req.writerPkHex || !req.oraclePkHex) {
+    throw new Error("A prediction needs a desk quote that names the oracle.");
   }
   if (!req.holderAddress) throw new Error("Paste your Arkade address first.");
   const exit = req.exit ?? ACTIVE_PROFILE.exit;
@@ -378,8 +381,7 @@ async function buildPredict(req: FundRequest) {
   const { client } = await openSession(SingleKey.fromHex(sessionHex()));
   const holderPk = binding.signerKey ?? binding.payoutKey;
   const writerPk = hexToBytes(req.writerPkHex);
-  const beaconTxidHex = req.beaconTxidHex.toLowerCase();
-  const beaconGidx = req.beaconGidx ?? 0;
+  const oraclePkHex = req.oraclePkHex.toLowerCase();
   const terms: Terms = {
     kind: req.kind,
     strike: req.strike,
@@ -391,12 +393,12 @@ async function buildPredict(req: FundRequest) {
     writerPk,
     holderPk,
     holderPayoutKey: binding.signerKey ? undefined : binding.payoutKey,
+    oraclePk: hexToBytes(oraclePkHex),
     backupPk: req.backupPkHex ? hexToBytes(req.backupPkHex) : undefined,
     voidAfter: req.voidAfter ?? ACTIVE_PROFILE.voidAfter,
     fallbackDelay: req.fallbackDelay ?? ACTIVE_PROFILE.fallbackDelay,
     finalExitDelay: req.finalExitDelay ?? ACTIVE_PROFILE.finalExitDelay,
-    beacon: beaconIdOf(asset.AssetId.create(beaconTxidHex, beaconGidx)),
-    readFee: BEACON_READ_FEE,
+    readFee: PREDICT_READ_FEE,
     serverKey: binding.serverKey,
     emulatorKey: binding.emulatorKey,
     hrp: ACTIVE_PROFILE.hrp,
@@ -407,7 +409,7 @@ async function buildPredict(req: FundRequest) {
   if (intent.address !== bound.intentAddress || vault.address !== bound.vaultAddress) {
     throw new Error("The contract address does not match the local derivation.");
   }
-  return { bound, intent, vault, deskPk: writerPk, beaconTxidHex, beaconGidx, exit, client, terms };
+  return { bound, intent, vault, deskPk: writerPk, oraclePkHex, beaconTxidHex: "", beaconGidx: 0, exit, client, terms };
 }
 
 /** The same contract the quote was built from, plus the connected Arkade client. */
@@ -424,7 +426,7 @@ export async function openContract(req: FundRequest) {
  * stake a bettor puts in. It stays theirs until the desk finalizes.
  */
 export async function depositAddress(req: FundRequest): Promise<Deposit> {
-  const { bound, deskPk, beaconTxidHex, beaconGidx, exit } = await build(req);
+  const { bound, deskPk, oraclePkHex, beaconTxidHex, beaconGidx, exit } = await build(req);
   const amount = isPredict(req.kind) ? req.premium : req.collateral;
   return {
     network: NETWORK_NAME,
@@ -434,6 +436,7 @@ export async function depositAddress(req: FundRequest): Promise<Deposit> {
     uri: paymentUri(bound.intentAddress, amount),
     holderPkHex: isPredict(req.kind) ? "" : bytesToHex(deskPk),
     writerPkHex: isPredict(req.kind) ? bytesToHex(deskPk) : "",
+    oraclePkHex,
     beaconTxidHex,
     beaconGidx,
     exit: Number(exit),

@@ -28,9 +28,11 @@ export type Terms = {
   holderPk: Uint8Array;
   /** Taproot output key of the bettor's Arkade address. A predict payout and a refund pay this key. */
   holderPayoutKey?: Uint8Array;
-  /** Identity asset of the AttestationBeacon that settle reads. */
-  beacon: BeaconId;
-  /** Sats settle leaves on the beacon. Must match the beacon's readFee. */
+  /** Identity asset of the AttestationBeacon that OptionVault.settle reads. Required for Options (kind 0/1). */
+  beacon?: BeaconId;
+  /** X-only pubkey of the oracle co-signing canonical fixings for PredictVault.settle. Required for Predict (kind 2/3). */
+  oraclePk?: Uint8Array;
+  /** Sats OptionVault.settle leaves on the beacon. Unused for Predict. */
   readFee?: bigint;
   serverKey: Uint8Array;
   emulatorKey: Uint8Array;
@@ -127,10 +129,14 @@ export function bindContracts(terms: Terms): Bound {
   if (terms.emulatorKey.length !== 33) {
     throw new Error("emulator key must be 33 bytes");
   }
-  if (terms.beacon.txid.length !== 32) {
-    throw new Error("beacon txid must be 32 bytes");
-  }
   const predict = isPredict(terms.kind);
+  if (predict) {
+    if (!terms.oraclePk) throw new Error("oraclePk is required for PredictVault");
+  } else {
+    if (!terms.beacon || terms.beacon.txid.length !== 32) {
+      throw new Error("beacon txid must be 32 bytes");
+    }
+  }
   const writer = terms.payoutKey ? directPayout(terms.payoutKey) : payoutVtxo(writerPk, serverKey, terms.exit);
   const holder = terms.holderPayoutKey ? directPayout(terms.holderPayoutKey) : payoutVtxo(holderPk, serverKey, terms.exit);
   const keys = { serverKey, emulatorKey: terms.emulatorKey };
@@ -143,6 +149,7 @@ export function bindContracts(terms: Terms): Bound {
     if (voidAfter <= 0n) throw new Error("voidAfter must be positive");
     if (fallbackDelay < terms.exit) throw new Error("fallbackDelay must be at least exit");
     if (finalExitDelay <= fallbackDelay) throw new Error("finalExitDelay must exceed fallbackDelay");
+    const oraclePk = xOnly(terms.oraclePk!);
     const backupPk = xOnly(terms.backupPk ?? terms.emulatorKey);
     vaultArgs = {
       kind: BigInt(terms.kind),
@@ -154,9 +161,7 @@ export function bindContracts(terms: Terms): Bound {
       collateral: terms.collateral,
       stake: terms.premium,
       expiry: terms.expiry,
-      beaconTxid: terms.beacon.txid,
-      beaconGidx: terms.beacon.gidx,
-      readFee: terms.readFee ?? 0n,
+      oraclePk,
       backupPk,
       voidAfter,
       fallbackDelay: exitSequence(fallbackDelay),
@@ -173,8 +178,8 @@ export function bindContracts(terms: Terms): Bound {
       strike: terms.strike,
       collateral: terms.collateral,
       expiry: terms.expiry,
-      beaconTxid: terms.beacon.txid,
-      beaconGidx: terms.beacon.gidx,
+      beaconTxid: terms.beacon!.txid,
+      beaconGidx: terms.beacon!.gidx,
       readFee: terms.readFee ?? 0n,
       exit: exitSequence(terms.exit),
       server: serverKey,

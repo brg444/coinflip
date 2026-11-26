@@ -25,8 +25,6 @@ import { createGzip } from "node:zlib";
 
 import { getPublicKey } from "nostr-tools/pure";
 
-import { startBeaconRenewalWatcher } from "./beacon-renewal.mjs";
-
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const home = path.resolve(process.env.COINFLIP_DEMO_DIR?.trim() || path.join(os.homedir(), ".coinflip-demo"));
 const args = new Set(process.argv.slice(2));
@@ -41,8 +39,8 @@ if (!["bitcoin", "mutinynet", "regtest", "testnet", "signet"].includes(netId)) {
 const NET_LABEL = isMainnet ? "Bitcoin" : netId === "regtest" ? "Regtest" : "Mutinynet";
 const WALLET_HOME = isMainnet ? "https://arkade.money" : "https://mutinynet.arkade.money";
 const PORTS = { oracle: 8789, desk: 8788, settler: 8790, page: Number(process.env.PAGE_PORT?.trim() || 4173) };
-/** The oracle issues and deploys the beacon from this. Deploy keeps 330 sats on the beacon. */
-const ORACLE_FUND = 10_000n;
+/** Stateless Predict oracle needs no on-Arkade wallet funding or beacon coin. */
+const ORACLE_FUND = 0n;
 /** The desk funds whole payouts. */
 const DESK_FUND = isMainnet ? 500_000n : 1_000_000n;
 const oracleUrl = `http://127.0.0.1:${PORTS.oracle}`;
@@ -202,6 +200,7 @@ async function oracleUp(key) {
   });
   start("oracle", "oracle/main.ts", {
     ...networkEnv(),
+    STATELESS_ORACLE: "1",
     ORACLE_KEY: key.oracleKey,
     ORACLE_ADMIN: key.admin,
     DESK_PUBKEY: getPublicKey(Uint8Array.from(Buffer.from(key.deskKey, "hex"))),
@@ -209,56 +208,25 @@ async function oracleUp(key) {
     DATA_DIR: path.join(home, "oracle"),
     PORT: String(PORTS.oracle),
   });
-  let status = await until(async () => {
+  const status = await until(async () => {
     const body = (await json(`${oracleUrl}/api/status`)).body;
-    return body.wallet && body;
+    return Array.isArray(body.pubkeys) && body.pubkeys.length > 0 && body;
   }, "Starting the oracle…");
-  setup.oracle.wallet = status.wallet;
+  setup.oracle.wallet = status.wallet ?? "";
   setup.oracle.balance = String(status.balance ?? "0");
-  if (status.deployTxid && status.assetId) return status;
-
-  if (!status.issueTxid) {
-    if (BigInt(status.balance ?? 0) < ORACLE_FUND) {
-      setup.stage = "fund-oracle";
-      say("");
-      say(`Fund the oracle: send at least ${sats(ORACLE_FUND)} ${NET_LABEL} sats to`);
-      say(`  ${status.wallet}`);
-      say("The page shows this too. This waits until they arrive.");
-      status = await until(async () => {
-        const next = (await json(`${oracleUrl}/api/status`)).body;
-        setup.oracle.balance = String(next.balance ?? "0");
-        return BigInt(next.balance ?? 0) >= ORACLE_FUND && next;
-      });
-      say(`Oracle funded: ${sats(status.balance)} sats.`);
-    }
-    setup.stage = "deploying";
-    const issued = await json(`${oracleUrl}/api/issue`, { method: "POST", headers: admin(key.admin), body: "{}" });
-    if (!issued.ok) die(`Issuing the beacon asset failed: ${issued.body.error ?? issued.status}`);
-    say(`Beacon asset issued: ${issued.body.txid ?? ""}`);
-  }
-  setup.stage = "deploying";
-  await until(async () => {
-    const deployed = await json(`${oracleUrl}/api/deploy`, { method: "POST", headers: admin(key.admin), body: "{}" });
-    return deployed.ok;
-  }, "Deploying the beacon…", 3_000);
-  status = await until(async () => {
-    const next = (await json(`${oracleUrl}/api/status`)).body;
-    return next.deployTxid && next.address && next;
-  });
-  say(`Beacon deployed: ${status.deployTxid}`);
   return status;
 }
 
-async function deskUp(key, beacon) {
+async function deskUp(key, oracle) {
   const backupPubkey = process.env.BACKUP_EMULATOR_PUBKEY?.trim().toLowerCase();
+  const oraclePubkey = oracle?.pubkeys?.[0] || getPublicKey(Uint8Array.from(Buffer.from(key.oracleKey, "hex")));
   const deskEnv = {
     ...networkEnv(),
     DESK_KEY: key.deskKey,
     DESK_ADMIN: process.env.DESK_ADMIN?.trim() || key.admin,
-    BEACON_TXID: beacon.issueTxid,
+    ORACLE_PUBKEY: oraclePubkey,
     ORACLE_URL: oracleUrl,
     ...(backupPubkey ? { BACKUP_EMULATOR_PUBKEY: backupPubkey } : {}),
-    DESK_RATCHET_MARGIN_S: process.env.DESK_RATCHET_MARGIN_S?.trim() || String(5 * 86_400),
     // The page serves the oracle's samples, so it predicts against each window's opening price; the desk checks it.
     DESK_LINE_MODE: process.env.DESK_LINE_MODE?.trim() || "window",
     DATA_DIR: path.join(home, "desk"),
@@ -304,10 +272,11 @@ function settlerUp(key) {
  * arkade.trade's. The desk's nostr key is known before the desk starts, so the
  * page can go up first and be rebuilt when the beacon is deployed.
  */
-function buildPage(key, beacon) {
+function buildPage(key, oracle) {
   const config = path.join(home, "site.json");
-  const status = beacon
-    ? { pubkeys: beacon.pubkeys, assetId: beacon.assetId, issueTxid: beacon.issueTxid, address: beacon.address, args: beacon.args }
+  const oraclePubkey = oracle?.pubkeys?.[0] || getPublicKey(Uint8Array.from(Buffer.from(key.oracleKey, "hex")));
+  const status = oracle && oracle.issueTxid && oracle.assetId && oracle.address
+    ? { pubkeys: oracle.pubkeys, assetId: oracle.assetId, issueTxid: oracle.issueTxid, address: oracle.address, args: oracle.args }
     : null;
   const pubkey = getPublicKey(Uint8Array.from(Buffer.from(key.deskKey, "hex")));
   const backupPubkey = process.env.BACKUP_EMULATOR_PUBKEY?.trim().toLowerCase();
@@ -317,6 +286,7 @@ function buildPage(key, beacon) {
     JSON.stringify({
       network: netId,
       desks: [{ name: isMainnet ? "COINFLIP" : "Demo desk", pubkey }],
+      oraclePubkey,
       beacon: status,
       setup: !isMainnet,
       ...(backupPubkey ? { backupPubkey } : {}),
@@ -393,6 +363,24 @@ function servePage() {
       }
       // The oracle's samples, read-only, so the page can show a result at the fixing time instead of
       // waiting for the settlement. The oracle itself stays on loopback.
+      if (url.pathname === "/oracle/fixing" && req.method === "GET") {
+        const expiry = url.searchParams.get("expiry");
+        if (!expiry || !/^[0-9]{1,12}$/.test(expiry)) {
+          res.writeHead(400, { "content-type": "application/json", "cache-control": "no-store" });
+          res.end(JSON.stringify({ error: "expiry" }));
+          return;
+        }
+        fetch(`${oracleUrl}/api/fixing?expiry=${expiry}`, { signal: AbortSignal.timeout(8_000) })
+          .then(async (upstream) => {
+            res.writeHead(upstream.status, { "content-type": "application/json", "cache-control": "no-store" });
+            res.end(await upstream.text());
+          })
+          .catch(() => {
+            res.writeHead(502, { "content-type": "application/json", "cache-control": "no-store" });
+            res.end(JSON.stringify({ error: "oracle" }));
+          });
+        return;
+      }
       if (url.pathname === "/oracle/prices" && req.method === "GET") {
         const query = new URLSearchParams();
         for (const key of ["from", "to", "limit"]) {
@@ -519,24 +507,11 @@ say(server ? `  Page      port ${PORTS.page} on this server, at the domain the h
 if (publicUrl) say(`  Public    ${publicUrl}/#/predict`);
 if (pagesUrl) say(`  Pages     ${pagesUrl}/#/predict  (setup steps show on the local and public links)`);
 say("");
-const beacon = await oracleUp(key);
-buildPage(key, beacon);
-const desk = await deskUp(key, beacon);
+const oracle = await oracleUp(key);
+buildPage(key, oracle);
+const desk = await deskUp(key, oracle);
 settlerUp(key);
 void watchSetup();
-const renewBeforeRaw = process.env.BEACON_RENEW_BEFORE_S?.trim();
-const renewalWatcher = startBeaconRenewalWatcher({
-  oracleUrl,
-  deskUrl,
-  oracleAdminToken: key.admin,
-  deskAdminToken: process.env.DESK_ADMIN?.trim() || key.admin,
-  network: netId,
-  isMainnet,
-  ...(renewBeforeRaw && /^[1-9][0-9]*$/.test(renewBeforeRaw) ? { renewBeforeS: Number(renewBeforeRaw) } : {}),
-  alertWebhookUrl: process.env.ALERT_WEBHOOK_URL?.trim() || "",
-  log: say,
-});
-process.on("exit", () => renewalWatcher.stop());
 
 say("");
 say("The demo is running.");

@@ -3,12 +3,12 @@ import { base64 } from "@scure/base";
 
 import { holderPayoff, settlementOutputs } from "../app/settle-math.js";
 import { beaconIdOf, bin2num, bindBeacon, decodeState, statePacketOf, type BeaconState } from "../protocol/beacon.ts";
-import { isPredict, PREDICT_VOID_AFTER, PRICE_MAX, type Kind } from "../protocol/constants.ts";
+import { isPredict, PREDICT_READ_FEE, PREDICT_VOID_AFTER, PRICE_MAX, type Kind } from "../protocol/constants.ts";
 import { bindContracts, type Terms } from "../protocol/contracts.ts";
-import { buildRefund, buildSettle, refundOutputs, submit } from "../protocol/cospend.ts";
-import { bytesToHex } from "../protocol/hex.ts";
+import { buildPredictSettle, buildRefund, buildSettle, refundOutputs, submit } from "../protocol/cospend.ts";
+import { bytesToHex, xOnly } from "../protocol/hex.ts";
 import { vaultProgramFor } from "../protocol/programs.ts";
-import type { BeaconSpec } from "./oracle.ts";
+import type { BeaconSpec, OracleFixing } from "./oracle.ts";
 
 export type ChainCoin = {
   txid: string;
@@ -265,6 +265,98 @@ export async function settleQuote(env: {
     const script = bytesToHex(output.script);
     if (script === holderScript) holder = output.amount;
     if (script === writerScript) writer = output.amount;
+  }
+  return {
+    result: "settled",
+    txid: submitted.txid,
+    price,
+    holder,
+    writer,
+  };
+}
+
+/**
+ * Settle one standalone PredictVaultV3 using a signed fixing (DIA EIP-712 + oracle Schnorr).
+ * Single-input off-chain spend: no shared beacon coin, no readFee, fully parallel across vaults.
+ */
+export async function settlePredictQuote(env: {
+  chain: Chain;
+  serverKey: Uint8Array;
+  emulatorKey: Uint8Array;
+  emulator: Pick<EmulatorProvider, "submitTx">;
+  checkpoint: CSVMultisigTapscript.Type;
+  fillTxid?: string;
+  terms: Terms;
+  fixing: OracleFixing;
+  now: number;
+}): Promise<SettleOutcome> {
+  if (!isPredict(env.terms.kind) || !env.terms.oraclePk) return { result: "mismatch" };
+  if (env.now < Number(env.terms.expiry) + 60) return { result: "waiting", reason: "early" };
+  if (BigInt(env.fixing.expiry) !== env.terms.expiry) return { result: "mismatch" };
+  if (env.fixing.oraclePkHex !== bytesToHex(xOnly(env.terms.oraclePk))) return { result: "mismatch" };
+
+  const bound = bindContracts(env.terms);
+  const vaultScript = bytesToHex(bound.vaultPkScript);
+  const live = await env.chain.getVtxos({ scripts: [vaultScript], spendableOnly: true });
+  const page = live.vtxos ?? [];
+  const vaults = page.filter((coin) => !spent(coin) && BigInt(coin.value) >= env.terms.collateral);
+  if (!vaults.length) {
+    const unrolled = spendTxid(page.find((coin) => coin.isUnrolled));
+    if (unrolled) return { result: "settled", txid: unrolled };
+    const history = await env.chain.getVtxos({ scripts: [vaultScript], spentOnly: true });
+    const prior = history.vtxos ?? [];
+    const gone = spendTxid(prior.find((coin) => coin.txid === env.fillTxid) ?? prior.find((coin) => spent(coin)));
+    if (gone) return { result: "settled", txid: gone };
+    return { result: "waiting", reason: "vault" };
+  }
+  const vaultCoin = vaults.find((coin) => coin.txid === env.fillTxid) ?? vaults[0]!;
+  const raws = await env.chain.getVirtualTxs([vaultCoin.txid]);
+  const vaultPrev = txById(raws.txs ?? [], vaultCoin.txid);
+  if (!vaultPrev) return { result: "waiting", reason: "vault" };
+
+  const price = env.fixing.cents;
+  const locked = BigInt(vaultCoin.value);
+  const payout = settlePayouts({
+    kind: env.terms.kind,
+    price,
+    strike: env.terms.strike,
+    collateral: env.terms.collateral,
+    locked,
+    readFee: PREDICT_READ_FEE,
+    holderScript: bound.holderPkScript,
+    writerScript: bound.writerPkScript,
+  });
+  if ("error" in payout) throw new Error(payout.error);
+
+  const script = new arkade.ArkadeProgramScript(vaultProgramFor(env.terms.kind), bound.vault, {
+    serverKey: env.serverKey,
+    emulatorKey: env.emulatorKey,
+  });
+  const built = buildPredictSettle({
+    vault: {
+      script,
+      coin: { txid: vaultCoin.txid, vout: vaultCoin.vout, value: vaultCoin.value, prevTx: vaultPrev.toBytes(true, true) },
+    },
+    fixing: {
+      price: env.fixing.price,
+      time: BigInt(env.fixing.time),
+      nonce: env.fixing.nonce,
+      intentExpiry: BigInt(env.fixing.intentExpiry),
+      sig: env.fixing.sig,
+      oracleSig: env.fixing.oracleSig,
+    },
+    payouts: payout.payouts,
+    checkpoint: env.checkpoint,
+  });
+  const submitted = await submit(built, env.emulator as EmulatorProvider);
+  const holderScript = bytesToHex(bound.holderPkScript);
+  const writerScript = bytesToHex(bound.writerPkScript);
+  let holder = 0n;
+  let writer = 0n;
+  for (const output of payout.payouts) {
+    const outScript = bytesToHex(output.script);
+    if (outScript === holderScript) holder = output.amount;
+    if (outScript === writerScript) writer = output.amount;
   }
   return {
     result: "settled",

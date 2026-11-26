@@ -49,22 +49,23 @@ const port = Number(process.env.PORT ?? "8789");
 const sampleEveryMs = Number(process.env.SAMPLE_MS ?? "20000");
 const arkUrl = process.env.ARK_URL?.trim() || defaults.arkUrl;
 const emulatorUrl = process.env.EMULATOR_URL?.trim() || defaults.emulatorUrl;
+const stateless = process.env.STATELESS_ORACLE === "1" || process.env.STATELESS_ORACLE?.trim().toLowerCase() === "true";
 if (!Number.isInteger(port) || port < 0) throw new Error("PORT");
 if (!Number.isInteger(sampleEveryMs) || sampleEveryMs < 0) throw new Error("SAMPLE_MS");
 const sampleInterval = sampleEveryMs > 0 ? sampleEveryMs : 20_000;
-if (typeof EventSource === "undefined") {
+if (!stateless && typeof EventSource === "undefined") {
   throw new Error("Contract events need Node's EventSource. Start the oracle with --experimental-eventsource.");
 }
 
-const arkProvider = new RestArkProvider(arkUrl);
-const arkInfo = await arkProvider.getInfo();
-const profile = assertNetworkMatch(requestedNetwork, arkInfo.network);
-if (BigInt(arkInfo.unilateralExitDelay) !== profile.exit) {
+const arkProvider = stateless ? undefined : new RestArkProvider(arkUrl);
+const arkInfo = arkProvider ? await arkProvider.getInfo() : undefined;
+const profile = arkInfo ? assertNetworkMatch(requestedNetwork, arkInfo.network) : defaults;
+if (arkInfo && BigInt(arkInfo.unilateralExitDelay) !== profile.exit) {
   throw new Error(`server unilateralExitDelay is ${arkInfo.unilateralExitDelay}; ${profile.id} contracts use ${profile.exit}`);
 }
 
-const storage = await openSqliteStorage(dataDir);
-const wallet = oracleKey
+const storage = stateless ? undefined : await openSqliteStorage(dataDir);
+const wallet = !stateless && oracleKey && arkProvider && storage
   ? await Wallet.create({
       identity: SingleKey.fromHex(bytesToHex(oracleKey)),
       arkProvider,
@@ -77,7 +78,7 @@ const wallet = oracleKey
     })
   : undefined;
 
-if (wallet) {
+if (wallet && storage) {
   try {
     const state = (await storage.walletRepository.getWalletState()) ?? {};
     await storage.walletRepository.saveWalletState({
@@ -108,16 +109,18 @@ function pruneAnnounced(now = Math.floor(Date.now() / 1000)) {
     announced.delete(oldest);
   }
 }
-watchPositions({
-  relays: DEFAULT_RELAYS,
-  onPosition(position) {
-    if (deskPubkeyRaw && position.writer_pubkey !== deskPubkeyRaw && position.holder_pubkey !== deskPubkeyRaw) return;
-    const now = Math.floor(Date.now() / 1000);
-    if (now - position.expiry > TRACK_AGE_S) return;
-    announced.set(position.rfq_id, position);
-    pruneAnnounced(now);
-  },
-});
+if (!stateless) {
+  watchPositions({
+    relays: DEFAULT_RELAYS,
+    onPosition(position) {
+      if (deskPubkeyRaw && position.writer_pubkey !== deskPubkeyRaw && position.holder_pubkey !== deskPubkeyRaw) return;
+      const now = Math.floor(Date.now() / 1000);
+      if (now - position.expiry > TRACK_AGE_S) return;
+      announced.set(position.rfq_id, position);
+      pruneAnnounced(now);
+    },
+  });
+}
 
 let onDiaIntent: ((intent: Awaited<ReturnType<typeof startDiaFeed>> extends { latest: () => Promise<infer T> } ? NonNullable<T> : never) => void) | undefined;
 const feed = startDiaFeed(sampleInterval, undefined, (intent) => onDiaIntent?.(intent));
@@ -130,23 +133,26 @@ const oracle = await createOracle({
   emulatorKey: hexToBytes(defaultEmulatorPubkey(profile.network)),
   wallet: wallet as unknown as OracleWallet | undefined,
   indexer: wallet?.indexerProvider,
-  emulator: new RestEmulatorProvider(emulatorUrl),
+  emulator: stateless ? undefined : new RestEmulatorProvider(emulatorUrl),
   arkProvider,
   sdkNetwork: profile.network,
   exit: profile.exit,
   hrp: profile.hrp,
   network: profile.id,
-  deprecatedSigners: (arkInfo.deprecatedSigners ?? []).map((item) => ({
+  stateless,
+  deprecatedSigners: (arkInfo?.deprecatedSigners ?? []).map((item) => ({
     pubkey: item.pubkey,
     cutoffDate: item.cutoffDate.toString(),
   })),
   pull: () => feed.latest(),
   sampleEveryMs: sampleInterval,
   allowedPubkey: deskPubkeyRaw,
-  announcedPositions: () => {
-    pruneAnnounced();
-    return announced.values();
-  },
+  announcedPositions: stateless
+    ? undefined
+    : () => {
+        pruneAnnounced();
+        return announced.values();
+      },
 });
 onDiaIntent = (intent) => {
   void oracle.ingestIntent(intent).catch((err) => {
@@ -155,4 +161,4 @@ onDiaIntent = (intent) => {
 };
 
 console.log(`oracle http://127.0.0.1:${oracle.port}/`);
-console.log(`oracle data ${path.resolve(dataDir)} sqlite ${storage.file}`);
+console.log(`oracle data ${path.resolve(dataDir)}${storage ? ` sqlite ${storage.file}` : " (stateless)"}`);

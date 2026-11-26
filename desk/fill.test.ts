@@ -6,13 +6,12 @@ import { fileURLToPath } from "node:url";
 import { asset, SingleKey, Transaction } from "@arkade-os/sdk";
 import { base64 } from "@scure/base";
 
-import { beaconIdOf } from "../protocol/beacon-id.ts";
-import { BEACON_READ_FEE, EXIT } from "../protocol/constants.ts";
+import { EXIT } from "../protocol/constants.ts";
 import { bindContracts, payoutVtxo, type Terms } from "../protocol/contracts.ts";
 import { bytesToHex, hexToBytes } from "../protocol/hex.ts";
 import type { QuoteRow } from "./book.ts";
 import { fillQuote, recoverFilled, selectFloat } from "./fill.ts";
-import { BEACON_RATCHET_MARGIN_S, minCoinExpiry } from "./guards.ts";
+import { minCoinExpiry } from "./guards.ts";
 
 const writer = "5120806de010d4f26b83a7d2b0cc29973a7ffc3b17d163651bfc4de55aec4cc8d44b";
 const intentScript = "51205327a5c6693c7f8f932418d934b5517509f3d01cc5a3a8f9e509503c15bcf5bd";
@@ -127,7 +126,7 @@ async function predictFixture(expiry: number, deadline: number) {
   const emulatorKey = await SingleKey.fromHex("22".repeat(32)).compressedPublicKey();
   const deskPk = await SingleKey.fromHex("33".repeat(32)).xOnlyPublicKey();
   const bettorPk = await SingleKey.fromHex("44".repeat(32)).xOnlyPublicKey();
-  const beaconTxid = "55".repeat(32);
+  const oraclePk = await SingleKey.fromHex("55".repeat(32)).xOnlyPublicKey();
   const terms: Terms = {
     kind: 2,
     strike: 9_000_000n,
@@ -139,8 +138,7 @@ async function predictFixture(expiry: number, deadline: number) {
     writerPk: deskPk,
     holderPk: bettorPk,
     holderPayoutKey: bettorPk,
-    beacon: beaconIdOf(asset.AssetId.create(beaconTxid, 0)),
-    readFee: BEACON_READ_FEE,
+    oraclePk,
     serverKey,
     emulatorKey,
   };
@@ -160,8 +158,7 @@ async function predictFixture(expiry: number, deadline: number) {
     writerPkScript: bytesToHex(bound.writerPkScript),
     holderPubkey: bytesToHex(bettorPk),
     holderPkScript: bytesToHex(bound.holderPkScript),
-    beaconTxid,
-    beaconGidx: 0,
+    oraclePubkey: bytesToHex(oraclePk),
     intentAddress: bound.intentAddress,
     vaultAddress: bound.vaultAddress,
     status: "open",
@@ -171,7 +168,7 @@ async function predictFixture(expiry: number, deadline: number) {
   return { terms, bound, deskScript, row };
 }
 
-test("fillQuote declines short-expiry intent coins and honors checkPredict verdicts", async () => {
+test("fillQuote declines short-expiry intent coins, honors checkPredict, and ignores beacon ratchet for Predict", async () => {
   const now = 1_700_000_000;
   const expiry = now + 300;
   const deadline = now + 60;
@@ -203,6 +200,7 @@ test("fillQuote declines short-expiry intent coins and honors checkPredict verdi
     float: [{ txid: "bb".repeat(32), vout: 0, value: 100_000, expiresAt: new Date((minExpiry + 600) * 1000) }],
   });
   assert.equal(declinedShort.result, "declined");
+  assert.equal(declinedShort.reason, "coin_expiry");
 
   const goodCoin = { txid: "cc".repeat(32), vout: 0, value: 50_000, expiresAt: new Date((minExpiry + 600) * 1000) };
   const declinedPrice = await fillQuote({
@@ -215,6 +213,7 @@ test("fillQuote declines short-expiry intent coins and honors checkPredict verdi
     checkPredict: async () => "decline",
   });
   assert.equal(declinedPrice.result, "declined");
+  assert.equal(declinedPrice.reason, "price_moved");
 
   const retryPrice = await fillQuote({
     client: mockClient([goodCoin]) as never,
@@ -238,7 +237,8 @@ test("fillQuote declines short-expiry intent coins and honors checkPredict verdi
   });
   assert.equal(shortFloat.result, "short");
 
-  const deadBeacon = await fillQuote({
+  // PredictVaultV3 does not co-spend a beacon coin: neither beaconExpiry=0 nor a far-future beaconExpiry blocks a valid coin.
+  const noBeaconBlock = await fillQuote({
     client: mockClient([goodCoin]) as never,
     termsFor: () => terms,
     deskScript,
@@ -246,30 +246,20 @@ test("fillQuote declines short-expiry intent coins and honors checkPredict verdi
     now,
     beaconExpiry: 0,
     float: [{ txid: "bb".repeat(32), vout: 0, value: 100_000, expiresAt: new Date((minExpiry + 600) * 1000) }],
+    checkPredict: async () => "retry",
   });
-  assert.equal(deadBeacon.result, "declined");
+  assert.equal(noBeaconBlock.result, "waiting");
 
-  const liveBeacon = expiry + 86_400;
-  const ratchetUser = await fillQuote({
+  const liveBeacon = expiry + 28 * 86_400;
+  const noRatchetBlock = await fillQuote({
     client: mockClient([goodCoin]) as never,
     termsFor: () => terms,
     deskScript,
     row,
     now,
     beaconExpiry: liveBeacon,
-    float: [{ txid: "bb".repeat(32), vout: 0, value: 100_000, expiresAt: new Date(liveBeacon * 1000) }],
+    float: [{ txid: "bb".repeat(32), vout: 0, value: 100_000, expiresAt: new Date((minExpiry + 600) * 1000) }],
+    checkPredict: async () => "retry",
   });
-  assert.equal(ratchetUser.result, "declined");
-
-  const longCoin = { txid: "dd".repeat(32), vout: 0, value: 50_000, expiresAt: new Date((liveBeacon - BEACON_RATCHET_MARGIN_S) * 1000) };
-  const ratchetFloat = await fillQuote({
-    client: mockClient([longCoin]) as never,
-    termsFor: () => terms,
-    deskScript,
-    row,
-    now,
-    beaconExpiry: liveBeacon,
-    float: [{ txid: "bb".repeat(32), vout: 0, value: 100_000, expiresAt: new Date((liveBeacon - BEACON_RATCHET_MARGIN_S - 1) * 1000) }],
-  });
-  assert.equal(ratchetFloat.result, "short");
+  assert.equal(noRatchetBlock.result, "waiting");
 });

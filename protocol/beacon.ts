@@ -62,9 +62,26 @@ function sha256(...parts: Uint8Array[]): Uint8Array {
 }
 
 const ASCII_ATTEST = new TextEncoder().encode("attest");
+const ASCII_FIX = new TextEncoder().encode("fix");
+const ASCII_DOMAIN = new TextEncoder().encode("BTCUSD-FIX");
 const ASCII_MIGRATE = new TextEncoder().encode("migrate");
 const ASCII_REBOARD = new TextEncoder().encode("reboard");
 const ASCII_RESEED = new TextEncoder().encode("reseed");
+
+/** SHA-256 digest `oraclePk` signs to authorize standalone `PredictVault.settle`. */
+export function predictFixDigest(input: {
+  expiry: bigint;
+  cents: bigint;
+  time: bigint;
+}): Uint8Array {
+  return sha256(
+    ASCII_DOMAIN,
+    ASCII_FIX,
+    num2bin(input.expiry, 8),
+    num2bin(input.cents, 8),
+    num2bin(input.time, 8),
+  );
+}
 
 /** Internal 32-byte little-endian txid from 64-hex display txid. */
 export function internalTxid(displayHex: string): Uint8Array {

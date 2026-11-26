@@ -1,11 +1,8 @@
 import { generateSecretKey } from "nostr-tools/pure";
 
-import { asset } from "@arkade-os/sdk";
-
-import { beaconIdOf } from "../../protocol/beacon-id.ts";
 import {
-  BEACON_READ_FEE,
   PAIR,
+  PREDICT_READ_FEE,
   type PredictKind,
 } from "../../protocol/constants.ts";
 import { bindContracts } from "../../protocol/contracts.ts";
@@ -19,6 +16,13 @@ import { ACTIVE_PROFILE, ACTIVE_Q_MAX, writerBinding } from "./fund.ts";
 
 export function quoteMatchesBeacon(beaconTxid: string, beaconGidx: number, status: unknown = LIVE_BEACON_STATUS, expectedHrp: string = ACTIVE_PROFILE.hrp): boolean {
   return parseOracleBeacon(status, beaconTxid, beaconGidx, expectedHrp).ok;
+}
+
+export function oracleKeyMatches(quoteOraclePk: string, pinnedOraclePk: string | null = LIVE_BEACON_STATUS.args.adminPk): boolean {
+  const candidate = quoteOraclePk.trim().toLowerCase();
+  const expected = pinnedOraclePk?.trim().toLowerCase() || "";
+  if (!/^[0-9a-f]{64}$/.test(candidate) || !/^[0-9a-f]{64}$/.test(expected)) return false;
+  return candidate === expected;
 }
 
 export function backupKeyMatches(
@@ -60,12 +64,11 @@ export type PredictQuote = {
   deadline: number;
   exit: number;
   deskPkHex: string;
+  oraclePkHex: string;
   backupPkHex: string;
   voidAfter: number;
   fallbackDelay: number;
   finalExitDelay: number;
-  beaconTxid: string;
-  beaconGidx: number;
   intentAddress: string;
   vaultAddress: string;
 };
@@ -79,6 +82,7 @@ export async function requestPredictQuotes(input: {
   expiry: bigint;
   holderAddress: string;
   holderPubkey?: string;
+  oraclePubkey?: string | null;
   backupPubkey?: string | null;
 }): Promise<{ quotes: PredictQuote[]; note: string }> {
   const names = new Map(input.desks.map((desk) => [desk.pubkey, desk.name]));
@@ -130,10 +134,10 @@ export async function requestPredictQuotes(input: {
     if (quote.profile.void_after !== Number(ACTIVE_PROFILE.voidAfter)) continue;
     if (quote.profile.fallback_delay !== Number(ACTIVE_PROFILE.fallbackDelay)) continue;
     if (quote.profile.final_exit_delay !== Number(ACTIVE_PROFILE.finalExitDelay)) continue;
-    if (!quoteMatchesBeacon(quote.profile.beacon_txid, quote.profile.beacon_gidx)) continue;
+    if (!oracleKeyMatches(quote.profile.oracle_pubkey, input.oraclePubkey)) continue;
     if (!backupKeyMatches(quote.profile.backup_pubkey, quote.profile.writer_pubkey, profile.emulatorKey, input.backupPubkey ?? null, profile.network)) continue;
     const payout = BigInt(quote.to_amount);
-    if (payoutRefusal(payout, input.stake, BEACON_READ_FEE, ACTIVE_Q_MAX)) continue;
+    if (payoutRefusal(payout, input.stake, PREDICT_READ_FEE, ACTIVE_Q_MAX)) continue;
     let bound;
     try {
       bound = bindContracts({
@@ -147,12 +151,12 @@ export async function requestPredictQuotes(input: {
         writerPk: hexToBytes(quote.profile.writer_pubkey),
         holderPk: profile.signerKey ?? profile.payoutKey,
         holderPayoutKey: profile.signerKey ? undefined : profile.payoutKey,
+        oraclePk: hexToBytes(quote.profile.oracle_pubkey),
         backupPk: hexToBytes(quote.profile.backup_pubkey),
         voidAfter: BigInt(quote.profile.void_after),
         fallbackDelay: BigInt(quote.profile.fallback_delay),
         finalExitDelay: BigInt(quote.profile.final_exit_delay),
-        beacon: beaconIdOf(asset.AssetId.create(quote.profile.beacon_txid, quote.profile.beacon_gidx)),
-        readFee: BEACON_READ_FEE,
+        readFee: PREDICT_READ_FEE,
         serverKey: profile.serverKey,
         emulatorKey: profile.emulatorKey,
         hrp: ACTIVE_PROFILE.hrp,
@@ -172,12 +176,11 @@ export async function requestPredictQuotes(input: {
       deadline: quote.profile.deadline,
       exit: quote.profile.exit,
       deskPkHex: quote.profile.writer_pubkey,
+      oraclePkHex: quote.profile.oracle_pubkey,
       backupPkHex: quote.profile.backup_pubkey,
       voidAfter: quote.profile.void_after,
       fallbackDelay: quote.profile.fallback_delay,
       finalExitDelay: quote.profile.final_exit_delay,
-      beaconTxid: quote.profile.beacon_txid,
-      beaconGidx: quote.profile.beacon_gidx,
       intentAddress: quote.profile.intent_address,
       vaultAddress: quote.profile.vault_address,
     });

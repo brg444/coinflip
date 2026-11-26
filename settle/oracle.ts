@@ -1,7 +1,10 @@
+import { schnorr } from "@noble/curves/secp256k1.js";
 import { asset } from "@arkade-os/sdk";
 
 import { beaconIdOf } from "../protocol/beacon-id.ts";
-import { bytesToHex } from "../protocol/hex.ts";
+import { predictFixDigest } from "../protocol/beacon.ts";
+import { centsOf, intentSigned } from "../protocol/dia.ts";
+import { bytesToHex, hexToBytes } from "../protocol/hex.ts";
 
 /**
  * The oracle's public status. Settlement needs the beacon constructor from
@@ -20,6 +23,25 @@ export type BeaconSpec = {
 };
 
 export type OracleLatest = { cents: bigint; time: number };
+
+export type OracleKeyInfo = {
+  oraclePk: Uint8Array;
+  oraclePkHex: string;
+  expiryLag: bigint;
+};
+
+export type OracleFixing = {
+  expiry: number;
+  cents: bigint;
+  price: bigint;
+  time: number;
+  nonce: bigint;
+  intentExpiry: number;
+  sig: Uint8Array;
+  oracleSig: Uint8Array;
+  oraclePk: Uint8Array;
+  oraclePkHex: string;
+};
 
 export type ParsedBeacon = { ok: true; beacon: BeaconSpec } | { ok: false; error: string };
 
@@ -141,4 +163,68 @@ export function parseOracleLatest(body: unknown): OracleLatest | null {
   const time = typeof latest.time === "number" && Number.isSafeInteger(latest.time) && latest.time > 0 ? latest.time : null;
   if (cents == null || cents <= 0n || time == null) return null;
   return { cents, time };
+}
+
+/** Extract the oracle's x-only signing pubkey and expiry lag from `/api/status` (works with or without a beacon). */
+export function parseOracleKey(body: unknown): OracleKeyInfo | null {
+  const root = record(body);
+  if (!root) return null;
+  const args = record(root.args);
+  const adminRaw = typeof args?.adminPk === "string"
+    ? args.adminPk
+    : Array.isArray(root.pubkeys) && typeof root.pubkeys[0] === "string"
+      ? root.pubkeys[0]
+      : "";
+  const oraclePk = hexBytes(adminRaw, 32);
+  if (!oraclePk) return null;
+  const expiryLag = whole(args?.expiryLag) ?? 60n;
+  return { oraclePk, oraclePkHex: bytesToHex(oraclePk), expiryLag };
+}
+
+/** Parse and cryptographically verify a signed fixing payload from `GET /api/fixing?expiry=...`. */
+export function parseOracleFixing(body: unknown, expectedOraclePkHex?: string): OracleFixing | null {
+  const root = record(body);
+  if (!root) return null;
+  const expiry = typeof root.expiry === "number" && Number.isSafeInteger(root.expiry) && root.expiry > 1800 ? root.expiry : null;
+  const time = typeof root.time === "number" && Number.isSafeInteger(root.time) && root.time > 0 ? root.time : null;
+  const intentExpiry = typeof root.intentExpiry === "number" && Number.isSafeInteger(root.intentExpiry) ? root.intentExpiry : null;
+  const price = whole(root.raw);
+  const nonce = whole(root.nonce);
+  const sig = hexBytes(root.sig, 64);
+  const oracleSig = hexBytes(root.oracleSig, 64);
+  const oraclePk = hexBytes(root.oraclePk, 32);
+  if (expiry == null || time == null || intentExpiry == null || price == null || price <= 0n || nonce == null || !sig || !oracleSig || !oraclePk) {
+    return null;
+  }
+  const oraclePkHex = bytesToHex(oraclePk);
+  if (expectedOraclePkHex && oraclePkHex !== expectedOraclePkHex.trim().toLowerCase()) return null;
+  if (time < expiry || time > expiry + 60) return null;
+  let cents: bigint;
+  try {
+    cents = centsOf(price);
+  } catch {
+    return null;
+  }
+  if (!intentSigned({ price, time, nonce, intentExpiry, sig })) return null;
+  const digest = predictFixDigest({ expiry: BigInt(expiry), cents, time: BigInt(time) });
+  if (!schnorr.verify(oracleSig, digest, oraclePk)) return null;
+  return { expiry, cents, price, time, nonce, intentExpiry, sig, oracleSig, oraclePk, oraclePkHex };
+}
+
+/** Fetch and verify the canonical signed fixing for `expiry` from `GET /api/fixing` (or `/oracle/fixing`). */
+export async function fetchOracleFixing(
+  urlOrOrigin: string,
+  expiry: number,
+  expectedOraclePkHex?: string,
+  signal?: AbortSignal,
+): Promise<{ status: number; fixing: OracleFixing | null; error?: string }> {
+  const endpoint = urlOrOrigin.includes("/fixing")
+    ? `${urlOrOrigin}${urlOrOrigin.includes("?") ? "&" : "?"}expiry=${expiry}`
+    : `${urlOrOrigin.replace(/\/+$/, "")}/api/fixing?expiry=${expiry}`;
+  const res = await fetch(endpoint, { signal });
+  const raw = await res.json().catch(() => null) as { error?: string } | null;
+  if (!res.ok) return { status: res.status, fixing: null, error: raw?.error ?? `oracle fixing ${res.status}` };
+  const fixing = parseOracleFixing(raw, expectedOraclePkHex);
+  if (!fixing) return { status: 502, fixing: null, error: "invalid fixing signature" };
+  return { status: 200, fixing };
 }

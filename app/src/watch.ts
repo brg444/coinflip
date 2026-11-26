@@ -2,6 +2,7 @@ import { ArkAddress, RestIndexerProvider, Transaction } from "@arkade-os/sdk";
 import { base64 } from "@scure/base";
 
 import { statePacketOf } from "../../protocol/beacon.ts";
+import { predictSettlePriceCents } from "../../protocol/cospend.ts";
 import { bytesToHex } from "../../protocol/hex.ts";
 import { classifyIntent, psbtView, type CoinView, type IntentPhase, type TxOutput } from "../../protocol/intent-state.ts";
 import { virtualTxsById } from "../../protocol/virtual-txs.ts";
@@ -70,10 +71,13 @@ export async function readKept(
   }
 }
 
-/** The settlement carries the beacon's state packet. The fixing for `expiry` is the price the vault read. */
+/** Extract the settlement price from either a standalone Predict witness or a beacon state packet. */
 function fixingOf(raw: string, expiry: bigint): bigint | null {
   try {
-    return slotPrice(statePacketOf(Transaction.fromPSBT(base64.decode(raw))), expiry);
+    const tx = Transaction.fromPSBT(base64.decode(raw));
+    const direct = predictSettlePriceCents(tx);
+    if (direct != null) return direct;
+    return slotPrice(statePacketOf(tx), expiry);
   } catch {
     return null;
   }

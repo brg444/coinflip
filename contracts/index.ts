@@ -11,11 +11,12 @@ export { bindContracts, type Bound as OptionBound, type Terms } from "../protoco
 export {
   beaconIdOf,
   bindBeacon,
+  predictFixDigest,
   type BeaconArgs,
   type BeaconId,
   type Bound as BeaconBound,
 } from "../protocol/beacon.ts";
 
-export { buildSettle, submit } from "../protocol/cospend.ts";
+export { buildPredictSettle, buildSettle, predictSettlePriceCents, submit } from "../protocol/cospend.ts";
 
 export { settlePayouts, slotFixing, slotPrice } from "../settle/vault.ts";

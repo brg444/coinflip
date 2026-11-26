@@ -32,6 +32,8 @@ export type StoredFixing = {
   nonce?: string;
   intentExpiry?: number;
   sig?: string;
+  /** 64-byte BIP340 Schnorr signature from `oraclePk` over `predictFixDigest`. */
+  oracleSig?: string;
   txid: string;
 };
 

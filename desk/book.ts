@@ -27,13 +27,15 @@ export type QuoteRow = {
   holderPubkey: string;
   /** Predict: the bettor's Arkade address script, which the payout pays. */
   holderPkScript?: string;
+  /** Predict: x-only pubkey of the oracle co-signing canonical fixings. */
+  oraclePubkey?: string;
   backupPubkey?: string;
   voidAfter?: number;
   fallbackDelay?: number;
   finalExitDelay?: number;
-  /** Display txid of the beacon identity asset. */
-  beaconTxid: string;
-  beaconGidx: number;
+  /** Options: display txid of the beacon identity asset. */
+  beaconTxid?: string;
+  beaconGidx?: number;
   intentAddress: string;
   vaultAddress: string;
   status: QuoteStatus;
@@ -51,9 +53,12 @@ type FileShape = {
   quotes: QuoteRow[];
 };
 
-/** Old book rows predate the beacon field. They cannot be registered. */
+/** Old book rows missing their settlement reference (oraclePubkey for Predict, beacon for Options) cannot be registered. */
 export function hasBeacon(row: QuoteRow): boolean {
-  return /^[0-9a-f]{64}$/.test(row.beaconTxid ?? "") && Number.isInteger(row.beaconGidx) && row.beaconGidx >= 0 && row.beaconGidx <= 65_535;
+  if (isPredict(row.kind)) {
+    return /^[0-9a-f]{64}$/.test(row.oraclePubkey ?? "");
+  }
+  return /^[0-9a-f]{64}$/.test(row.beaconTxid ?? "") && Number.isInteger(row.beaconGidx) && row.beaconGidx! >= 0 && row.beaconGidx! <= 65_535;
 }
 
 /** Float a fill spends: the premium for an option, the whole payout for a prediction. */

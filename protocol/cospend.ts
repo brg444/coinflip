@@ -23,8 +23,9 @@ import {
 } from "@arkade-os/sdk";
 import { base64 } from "@scure/base";
 
-import { internalTxid, reseedState, STATE_TYPE } from "./beacon.ts";
+import { bin2num, internalTxid, reseedState, STATE_TYPE } from "./beacon.ts";
 import { DUST_SATS } from "./constants.ts";
+import { centsOf } from "./dia.ts";
 import { bytesToHex } from "./hex.ts";
 
 /**
@@ -73,6 +74,40 @@ function isCovenant(spend: Spend): spend is CovenantSpend {
 /** The witness stack as the emulator packet carries it, compact-size framed like a condition witness. */
 export function encodeWitness(items: Uint8Array[]): Uint8Array {
   return ConditionWitness.encode(items)[1];
+}
+
+function readCompactSize(bytes: Uint8Array, at: number): [number, number] | null {
+  if (at >= bytes.length) return null;
+  const first = bytes[at]!;
+  if (first < 0xfd) return [first, at + 1];
+  if (first === 0xfd) {
+    if (at + 3 > bytes.length) return null;
+    return [bytes[at + 1]! | (bytes[at + 2]! << 8), at + 3];
+  }
+  if (first === 0xfe) {
+    if (at + 5 > bytes.length) return null;
+    const view = new DataView(bytes.buffer, bytes.byteOffset + at + 1, 4);
+    return [view.getUint32(0, true), at + 5];
+  }
+  return null;
+}
+
+/** Decode a compact-size framed witness stack produced by `encodeWitness`. */
+export function decodeWitness(bytes: Uint8Array): Uint8Array[] | null {
+  const head = readCompactSize(bytes, 0);
+  if (!head) return null;
+  const [count, start] = head;
+  const items: Uint8Array[] = [];
+  let at = start;
+  for (let i = 0; i < count; i++) {
+    const next = readCompactSize(bytes, at);
+    if (!next) return null;
+    const [len, dataAt] = next;
+    if (dataAt + len > bytes.length) return null;
+    items.push(bytes.subarray(dataAt, dataAt + len));
+    at = dataAt + len;
+  }
+  return at === bytes.length ? items : null;
 }
 
 function anchorIndex(tx: Transaction): number {
@@ -165,6 +200,76 @@ export function buildSettle(input: {
     ...input.payouts,
   ];
   return build(spends, outputs, [unitTransfer(input.beacon.id, 1, 0), statePacket(input.beacon.state)], input.checkpoint);
+}
+
+export type PredictFixingInput = {
+  /** 18-decimal DIA BTC/USD price. */
+  price: bigint;
+  /** Sample unix timestamp inside `[expiry, expiry + 60]`. */
+  time: bigint;
+  /** DIA intent nonce. */
+  nonce: bigint;
+  /** DIA intent expiry. */
+  intentExpiry: bigint;
+  /** 64-byte DIA EIP-712 signature (`r || s`). */
+  sig: Uint8Array;
+  /** 64-byte BIP340 Schnorr signature from `oraclePk` over `predictFixDigest`. */
+  oracleSig: Uint8Array;
+};
+
+/**
+ * Settle a standalone PredictVaultV3: 1 input (vault), payouts starting at output 0.
+ * No shared beacon coin, no asset transfer, no state packet.
+ */
+export function buildPredictSettle(input: {
+  vault: { script: ProgramScript; coin: Coin };
+  fixing: PredictFixingInput;
+  payouts: { script: Uint8Array; amount: bigint }[];
+  checkpoint: CSVMultisigTapscript.Type;
+}): Built {
+  if (input.fixing.sig.length !== 64) throw new Error("dia signature");
+  if (input.fixing.oracleSig.length !== 64) throw new Error("oracle signature");
+  return build(
+    [{
+      script: input.vault.script,
+      fn: "settle",
+      callArgs: {
+        price: input.fixing.price,
+        time: input.fixing.time,
+        nonce: input.fixing.nonce,
+        intentExpiry: input.fixing.intentExpiry,
+        sig: input.fixing.sig,
+        oracleSig: input.fixing.oracleSig,
+      },
+      coin: input.vault.coin,
+    }],
+    input.payouts,
+    [],
+    input.checkpoint,
+  );
+}
+
+/** Extract the rounded USD cents price from a standalone `PredictVault.settle` transaction's emulator witness. */
+export function predictSettlePriceCents(tx: Transaction): bigint | null {
+  try {
+    const entry = Extension.fromTx(tx).getEmulatorPacket()?.entries.find((item) => item.vin === 0);
+    if (!entry?.witness?.length) return null;
+    const stack = decodeWitness(entry.witness);
+    if (!stack || stack.length !== 6) return null;
+    // Witness order matches `settle(price, time, nonce, intentExpiry, sig, oracleSig)` reversed on stack:
+    // [oracleSig (64B), sig (64B), intentExpiry, nonce, time, price] or forward [price, ..., sig (64B), oracleSig (64B)].
+    const rawBytes = stack[0]!.length === 64 && stack[1]!.length === 64
+      ? stack[5]!
+      : stack[4]!.length === 64 && stack[5]!.length === 64
+        ? stack[0]!
+        : null;
+    if (!rawBytes || rawBytes.length === 0) return null;
+    const rawPrice = bin2num(rawBytes);
+    if (rawPrice <= 0n) return null;
+    return centsOf(rawPrice);
+  } catch {
+    return null;
+  }
 }
 
 export function refundOutputs(

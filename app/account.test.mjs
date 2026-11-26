@@ -3,8 +3,7 @@ import test from "node:test";
 
 import { asset, SingleKey } from "@arkade-os/sdk";
 
-import { beaconIdOf } from "../protocol/beacon-id.ts";
-import { BEACON_READ_FEE, EXIT } from "../protocol/constants.ts";
+import { EXIT, PREDICT_READ_FEE } from "../protocol/constants.ts";
 import { bindContracts, directPayoutKey, payoutVtxo } from "../protocol/contracts.ts";
 import { bytesToHex } from "../protocol/hex.ts";
 import { clearAddress, parseWriterAddress, paymentUri, readAddress, readPubkey, saveAddress, verifiedSignerKey } from "./src/fund.ts";
@@ -60,6 +59,7 @@ test("wallet connect signer pubkey verifies against DefaultVtxo and binds identi
 
   const pkScriptHex = bytesToHex(script.pkScript);
   assert.equal(directPayoutKey(bytesToHex(verified), pkScriptHex), undefined);
+  const oracleKey = await SingleKey.fromHex("66".repeat(32)).xOnlyPublicKey();
   const shared = {
     kind: 2,
     strike: 6_000_000n,
@@ -70,8 +70,8 @@ test("wallet connect signer pubkey verifies against DefaultVtxo and binds identi
     exit: EXIT,
     writerPk: deskKey,
     holderPk: verified,
-    beacon: beaconIdOf(asset.AssetId.create("00".repeat(31) + "07", 0)),
-    readFee: BEACON_READ_FEE,
+    oraclePk: oracleKey,
+    readFee: PREDICT_READ_FEE,
     serverKey,
     emulatorKey,
   };

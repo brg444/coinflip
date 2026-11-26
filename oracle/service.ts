@@ -8,7 +8,7 @@ import { schnorr } from "@noble/curves/secp256k1.js";
 import { asset, ArkAddress, SingleKey, Transaction, type ArkProvider, type CSVMultisigTapscript, type EmulatorProvider, type Network } from "@arkade-os/sdk";
 import { base64 } from "@scure/base";
 
-import { attestDigest, BEACON_GRID_S, beaconIdOf, bindBeacon, decodeState, genesisOutputs, internalTxid, nextState, priceValue, reboardDigest, reseedDigest, statePacketOf } from "../protocol/beacon.ts";
+import { attestDigest, BEACON_GRID_S, beaconIdOf, bindBeacon, decodeState, genesisOutputs, internalTxid, nextState, predictFixDigest, priceValue, reboardDigest, reseedDigest, statePacketOf } from "../protocol/beacon.ts";
 import { BEACON_READ_FEE, DUST_SATS, EXIT, PRICE_MAX, vaultProgramId } from "../protocol/constants.ts";
 import { bindContracts } from "../protocol/contracts.ts";
 import { buildAttest, buildReseed, reboardBeacon, submit } from "../protocol/cospend.ts";
@@ -79,7 +79,7 @@ export type OracleDeps = {
   host?: string;
   adminToken?: string;
   oracleKey?: Uint8Array;
-  emulatorKey: Uint8Array;
+  emulatorKey?: Uint8Array;
   wallet?: OracleWallet;
   indexer?: OracleIndexer;
   emulator?: Pick<EmulatorProvider, "submitTx"> & Partial<Pick<EmulatorProvider, "submitIntent">>;
@@ -101,6 +101,8 @@ export type OracleDeps = {
   allowedPubkey?: string;
   /** Called after an announced expiry is published or confirmed already on the beacon. */
   onPublishedExpiry?: (expiry: number) => void;
+  /** When true, record DIA intents and serve signed Predict fixings without issuing/deploying an on-Arkade beacon. */
+  stateless?: boolean;
   now?: () => number;
 };
 
@@ -128,6 +130,7 @@ export function duePositionExpiries(
   const allowed = opts.allowedPubkey?.toLowerCase();
   const byExpiry = new Map<number, OptionPosition[]>();
   for (const pos of positions) {
+    if (!pos.beacon_txid || pos.beacon_gidx == null) continue;
     if (pos.beacon_txid.toLowerCase() !== ourTxid || pos.beacon_gidx !== ourGidx) continue;
     if (allowed && pos.writer_pubkey.toLowerCase() !== allowed && pos.holder_pubkey.toLowerCase() !== allowed) continue;
     if (pos.program_id !== vaultProgramId(pos.kind)) continue;
@@ -227,7 +230,8 @@ function whole(value: unknown, label: string): bigint {
 
 export async function createOracle(deps: OracleDeps) {
   if (deps.oracleKey && deps.oracleKey.length !== 32) throw new Error("ORACLE_KEY must be 32 bytes");
-  if (deps.emulatorKey.length !== 33) throw new Error("emulator key must be 33 bytes");
+  if (deps.emulatorKey && deps.emulatorKey.length !== 33) throw new Error("emulator key must be 33 bytes");
+  if (!deps.stateless && !deps.emulatorKey) throw new Error("emulator key must be 33 bytes");
   const adminPk = deps.oracleKey ? await SingleKey.fromHex(bytesToHex(deps.oracleKey)).xOnlyPublicKey() : null;
   const store = await loadStore(deps.dataDir);
   let publishing = false;
@@ -242,7 +246,7 @@ export async function createOracle(deps: OracleDeps) {
   const hrp = deps.hrp;
 
   async function bound() {
-    if (!store.assetId || !deps.wallet || !adminPk) return null;
+    if (!store.assetId || !deps.wallet || !adminPk || !deps.emulatorKey) return null;
     const id = asset.AssetId.fromString(store.assetId);
     return bindBeacon({
       id: beaconIdOf(id),
@@ -420,7 +424,7 @@ export async function createOracle(deps: OracleDeps) {
 
   async function recordIntent(intent: DiaIntent) {
     if (!adminPk) throw new HttpError(400, "ORACLE_KEY is required");
-    if (!store.assetId) throw new HttpError(409, "not issued");
+    if (!deps.stateless && !store.assetId) throw new HttpError(409, "not issued");
     let cents: bigint;
     try {
       cents = centsOf(intent.price);
@@ -481,6 +485,80 @@ export async function createOracle(deps: OracleDeps) {
           }
         : { price: sample.price, time: sample.time }));
     return { samples: rows };
+  }
+
+  /**
+   * Return the canonical signed fixing for a 5-minute close (`expiry % 300 == 0`, `now >= expiry + 60`).
+   * Once a fixing is chosen for an expiry, subsequent calls always return that exact same sample & signature.
+   */
+  async function getFixing(expiryParam: string | null) {
+    if (!deps.oracleKey || !adminPk) throw new HttpError(400, "ORACLE_KEY is required");
+    if (!expiryParam || !/^[0-9]+$/.test(expiryParam)) throw new HttpError(400, "expiry");
+    const expiry = BigInt(expiryParam);
+    if (expiry <= 1800n) throw new HttpError(400, "expiry");
+    if (expiry % BEACON_GRID_S !== 0n) throw new HttpError(400, "expiry grid");
+    const expiryN = Number(expiry);
+    if (!Number.isSafeInteger(expiryN)) throw new HttpError(400, "expiry");
+    if (BigInt(now()) < expiry + EXPIRY_LAG) throw new HttpError(400, "before expiry time");
+
+    const existing = store.fixings.find(
+      (row) => row.expiry === expiryN && typeof row.time === "number" && row.raw && row.sig && row.nonce && typeof row.intentExpiry === "number",
+    );
+    if (existing) {
+      const raw = BigInt(existing.raw!);
+      const cents = centsOf(raw);
+      const time = BigInt(existing.time!);
+      if (!existing.oracleSig) {
+        existing.oracleSig = bytesToHex(schnorr.sign(predictFixDigest({ expiry, cents, time }), deps.oracleKey));
+        await save();
+      }
+      return {
+        expiry: expiryN,
+        price: cents.toString(),
+        time: existing.time!,
+        raw: existing.raw!,
+        nonce: existing.nonce!,
+        intentExpiry: existing.intentExpiry!,
+        sig: existing.sig!,
+        oracleSig: existing.oracleSig,
+        oraclePk: bytesToHex(adminPk),
+      };
+    }
+
+    const chosen = chooseSample(expiryN);
+    if (!chosen) throw new HttpError(404, "no sample");
+    if (chosen.time < expiryN) throw new HttpError(404, "sample before expiry");
+    if (chosen.time > expiryN + Number(EXPIRY_LAG)) throw new HttpError(404, "sample after close");
+    if (!chosen.raw || !chosen.sig || !chosen.nonce || typeof chosen.intentExpiry !== "number") {
+      throw new HttpError(404, "no sample");
+    }
+    const raw = BigInt(chosen.raw);
+    const cents = centsOf(raw);
+    const time = BigInt(chosen.time);
+    const oracleSig = bytesToHex(schnorr.sign(predictFixDigest({ expiry, cents, time }), deps.oracleKey));
+    store.fixings.push({
+      expiry: expiryN,
+      price: cents.toString(),
+      time: chosen.time,
+      raw: chosen.raw,
+      nonce: chosen.nonce,
+      intentExpiry: chosen.intentExpiry,
+      sig: chosen.sig,
+      oracleSig,
+      txid: "",
+    });
+    await save();
+    return {
+      expiry: expiryN,
+      price: cents.toString(),
+      time: chosen.time,
+      raw: chosen.raw,
+      nonce: chosen.nonce,
+      intentExpiry: chosen.intentExpiry,
+      sig: chosen.sig,
+      oracleSig,
+      oraclePk: bytesToHex(adminPk),
+    };
   }
 
   async function publish(body: Record<string, unknown>) {
@@ -552,6 +630,7 @@ export async function createOracle(deps: OracleDeps) {
       });
       const submitted = await submit(built, deps.emulator as EmulatorProvider);
       const stamp = Number(time);
+      const oracleSig = bytesToHex(schnorr.sign(predictFixDigest({ expiry, cents, time }), deps.oracleKey));
       store.fixings.push({
         expiry: expiryN,
         price: cents.toString(),
@@ -560,6 +639,7 @@ export async function createOracle(deps: OracleDeps) {
         nonce: chosen.nonce,
         intentExpiry: chosen.intentExpiry,
         sig: chosen.sig,
+        oracleSig,
         txid: submitted.txid,
       });
       await save();
@@ -614,7 +694,8 @@ export async function createOracle(deps: OracleDeps) {
           const ourGidx = Number(assetId.groupIndex);
           const allowed = deps.allowedPubkey?.toLowerCase();
           const matching = [...deps.announcedPositions()].filter((pos) => (
-            pos.beacon_txid.toLowerCase() === ourTxid
+            pos.beacon_txid != null
+            && pos.beacon_txid.toLowerCase() === ourTxid
             && pos.beacon_gidx === ourGidx
             && (!allowed || pos.writer_pubkey.toLowerCase() === allowed || pos.holder_pubkey.toLowerCase() === allowed)
           ));
@@ -694,6 +775,7 @@ export async function createOracle(deps: OracleDeps) {
       if (req.method === "GET" && url === "/page.css") return sendFile(res, "page.css", "text/css; charset=utf-8");
       if (req.method === "GET" && url === "/api/status") return sendJson(res, 200, await status());
       if (req.method === "GET" && url === "/api/prices") return sendJson(res, 200, pricePage(parsed.searchParams));
+      if (req.method === "GET" && url === "/api/fixing") return sendJson(res, 200, await getFixing(parsed.searchParams.get("expiry")));
       if (req.method === "POST" && (url === "/api/issue" || url === "/api/deploy" || url === "/api/recover" || url === "/api/intent")) {
         requireAdmin(req);
         const body = asRecord(await readBody(req, 4096));
@@ -732,7 +814,7 @@ export async function createOracle(deps: OracleDeps) {
   const publishedExpiries = new Set<number>();
 
   async function hasLiveVault(positions: readonly OptionPosition[]): Promise<boolean> {
-    if (!deps.indexer || !deps.wallet) return false;
+    if (!deps.indexer || !deps.wallet || !deps.emulatorKey) return false;
     const minByScript = new Map<string, bigint>();
     for (const pos of positions) {
       const watched = positionFromAnnouncement(pos);
@@ -804,7 +886,7 @@ export async function createOracle(deps: OracleDeps) {
   }
 
   async function takeSample() {
-    if (!deps.pull || !store.assetId) return;
+    if (!deps.pull || (!deps.stateless && !store.assetId)) return;
     const intent = await deps.pull();
     if (!intent) return;
     await recordIntent(intent);
@@ -826,7 +908,7 @@ export async function createOracle(deps: OracleDeps) {
   const timer = deps.sampleEveryMs && deps.sampleEveryMs > 0 ? setInterval(minute, deps.sampleEveryMs) : undefined;
   if (timer) minute();
   async function ingestIntent(intent: DiaIntent) {
-    if (!store.assetId) return;
+    if (!deps.stateless && !store.assetId) return;
     await recordIntent(intent);
   }
 

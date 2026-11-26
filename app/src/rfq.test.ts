@@ -1,17 +1,25 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { asset, SingleKey, type arkade } from "@arkade-os/sdk";
+import { SingleKey, type arkade } from "@arkade-os/sdk";
 
 import predictArtifact from "../../contracts/predict_vault.artifact.json" with { type: "json" };
-import { beaconIdOf } from "../../protocol/beacon-id.ts";
-import { BEACON_READ_FEE, EXIT } from "../../protocol/constants.ts";
+import { EXIT } from "../../protocol/constants.ts";
 import { bindContracts } from "../../protocol/contracts.ts";
 import { cancelIntentDelegation, executorArtifact, reboardVaultDelegation, scriptNumHex } from "../../protocol/executor.ts";
 import { bytesToHex } from "../../protocol/hex.ts";
 import { LIVE_BEACON_STATUS } from "./beacon-status.ts";
 import { explainError } from "./explain.ts";
-import { backupKeyMatches, quoteMatchesBeacon } from "./rfq.ts";
+import { backupKeyMatches, oracleKeyMatches, quoteMatchesBeacon } from "./rfq.ts";
+
+test("oracleKeyMatches accepts only the pinned oracle x-only pubkey", () => {
+  const pinned = LIVE_BEACON_STATUS.args.adminPk;
+  assert.equal(oracleKeyMatches(pinned, pinned), true);
+  assert.equal(oracleKeyMatches(pinned.toUpperCase(), pinned), true);
+  assert.equal(oracleKeyMatches("00".repeat(32), pinned), false);
+  assert.equal(oracleKeyMatches("not-a-key", pinned), false);
+  assert.equal(oracleKeyMatches(pinned, null), false);
+});
 
 test("quoteMatchesBeacon accepts only the pinned beacon txid and group index", () => {
   assert.equal(quoteMatchesBeacon(LIVE_BEACON_STATUS.issueTxid, 0), true);
@@ -60,7 +68,7 @@ test("executorArtifact flattens ScriptPubKey and delegation builders encode cont
   const emulatorKey = await SingleKey.fromHex("02".repeat(32)).compressedPublicKey();
   const writerPk = await SingleKey.fromHex("11".repeat(32)).xOnlyPublicKey();
   const holderPk = await SingleKey.fromHex("22".repeat(32)).xOnlyPublicKey();
-  const beacon = beaconIdOf(asset.AssetId.create("07".repeat(32), 0));
+  const oraclePk = await SingleKey.fromHex("33".repeat(32)).xOnlyPublicKey();
   const bound = bindContracts({
     kind: 2,
     strike: 8_500_000n,
@@ -72,8 +80,7 @@ test("executorArtifact flattens ScriptPubKey and delegation builders encode cont
     writerPk,
     holderPk,
     holderPayoutKey: holderPk,
-    beacon,
-    readFee: BEACON_READ_FEE,
+    oraclePk,
     serverKey,
     emulatorKey,
   });
@@ -83,7 +90,6 @@ test("executorArtifact flattens ScriptPubKey and delegation builders encode cont
   assert.equal(cancel.variables.side, scriptNumHex(1n));
   const reboard = reboardVaultDelegation("tpl-reboard", bound);
   assert.equal(reboard.templateId, "tpl-reboard");
-  assert.equal(reboard.variables.beacon_txid, bytesToHex(beacon.txid));
-  assert.equal(reboard.variables.read_fee, scriptNumHex(BEACON_READ_FEE));
+  assert.equal(reboard.variables.oracle_pk, `02${bytesToHex(oraclePk)}`);
   assert.equal(reboard.variables.expiry, scriptNumHex(1_790_000_300n));
 });

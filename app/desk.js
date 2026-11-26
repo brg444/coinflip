@@ -28,18 +28,18 @@ import {
 import { requestPredictQuotes } from "./src/rfq.ts";
 import { btcUsdCents, deribitMultiplier, fetchSurface } from "../protocol/deribit.ts";
 import {
-  BEACON_READ_FEE,
   isPredict,
   PREDICT_GRID_S,
   PREDICT_LOCK_S,
   PREDICT_MIN_LEFT_S,
+  PREDICT_READ_FEE,
   PREDICT_VOID_AFTER,
   QUOTE_TTL_S,
   STAKE_MIN,
 } from "../protocol/constants.ts";
 import { predictPayout } from "../protocol/pricing.ts";
 import { openingSample, WINDOW_LINE_WITHIN_S } from "../protocol/window-line.ts";
-import { PINNED_BACKUP_PUBKEY, PINNED_DESKS, RELAYS } from "./rfq-config.js";
+import { PINNED_BACKUP_PUBKEY, PINNED_DESKS, PINNED_ORACLE_PUBKEY, RELAYS } from "./rfq-config.js";
 import { explainError } from "./src/explain.ts";
 import { settlementKnown, usdFromCents } from "./src/position-status.ts";
 import { reboardVaultFromPage, refundVaultFromPage } from "./src/settle.ts";
@@ -121,6 +121,7 @@ function persist() {
     address: p.address,
     deadline: p.deadline,
     holderPkHex: p.holderPkHex,
+    oraclePkHex: p.oraclePkHex || "",
     beaconTxid: p.beaconTxid,
     beaconGidx: p.beaconGidx,
     exit: p.exit,
@@ -381,7 +382,7 @@ function sendClock(node) {
 
 function canSettle(position) {
   if (position.status !== "filled") return false;
-  if (!position.vaultAddress || !position.deskPkHex || !position.beaconTxid) return false;
+  if (!position.vaultAddress || !position.deskPkHex || !(position.oraclePkHex || position.beaconTxid)) return false;
   const expiry = Number(position.expiry) || 0;
   if (!expiry || expiry > Math.floor(Date.now() / 1000)) return false;
   if (position.settleTxid && position.settleTxid !== position.closeTxid) return false;
@@ -498,6 +499,7 @@ async function fundRequest(position) {
     expiry: position.expiry,
     deadline: BigInt(position.deadline),
     writerPkHex: position.deskPkHex,
+    oraclePkHex: position.oraclePkHex || undefined,
     backupPkHex: position.backupPkHex || undefined,
     voidAfter: position.voidAfter ? BigInt(position.voidAfter) : undefined,
     fallbackDelay: position.fallbackDelay ? BigInt(position.fallbackDelay) : undefined,
@@ -662,7 +664,7 @@ function startWatch() {
   const watched = rows.map((position) => ({
     ...watchRow(position),
     register: async () => {
-      if (!position.deskPkHex || !position.beaconTxid) return "";
+      if (!position.deskPkHex || !(position.oraclePkHex || position.beaconTxid)) return "";
       return registerIntent(await fundRequest(position));
     },
   }));
@@ -1075,7 +1077,7 @@ const localTime = (unix) => new Date(Number(unix) * 1000).toLocaleTimeString(und
 const utcTime = (unix) => `${hhmm(new Date(Number(unix) * 1000))} UTC`;
 const usdCents = (cents) => `$${usdFromCents(BigInt(cents))}`;
 const timesX = (m) => `${m.toFixed(2)}×`;
-const won = (payout) => payout - BEACON_READ_FEE;
+const won = (payout) => payout - PREDICT_READ_FEE;
 const amount = (sats) => (sats < 100_000n ? `${int(sats)} sats` : `₿${fmtBtc(sats)}`);
 
 /** The next closes on the 5-minute grid, then the quarter hours after them. */
@@ -1867,6 +1869,7 @@ async function askBet() {
       expiry: asked.expiry,
       holderAddress: state.address,
       holderPubkey: state.pubkey || undefined,
+      oraclePubkey: PINNED_ORACLE_PUBKEY,
       backupPubkey: PINNED_BACKUP_PUBKEY,
     });
     if (gen !== betGen) return;
@@ -1882,12 +1885,11 @@ async function askBet() {
       holderAddress: state.address,
       holderPubkey: state.pubkey || undefined,
       writerPkHex: quote.deskPkHex,
+      oraclePkHex: quote.oraclePkHex,
       backupPkHex: quote.backupPkHex,
       voidAfter: BigInt(quote.voidAfter),
       fallbackDelay: BigInt(quote.fallbackDelay),
       finalExitDelay: BigInt(quote.finalExitDelay),
-      beaconTxidHex: quote.beaconTxid,
-      beaconGidx: quote.beaconGidx,
       exit: BigInt(quote.exit),
     });
     if (gen !== betGen) return;
@@ -1932,12 +1934,11 @@ function placeBet() {
       deadline: quote.deadline,
       address: deposit.address,
       deskPkHex: quote.deskPkHex,
+      oraclePkHex: quote.oraclePkHex,
       backupPkHex: quote.backupPkHex,
       voidAfter: quote.voidAfter,
       fallbackDelay: quote.fallbackDelay,
       finalExitDelay: quote.finalExitDelay,
-      beaconTxid: deposit.beaconTxidHex,
-      beaconGidx: deposit.beaconGidx,
       exit: deposit.exit,
       vaultAddress: deposit.vaultAddress,
       holderAddress: state.address,

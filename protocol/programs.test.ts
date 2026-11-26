@@ -72,8 +72,10 @@ test("active contract programs load and bind expected functions and opcodes", ()
 
   const predict = predictVaultProgram();
   const predictAsm = predict.functions.settle?.arkadeScript?.asm ?? [];
-  assert.ok(predictAsm.includes("INSPECTINASSETLOOKUP"));
-  assert.ok(predictAsm.includes("INSPECTINPUTPACKET"));
+  assert.equal(predictAsm.filter((t) => t === "CHECKSIGFROMSTACK").length, 2);
+  assert.equal(predictAsm.filter((t) => t === "DIGEST").length, 2);
+  assert.equal(predictAsm.filter((t) => t === "INSPECTINASSETLOOKUP").length, 0);
+  assert.equal(predictAsm.filter((t) => t === "INSPECTINPUTPACKET").length, 0);
   assert.ok(predictAsm.includes("CHECKTIME"));
   assert.ok((predict.functions.refund?.arkadeScript?.asm ?? []).includes("CHECKTIME"));
   assert.ok((predict.functions.reboard?.arkadeScript?.asm ?? []).includes("TUNNEL"));

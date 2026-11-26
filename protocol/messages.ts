@@ -43,9 +43,6 @@ export type PredictRequestProfile = {
 export type RequestProfile = OptionRequestProfile | PredictRequestProfile;
 
 type QuoteBinding = {
-  /** Display txid of the beacon identity asset. The vault compares it reversed. */
-  beacon_txid: string;
-  beacon_gidx: number;
   deadline: number;
   exit: number;
   intent_address: string;
@@ -54,6 +51,9 @@ type QuoteBinding = {
 
 /** An options quote names the desk as the holder. `to_amount` is the premium. */
 export type OptionQuoteProfile = QuoteBinding & {
+  /** Display txid of the beacon identity asset. The vault compares it reversed. */
+  beacon_txid: string;
+  beacon_gidx: number;
   holder_pubkey: string;
   holder_pk_script: string;
 };
@@ -62,6 +62,8 @@ export type OptionQuoteProfile = QuoteBinding & {
 export type PredictQuoteProfile = QuoteBinding & {
   writer_pubkey: string;
   writer_pk_script: string;
+  /** X-only pubkey of the oracle co-signing canonical fixings for PredictVault.settle. */
+  oracle_pubkey: string;
   backup_pubkey: string;
   void_after: number;
   fallback_delay: number;
@@ -139,12 +141,14 @@ export type OptionPosition = {
   /** Predict only: the bettor's Arkade address script, which the payout pays. */
   holder_pk_script?: string;
   stake?: string;
+  oracle_pubkey?: string;
   backup_pubkey?: string;
   void_after?: number;
   fallback_delay?: number;
   final_exit_delay?: number;
-  beacon_txid: string;
-  beacon_gidx: number;
+  /** Options only: identity asset of the AttestationBeacon. */
+  beacon_txid?: string;
+  beacon_gidx?: number;
   vault_address: string;
   fill_txid: string;
 };
@@ -237,12 +241,9 @@ function parseQuote(body: Record<string, unknown>): RfqQuote | null {
   if (!profile) return null;
   if (!hex64(body.rfq_id) || body.pair !== PAIR || !amount(body.from_amount) || !amount(body.to_amount)) return null;
   if (!hex64(body.solver_pubkey) || !int(body.valid_until, 4_000_000_000)) return null;
-  if (!hex64(profile.beacon_txid) || !int(profile.beacon_gidx, 65_535)) return null;
   if (!int(profile.deadline, 4_000_000_000) || !bip68Delay(profile.exit, 512)) return null;
   if (!address(profile.intent_address) || !address(profile.vault_address)) return null;
   const binding = {
-    beacon_txid: profile.beacon_txid,
-    beacon_gidx: profile.beacon_gidx,
     deadline: profile.deadline,
     exit: profile.exit,
     intent_address: profile.intent_address,
@@ -263,6 +264,7 @@ function parseQuote(body: Record<string, unknown>): RfqQuote | null {
     valid_until: body.valid_until,
   };
   if (writer) {
+    if (!hex64(profile.oracle_pubkey)) return null;
     if (!hex64(profile.backup_pubkey) || profile.backup_pubkey === profile.writer_pubkey) return null;
     if (!int(profile.void_after, 30 * 86_400) || profile.void_after <= 0) return null;
     if (!bip68Delay(profile.fallback_delay, profile.exit)) return null;
@@ -272,6 +274,7 @@ function parseQuote(body: Record<string, unknown>): RfqQuote | null {
       profile: {
         writer_pubkey: profile.writer_pubkey as string,
         writer_pk_script: profile.writer_pk_script as string,
+        oracle_pubkey: profile.oracle_pubkey,
         backup_pubkey: profile.backup_pubkey,
         void_after: profile.void_after,
         fallback_delay: profile.fallback_delay,
@@ -280,11 +283,14 @@ function parseQuote(body: Record<string, unknown>): RfqQuote | null {
       },
     };
   }
+  if (!hex64(profile.beacon_txid) || !int(profile.beacon_gidx, 65_535)) return null;
   return {
     ...quote,
     profile: {
       holder_pubkey: profile.holder_pubkey as string,
       holder_pk_script: profile.holder_pk_script as string,
+      beacon_txid: profile.beacon_txid,
+      beacon_gidx: profile.beacon_gidx,
       ...binding,
     },
   };
@@ -325,31 +331,40 @@ export function parsePosition(value: unknown): OptionPosition | null {
   if (!int(body.expiry, 4_000_000_000) || !int(body.exit, 4_000_000_000)) return null;
   if (!hex64(body.writer_pubkey) || !script(body.writer_pk_script)) return null;
   if (!hex64(body.holder_pubkey)) return null;
-  if (!hex64(body.beacon_txid) || !int(body.beacon_gidx, 65_535)) return null;
   if (!address(body.vault_address) || !hex64(body.fill_txid)) return null;
-  let predictFields: Pick<OptionPosition, "holder_pk_script" | "stake" | "backup_pubkey" | "void_after" | "fallback_delay" | "final_exit_delay"> = {};
+  let extraFields: Pick<OptionPosition, "holder_pk_script" | "stake" | "oracle_pubkey" | "backup_pubkey" | "void_after" | "fallback_delay" | "final_exit_delay" | "beacon_txid" | "beacon_gidx"> = {};
   if (predict) {
     if (!amount(body.stake) || BigInt(body.stake) <= DUST_SATS) return null;
+    if (!hex64(body.oracle_pubkey)) return null;
     if (!hex64(body.backup_pubkey) || body.backup_pubkey.toLowerCase() === body.writer_pubkey.toLowerCase()) return null;
     if (!int(body.void_after, 30 * 86_400) || body.void_after <= 0) return null;
     if (!bip68Delay(body.fallback_delay, body.exit)) return null;
     if (!bip68Delay(body.final_exit_delay, body.fallback_delay + 512)) return null;
-    predictFields = {
+    extraFields = {
       holder_pk_script: (body.holder_pk_script as string).toLowerCase(),
       stake: body.stake,
+      oracle_pubkey: body.oracle_pubkey.toLowerCase(),
       backup_pubkey: body.backup_pubkey.toLowerCase(),
       void_after: body.void_after,
       fallback_delay: body.fallback_delay,
       final_exit_delay: body.final_exit_delay,
     };
-  } else if (
-    body.stake !== undefined
-    || body.backup_pubkey !== undefined
-    || body.void_after !== undefined
-    || body.fallback_delay !== undefined
-    || body.final_exit_delay !== undefined
-  ) {
-    return null;
+  } else {
+    if (
+      body.stake !== undefined
+      || body.oracle_pubkey !== undefined
+      || body.backup_pubkey !== undefined
+      || body.void_after !== undefined
+      || body.fallback_delay !== undefined
+      || body.final_exit_delay !== undefined
+    ) {
+      return null;
+    }
+    if (!hex64(body.beacon_txid) || !int(body.beacon_gidx, 65_535)) return null;
+    extraFields = {
+      beacon_txid: body.beacon_txid.toLowerCase(),
+      beacon_gidx: body.beacon_gidx,
+    };
   }
   return {
     v: 1,
@@ -365,9 +380,7 @@ export function parsePosition(value: unknown): OptionPosition | null {
     writer_pubkey: body.writer_pubkey.toLowerCase(),
     writer_pk_script: body.writer_pk_script.toLowerCase(),
     holder_pubkey: body.holder_pubkey.toLowerCase(),
-    ...predictFields,
-    beacon_txid: body.beacon_txid.toLowerCase(),
-    beacon_gidx: body.beacon_gidx,
+    ...extraFields,
     vault_address: body.vault_address,
     fill_txid: body.fill_txid.toLowerCase(),
   };

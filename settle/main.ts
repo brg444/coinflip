@@ -17,10 +17,10 @@ import type { OptionPosition } from "../protocol/messages.ts";
 import { quoteRelay, watchPositions } from "../protocol/nostr.ts";
 import { revision } from "../protocol/sqlite-storage.ts";
 import { chooseSample } from "../oracle/store.ts";
-import { fetchOraclePrices, fetchOracleStatus, parseOracleBeacon, serviceOrigin } from "./oracle.ts";
+import { fetchOracleFixing, fetchOraclePrices, fetchOracleStatus, parseOracleBeacon, parseOracleKey, serviceOrigin, type OracleFixing } from "./oracle.ts";
 import { canAdvancePastFailedPublish, duePositions, manualPositions, publishOutcome, publishReady, settlementPositions, termsFor } from "./positions.ts";
 import { Progress } from "./progress.ts";
-import { refundQuote, settleQuote } from "./vault.ts";
+import { refundQuote, settlePredictQuote, settleQuote } from "./vault.ts";
 
 /**
  * A third party. It watches public filled-vault events on nostr.arkade.sh and
@@ -73,6 +73,7 @@ if (!client.emulatorKey || !client.emulator) throw new Error("emulator missing")
 let polling = false;
 let watching = 0;
 let beaconFilter: { txid: string; gidx: number } | null = null;
+let oraclePkFilter: string | null = null;
 const noted = new Set<string>();
 
 function updateBeaconFilter(assetId: string) {
@@ -80,9 +81,16 @@ function updateBeaconFilter(assetId: string) {
   beaconFilter = { txid: bytesToHex(parsed.txid).toLowerCase(), gidx: Number(parsed.groupIndex) };
 }
 
-function matchesOurBeacon(txid: string, gidx: number): boolean {
+function matchesOurBeacon(txid: string | undefined, gidx: number | undefined): boolean {
   if (!beaconFilter) return true;
+  if (!txid || gidx == null) return false;
   return txid.toLowerCase() === beaconFilter.txid && gidx === beaconFilter.gidx;
+}
+
+function matchesOurOracle(oraclePkHex: string | undefined): boolean {
+  if (!oraclePkFilter) return true;
+  if (!oraclePkHex) return false;
+  return oraclePkHex.toLowerCase() === oraclePkFilter;
 }
 
 function once(key: string, line: string, error = false) {
@@ -160,7 +168,11 @@ async function loadManual() {
 }
 
 function onPosition(position: OptionPosition) {
-  if (!matchesOurBeacon(position.beacon_txid, position.beacon_gidx)) return;
+  if (isPredict(position.kind)) {
+    if (!matchesOurOracle(position.oracle_pubkey)) return;
+  } else {
+    if (!matchesOurBeacon(position.beacon_txid, position.beacon_gidx)) return;
+  }
   if (!progress.remember(position)) return;
   void progress.save().catch((err) => {
     console.error("progress save", err instanceof Error ? err.message : err);
@@ -214,31 +226,101 @@ async function progressDue() {
   const due = duePositions(positions, now, progress.ids());
   if (!due.length) return;
 
-  let parsed;
+  let statusBody: unknown;
   try {
-    parsed = parseOracleBeacon(await fetchOracleStatus(oracleUrl, AbortSignal.timeout(10_000)), undefined, 0, profile.hrp);
+    statusBody = await fetchOracleStatus(oracleUrl, AbortSignal.timeout(10_000));
   } catch (err) {
     once("oracle-fetch", `oracle ${err instanceof Error ? err.message : err}`, true);
     return;
   }
-  if (!parsed.ok) {
-    once(`oracle-parse:${parsed.error}`, `oracle ${parsed.error}`, true);
+  const keyInfo = parseOracleKey(statusBody);
+  const parsedBeacon = parseOracleBeacon(statusBody, undefined, 0, profile.hrp);
+  if (!keyInfo && !parsedBeacon.ok) {
+    once(`oracle-parse:${parsedBeacon.error}`, `oracle ${parsedBeacon.error}`, true);
     return;
   }
-  updateBeaconFilter(parsed.beacon.assetId);
+  if (keyInfo) oraclePkFilter = keyInfo.oraclePkHex;
+  if (parsedBeacon.ok) updateBeaconFilter(parsedBeacon.beacon.assetId);
   noted.delete("oracle-fetch");
 
-  const lag = Number(parsed.beacon.expiryLag);
+  const lag = Number(keyInfo?.expiryLag ?? (parsedBeacon.ok ? parsedBeacon.beacon.expiryLag : 60n));
   const nowMs = Date.now();
   let blockedExpiry: number | null = null;
+  const fixingCache = new Map<number, { status: number; fixing: OracleFixing | null; error?: string }>();
+
   for (const position of due) {
     if (position.expiry + lag > now) continue;
+
+    // PredictVaultV3 settles standalone with direct signatures — no beacon publish, no serial bottleneck.
+    if (isPredict(position.kind)) {
+      if (!matchesOurOracle(position.oraclePkHex)) {
+        once(`oracle:${position.id}`, `skip ${position.rfqId} oracle mismatch`, true);
+        continue;
+      }
+      const terms = termsFor(position, client.serverKey, client.emulatorKey!, 0n, profile.hrp);
+      const bound = bindContracts(terms);
+      if (bound.vaultAddress !== position.vaultAddress) {
+        once(`addr:${position.id}`, `skip ${position.rfqId} vault address`, true);
+        continue;
+      }
+      let fetched = fixingCache.get(position.expiry);
+      if (!fetched) {
+        try {
+          fetched = await fetchOracleFixing(oracleUrl, position.expiry, position.oraclePkHex, AbortSignal.timeout(10_000));
+        } catch (err) {
+          fetched = { status: 0, fixing: null, error: err instanceof Error ? err.message : String(err) };
+        }
+        fixingCache.set(position.expiry, fetched);
+      }
+      if (!fetched.fixing) {
+        if (await tryVoid(position, terms, now)) continue;
+        once(`fix:${position.expiry}:${fetched.error ?? fetched.status}`, `fixing ${position.expiry} ${fetched.error ?? fetched.status}`, true);
+        continue;
+      }
+      try {
+        const outcome = await settlePredictQuote({
+          chain: client.indexer!,
+          serverKey: client.serverKey,
+          emulatorKey: client.emulatorKey!,
+          emulator: client.emulator!,
+          checkpoint: client.checkpoint,
+          fillTxid: position.fillTxid,
+          terms,
+          fixing: fetched.fixing,
+          now,
+        });
+        if (outcome.result === "settled") {
+          progress.note(position.id, outcome.txid);
+          try {
+            await progress.save();
+          } catch (err) {
+            console.error("progress save", position.rfqId, err instanceof Error ? err.message : err);
+          }
+          console.log("settled", position.rfqId, outcome.txid);
+          continue;
+        }
+        if (outcome.result === "mismatch") {
+          once(`mismatch:${position.id}`, `skip ${position.rfqId} oracle mismatch`, true);
+          continue;
+        }
+        if (outcome.result === "waiting") {
+          once(`wait:${position.id}:${outcome.reason}`, `waiting ${position.rfqId} ${outcome.reason}`);
+        }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        console.error(`settle ${position.rfqId} ${position.expiry} ${message}`);
+      }
+      continue;
+    }
+
+    // Legacy OptionVault (kind 0/1) still settles via AttestationBeacon.
+    if (!parsedBeacon.ok) continue;
     if (blockedExpiry != null && position.expiry > blockedExpiry) break;
     if (!matchesOurBeacon(position.beaconTxid, position.beaconGidx)) {
       once(`beacon:${position.id}`, `skip ${position.rfqId} beacon mismatch`, true);
       continue;
     }
-    const terms = termsFor(position, client.serverKey, client.emulatorKey!, parsed.beacon.readFee, profile.hrp);
+    const terms = termsFor(position, client.serverKey, client.emulatorKey!, parsedBeacon.beacon.readFee, profile.hrp);
     const bound = bindContracts(terms);
     if (bound.vaultAddress !== position.vaultAddress) {
       once(`addr:${position.id}`, `skip ${position.rfqId} vault address`, true);
@@ -253,7 +335,6 @@ async function progressDue() {
     if (hasLiveVault) {
       const published = await askPublish(position.expiry, nowMs);
       if (published.result === "failed") {
-        if (await tryVoid(position, terms, now)) return;
         if (!canAdvancePastFailedPublish({ status: published.status, error: published.error, expiry: position.expiry, lag, now })) {
           blockedExpiry = position.expiry;
         }
@@ -288,7 +369,7 @@ async function progressDue() {
         checkpoint: client.checkpoint,
         fillTxid: position.fillTxid,
         terms,
-        beacon: parsed.beacon,
+        beacon: parsedBeacon.beacon,
         now,
         expected,
       });
@@ -311,7 +392,6 @@ async function progressDue() {
         continue;
       }
       if (outcome.result === "unfixed") {
-        if (await tryVoid(position, terms, now)) return;
         console.error(`publish ${position.expiry} unfixed`);
         continue;
       }
@@ -363,10 +443,13 @@ server.listen(port, () => {
 });
 
 try {
-  const initial = parseOracleBeacon(await fetchOracleStatus(oracleUrl, AbortSignal.timeout(10_000)), undefined, 0, profile.hrp);
+  const statusBody = await fetchOracleStatus(oracleUrl, AbortSignal.timeout(10_000));
+  const keyInfo = parseOracleKey(statusBody);
+  if (keyInfo) oraclePkFilter = keyInfo.oraclePkHex;
+  const initial = parseOracleBeacon(statusBody, undefined, 0, profile.hrp);
   if (initial.ok) updateBeaconFilter(initial.beacon.assetId);
 } catch {
-  // Oracle may not be up yet; progressDue refreshes the beacon filter once reachable.
+  // Oracle may not be up yet; progressDue refreshes filters once reachable.
 }
 
 const positions = watchPositions({ relays: relayList, onPosition });

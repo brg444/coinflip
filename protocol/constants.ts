@@ -3,11 +3,12 @@ export const RFQ_KIND = 24859;
 export const POSITION_KIND = 30078;
 export const POSITION_TAG = "arkade-option";
 export const OPTION_VAULT_PROGRAM_ID = "OptionVault";
-export const PREDICT_VAULT_PROGRAM_ID = "PredictVaultV2";
+export const PREDICT_VAULT_PROGRAM_ID = "PredictVaultV3";
 // Must match arkd's unilateralExitDelay and be a multiple of 512s for BIP68.
 export const EXIT = 2048n;
 export const DUST_SATS = 330n;
 export const BEACON_READ_FEE = 1_000n;
+export const PREDICT_READ_FEE = 0n;
 export const QUOTE_TTL_S = 30;
 export const LOCK_S = 180;
 export const ARK_URL = "https://mutinynet.arkade.sh";

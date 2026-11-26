@@ -9,7 +9,7 @@ import { schnorr } from "@noble/curves/secp256k1.js";
 import { ArkAddress, asset, CSVMultisigTapscript, Extension, networks, SingleKey, Transaction } from "@arkade-os/sdk";
 import { base64, hex } from "@scure/base";
 
-import { beaconIdOf, bindBeacon, decodeState, genesisState, nextState, priceValue, statePacketOf } from "../protocol/beacon.ts";
+import { beaconIdOf, bindBeacon, decodeState, genesisState, nextState, predictFixDigest, priceValue, statePacketOf } from "../protocol/beacon.ts";
 import { centsOf, intentSigned, SCALE, type DiaIntent } from "../protocol/dia.ts";
 import {
   BEACON_READ_FEE,
@@ -165,8 +165,9 @@ function recordedBody(intent: DiaIntent = RECORDED) {
 }
 
 async function call(url: string, pathName: string, body?: unknown, token?: string) {
+  const isGetApi = pathName === "/api/status" || pathName.startsWith("/api/fixing") || pathName.startsWith("/api/prices");
   const res = await fetch(url + pathName, {
-    method: body === undefined && pathName.startsWith("/api/") && pathName !== "/api/status" ? "POST" : body === undefined ? "GET" : "POST",
+    method: body === undefined && pathName.startsWith("/api/") && !isGetApi ? "POST" : body === undefined ? "GET" : "POST",
     headers: {
       ...(body !== undefined ? { "content-type": "application/json" } : {}),
       ...(token ? { authorization: `Bearer ${token}` } : {}),
@@ -1058,5 +1059,62 @@ test("publishAnnounced does not leapfrog to a later close when an earlier close 
   } finally {
     console.error = log;
     await ctx.close();
+  }
+});
+
+test("stateless oracle serves canonical Schnorr-signed fixings from GET /api/fixing without a beacon", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "oracle-stateless-"));
+  const expiry = 1_700_000_100; // multiple of 300
+  const oracleKey = secret(9);
+  const oraclePk = schnorr.getPublicKey(oracleKey);
+  const oraclePkHex = bytesToHex(oraclePk);
+  await saveStore(dir, {
+    assetId: null,
+    issueTxid: null,
+    deployTxid: null,
+    samples: [storedSample("9950000", expiry + 12)],
+    fixings: [],
+  });
+  let clock = expiry + 59;
+  const oracle = await createOracle({
+    dataDir: dir,
+    oracleKey,
+    stateless: true,
+    now: () => clock,
+  });
+  try {
+    const status = await call(oracle.url, "/api/status");
+    assert.equal(status.status, 200);
+    assert.deepEqual(status.json.pubkeys, [oraclePkHex]);
+    assert.equal((status.json.args as { adminPk?: string }).adminPk, oraclePkHex);
+    assert.equal(status.json.assetId, null);
+
+    // Before expiry + 60, off-grid, and missing sample all fail cleanly.
+    assert.equal((await call(oracle.url, `/api/fixing?expiry=${expiry}`)).status, 400);
+    clock = expiry + 60;
+    assert.equal((await call(oracle.url, `/api/fixing?expiry=${expiry + 60}`)).status, 400);
+    assert.equal((await call(oracle.url, `/api/fixing?expiry=${expiry + 300}`)).status, 400);
+
+    // At expiry + 60, returns canonical fixing signed with oracleKey over predictFixDigest.
+    const first = await call(oracle.url, `/api/fixing?expiry=${expiry}`);
+    assert.equal(first.status, 200, JSON.stringify(first.json));
+    assert.equal(first.json.expiry, expiry);
+    assert.equal(first.json.price, "9950000");
+    assert.equal(first.json.time, expiry + 12);
+    assert.equal(first.json.oraclePk, oraclePkHex);
+    const digest = predictFixDigest({ expiry: BigInt(expiry), cents: 9_950_000n, time: BigInt(expiry + 12) });
+    assert.equal(schnorr.verify(hex.decode(String(first.json.oracleSig)), digest, oraclePk), true);
+
+    // Repeated call is idempotent and returns the exact same canonical sample & signature.
+    const second = await call(oracle.url, `/api/fixing?expiry=${expiry}`);
+    assert.equal(second.status, 200);
+    assert.deepEqual(second.json, first.json);
+
+    // Missing sample on an already-closed window returns 404.
+    clock = expiry + 360;
+    assert.equal((await call(oracle.url, `/api/fixing?expiry=${expiry + 300}`)).status, 404);
+  } finally {
+    await oracle.close();
+    await rm(dir, { recursive: true, force: true });
   }
 });

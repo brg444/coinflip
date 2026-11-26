@@ -8,7 +8,7 @@ import { intentProgram } from "../protocol/programs.ts";
 import { virtualTxsById } from "../protocol/virtual-txs.ts";
 import type { QuoteRow } from "./book.ts";
 import { finalizeDeskSpends, pendingOutpoints, settleEmulatorTx, type PendingArk } from "./finalize.ts";
-import { beaconExpiryRefusal, coinOutlives, minFillCoinExpiry } from "./guards.ts";
+import { beaconExpiryRefusal, coinOutlives, minCoinExpiry, minFillCoinExpiry } from "./guards.ts";
 
 type Client = Awaited<ReturnType<typeof arkade.Arkade.connect>>;
 export type Coin = { txid: string; vout: number; value: number; expiresAt?: Date };
@@ -70,7 +70,7 @@ export async function fillQuote(opts: {
   beaconExpiry?: number | null;
   ratchetMargin?: number;
   checkPredict?: (row: QuoteRow, now: number) => Promise<PredictFillVerdict>;
-}): Promise<{ result: FillResult; txid?: string; spent?: Coin[] }> {
+}): Promise<{ result: FillResult; reason?: string; txid?: string; spent?: Coin[] }> {
   const bound = bindContracts(opts.termsFor(opts.row));
   const intent = opts.client.contract(intentProgram(), bound.intent);
   const coins = await intent.getUtxos();
@@ -79,7 +79,11 @@ export async function fillQuote(opts: {
   const predict = isPredict(opts.row.kind);
   // The user's coin: the collateral they lock, or the stake they bet.
   const locks = predict ? premium : collateral;
-  const minExpiry = minFillCoinExpiry(opts.row.expiry, opts.beaconExpiry ?? null, undefined, opts.ratchetMargin);
+  // PredictVaultV3 settles standalone with direct signatures (no shared beacon coin), so it only
+  // needs inputs that outlive settlement margin — never anchored to a beacon coin's expiry.
+  const minExpiry = predict
+    ? minCoinExpiry(opts.row.expiry)
+    : minFillCoinExpiry(opts.row.expiry, opts.beaconExpiry ?? null, undefined, opts.ratchetMargin);
   const funding = coins.filter((item) => BigInt(item.value) >= locks);
   const coin = funding.find((item) => coinOutlives(item, minExpiry));
   if (!coin) {
@@ -92,18 +96,18 @@ export async function fillQuote(opts: {
       ...(predict ? { side: 1 as const, vaultScript: bytesToHex(bound.vaultPkScript) } : {}),
     });
     if (recovered) return { result: "filled", txid: recovered };
-    if (funding.length > 0) return { result: opts.now >= opts.row.deadline ? "expired" : "declined" };
+    if (funding.length > 0) return opts.now >= opts.row.deadline ? { result: "expired" } : { result: "declined", reason: "coin_expiry" };
     // Spent, but the payout vtxo is not in the indexer yet. Expiring here drops the retry.
     if (await collateralSpent(opts.client, intentScript, locks)) return { result: "waiting" };
     return { result: opts.now >= opts.row.deadline ? "expired" : "waiting" };
   }
   if (opts.now >= opts.row.deadline) return { result: "expired" };
-  if ("beaconExpiry" in opts && beaconExpiryRefusal(opts.row.expiry, opts.beaconExpiry ?? null)) {
-    return { result: "declined" };
+  if (!predict && "beaconExpiry" in opts && beaconExpiryRefusal(opts.row.expiry, opts.beaconExpiry ?? null)) {
+    return { result: "declined", reason: "beacon_expiry" };
   }
   if (predict && opts.checkPredict) {
     const verdict = await opts.checkPredict(opts.row, opts.now);
-    if (verdict === "decline") return { result: "declined" };
+    if (verdict === "decline") return { result: "declined", reason: "price_moved" };
     if (verdict === "retry") return { result: "waiting" };
   }
 
