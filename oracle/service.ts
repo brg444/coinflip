@@ -8,13 +8,19 @@ import { PRICE_MAX } from "../protocol/constants.ts";
 import { centsOf, intentSigned, type DiaIntent } from "../protocol/dia.ts";
 import { FIX_DOMAIN, FIX_EXPIRY_LAG, FIX_GRID_S, predictFixDigest } from "../protocol/fixing.ts";
 import { bytesToHex, hexToBytes } from "../protocol/hex.ts";
-import { chooseSample as pickSample, loadStore, pruneFixings, pruneSamples, saveStore, windowSettled, type StoredFixing, type StoredSample } from "./store.ts";
+import {
+  FIXING_GRACE_S,
+  openOracleStore,
+  SAMPLE_HISTORY_S,
+  type StoredFixing,
+} from "./store.ts";
 
 /**
  * Stateless DIA fixing oracle for standalone PredictVaultV3.
- * Streams pinned DIA BTC/USD EIP-712 prints and co-signs one canonical fixing
- * per 5-minute close (`expiry % 300 == 0`, `time in [expiry, expiry + 60]`)
- * with `ORACLE_KEY` so no party can cherry-pick among prints in the window.
+ * Streams pinned DIA BTC/USD EIP-712 prints into SQLite WAL (`synchronous = FULL`),
+ * proactively finalizes and co-signs one canonical fixing per 5-minute close
+ * (`expiry % 300 == 0`, `time in [expiry, expiry + 60]`) once the window settles,
+ * and serves `GET /api/fixing` strictly read-only.
  */
 
 const CSP = "default-src 'none'; frame-ancestors 'none'";
@@ -38,6 +44,8 @@ export type OracleDeps = {
   pull?: () => Promise<DiaIntent | null>;
   /** How often to sample. Unset means the process only records prices it is given. */
   sampleEveryMs?: number;
+  /** How often the background finalizer checks for settled close windows. Default 1000ms (0 disables). */
+  finalizeEveryMs?: number;
   now?: () => number;
 };
 
@@ -113,15 +121,10 @@ export async function createOracle(deps: OracleDeps) {
   if (deps.oracleKey && deps.oracleKey.length !== 32) throw new Error("ORACLE_KEY must be 32 bytes");
   const oraclePk = deps.oracleKey ? await SingleKey.fromHex(bytesToHex(deps.oracleKey)).xOnlyPublicKey() : null;
   const oraclePkHex = oraclePk ? bytesToHex(oraclePk) : null;
-  const store = await loadStore(deps.dataDir);
+  const store = await openOracleStore(deps.dataDir);
   const now = () => deps.now?.() ?? Math.floor(Date.now() / 1000);
-
-  let writeChain: Promise<void> = Promise.resolve();
-  function save(): Promise<void> {
-    const next = writeChain.then(() => saveStore(deps.dataDir, store));
-    writeChain = next.then(() => undefined, () => undefined);
-    return next;
-  }
+  const lagS = Number(FIX_EXPIRY_LAG);
+  const gridS = Number(FIX_GRID_S);
 
   function requireAdmin(req: http.IncomingMessage) {
     if (!deps.adminToken) throw new HttpError(404, "disabled");
@@ -129,29 +132,62 @@ export async function createOracle(deps: OracleDeps) {
   }
 
   function status() {
-    const latest = store.samples.reduce<StoredSample | null>(
-      (best, sample) => (!best || sample.time >= best.time ? sample : best),
-      null,
-    );
     return {
       network: deps.network ?? "mutinynet",
       pubkeys: oraclePkHex ? [oraclePkHex] : [],
       args: {
         domain: bytesToHex(FIX_DOMAIN),
-        expiryLag: Number(FIX_EXPIRY_LAG),
+        expiryLag: lagS,
         adminPk: oraclePkHex,
       },
-      fixings: store.fixings.slice(-20).map(({ expiry, price, time }) => ({ expiry, price, time })),
-      fixingCount: store.fixings.length,
-      samples: store.samples.length,
-      latest,
+      fixings: store.recentFixings(20).map(({ expiry, price, time }) => ({ expiry, price, time })),
+      fixingCount: store.fixingCount(),
+      samples: store.sampleCount(),
+      latest: store.latestSample(),
     };
   }
 
-  function keepRecent() {
+  function isWindowSettled(expiryN: number, current: number): boolean {
+    const closeEnd = expiryN + lagS;
+    if (current < closeEnd) return false;
+    if (current >= closeEnd + FIXING_GRACE_S) return true;
+    return store.hasSampleAfter(closeEnd);
+  }
+
+  /**
+   * Proactively finalize and persist canonical fixings for every settled 5-minute window
+   * that has a signed DIA sample in `[expiry, expiry + 60]`. Commits atomically into
+   * SQLite WAL (`synchronous = FULL`, `PRIMARY KEY (expiry)`) before any HTTP caller sees it.
+   */
+  function finalizeDue(): number {
+    if (!deps.oracleKey || !oraclePkHex) return 0;
     const current = now();
-    store.samples = pruneSamples(store.samples, current);
-    store.fixings = pruneFixings(store.fixings, current);
+    store.prune(current);
+    const dueExpiries = store.dueCandidateExpiries(current, lagS, gridS);
+    let finalized = 0;
+    for (const expiryN of dueExpiries) {
+      if (!isWindowSettled(expiryN, current)) continue;
+      const chosen = store.chooseStrictSample(expiryN, lagS);
+      if (!chosen || !chosen.raw || !chosen.sig || !chosen.nonce || typeof chosen.intentExpiry !== "number") {
+        continue;
+      }
+      const cents = centsOf(BigInt(chosen.raw));
+      const oracleSig = bytesToHex(
+        schnorr.sign(predictFixDigest({ expiry: BigInt(expiryN), cents, time: BigInt(chosen.time) }), deps.oracleKey),
+      );
+      store.insertFixing({
+        expiry: expiryN,
+        price: cents.toString(),
+        time: chosen.time,
+        raw: chosen.raw,
+        nonce: chosen.nonce,
+        intentExpiry: chosen.intentExpiry,
+        sig: chosen.sig,
+        oracleSig,
+      });
+      finalized += 1;
+    }
+    return finalized;
   }
 
   async function recordIntent(intent: DiaIntent) {
@@ -164,14 +200,11 @@ export async function createOracle(deps: OracleDeps) {
     }
     if (cents > PRICE_MAX) throw new HttpError(400, "price");
     if (!Number.isSafeInteger(intent.time) || intent.time <= 0) throw new HttpError(400, "time");
-    if (intent.time > now()) throw new HttpError(400, "future timestamp");
+    const current = now();
+    if (intent.time > current) throw new HttpError(400, "future timestamp");
     if (!intentSigned(intent)) throw new HttpError(400, "dia signature");
-    keepRecent();
     const raw = intent.price.toString();
-    if (store.samples.some((sample) => sample.time === intent.time && sample.raw === raw)) {
-      return { ok: true, time: intent.time, price: cents.toString(), duplicate: true };
-    }
-    store.samples.push({
+    const inserted = store.insertSample({
       price: cents.toString(),
       time: intent.time,
       raw,
@@ -179,21 +212,26 @@ export async function createOracle(deps: OracleDeps) {
       intentExpiry: intent.intentExpiry,
       sig: bytesToHex(intent.sig),
     });
-    await save();
+    store.prune(current);
+    finalizeDue();
+    if (!inserted) {
+      return { ok: true, time: intent.time, price: cents.toString(), duplicate: true };
+    }
     return { ok: true, time: intent.time, price: cents.toString() };
   }
 
+  /** Strictly read-only: filters to the recent retention window without mutating SQLite. */
   function pricePage(query: URLSearchParams) {
-    keepRecent();
-    const from = Number(query.get("from") ?? "0");
-    const to = Number(query.get("to") ?? String(now()));
+    const current = now();
+    const cutoff = current - SAMPLE_HISTORY_S;
+    const rawFrom = Number(query.get("from") ?? "0");
+    const rawTo = Number(query.get("to") ?? String(current));
+    const from = Number.isFinite(rawFrom) ? Math.max(rawFrom, cutoff) : cutoff;
+    const to = Number.isFinite(rawTo) ? rawTo : current;
     const limit = Math.min(200, Math.max(1, Number(query.get("limit") ?? "50") || 50));
     const signed = query.get("signed") === "1";
-    const rows = store.samples
-      .filter((sample) => sample.time >= from && sample.time <= to)
-      .sort((a, b) => b.time - a.time)
-      .slice(0, limit)
-      .map((sample) => (signed && sample.raw && sample.nonce && typeof sample.intentExpiry === "number" && sample.sig
+    const rows = store.getSamples(from, to, limit).map((sample) => (
+      signed && sample.raw && sample.nonce && typeof sample.intentExpiry === "number" && sample.sig
         ? {
             price: sample.price,
             time: sample.time,
@@ -202,7 +240,8 @@ export async function createOracle(deps: OracleDeps) {
             intentExpiry: sample.intentExpiry,
             sig: sample.sig,
           }
-        : { price: sample.price, time: sample.time }));
+        : { price: sample.price, time: sample.time }
+    ));
     return { samples: rows };
   }
 
@@ -221,12 +260,11 @@ export async function createOracle(deps: OracleDeps) {
   }
 
   /**
-   * Return the canonical signed fixing for a 5-minute close (`expiry % 300 == 0`, `now >= expiry + 60`).
-   * Once a fixing is chosen for an expiry, subsequent calls always return that exact same sample & signature.
+   * Strictly read-only lookup for a canonical signed fixing (`expiry % 300 == 0`, `now >= expiry + 60`).
+   * Public HTTP callers can never trigger signing or database writes; fixings are committed solely by
+   * the proactive background finalizer (`finalizeDue`) into SQLite WAL.
    */
-  const inflightFixings = new Map<number, Promise<ReturnType<typeof formatFixing>>>();
-
-  async function getFixing(expiryParam: string | null) {
+  function getFixing(expiryParam: string | null) {
     if (!deps.oracleKey || !oraclePkHex) throw new HttpError(400, "ORACLE_KEY is required");
     if (!expiryParam || !/^[0-9]+$/.test(expiryParam)) throw new HttpError(400, "expiry");
     const expiry = BigInt(expiryParam);
@@ -234,52 +272,23 @@ export async function createOracle(deps: OracleDeps) {
     if (expiry % FIX_GRID_S !== 0n) throw new HttpError(400, "expiry grid");
     const expiryN = Number(expiry);
     if (!Number.isSafeInteger(expiryN)) throw new HttpError(400, "expiry");
-    if (BigInt(now()) < expiry + FIX_EXPIRY_LAG) throw new HttpError(400, "before expiry time");
+    const current = now();
+    if (BigInt(current) < expiry + FIX_EXPIRY_LAG) throw new HttpError(400, "before expiry time");
 
-    const existing = store.fixings.find((row) => row.expiry === expiryN);
+    const existing = store.getFixing(expiryN);
     if (existing) return formatFixing(existing);
 
-    const running = inflightFixings.get(expiryN);
-    if (running) return running;
-
-    const job = (async () => {
-      const again = store.fixings.find((row) => row.expiry === expiryN);
-      if (again) return formatFixing(again);
-
-      keepRecent();
-      if (!windowSettled(store.samples, expiryN, Number(FIX_EXPIRY_LAG), now())) {
-        throw new HttpError(425, "waiting for close print");
-      }
-      const chosen = pickSample(store.samples, expiryN, Number(FIX_EXPIRY_LAG));
-      if (!chosen) throw new HttpError(404, "no sample");
-      if (!chosen.raw || !chosen.sig || !chosen.nonce || typeof chosen.intentExpiry !== "number") {
-        throw new HttpError(404, "no sample");
-      }
-      const raw = BigInt(chosen.raw);
-      const cents = centsOf(raw);
-      const time = BigInt(chosen.time);
-      const oracleSig = bytesToHex(schnorr.sign(predictFixDigest({ expiry, cents, time }), deps.oracleKey!));
-      const row: StoredFixing = {
-        expiry: expiryN,
-        price: cents.toString(),
-        time: chosen.time,
-        raw: chosen.raw,
-        nonce: chosen.nonce,
-        intentExpiry: chosen.intentExpiry,
-        sig: chosen.sig,
-        oracleSig,
-      };
-      store.fixings.push(row);
-      await save();
-      return formatFixing(row);
-    })();
-    inflightFixings.set(expiryN, job);
-    try {
-      return await job;
-    } finally {
-      inflightFixings.delete(expiryN);
+    if (!isWindowSettled(expiryN, current)) {
+      throw new HttpError(425, "waiting for close print");
     }
+    if (store.chooseStrictSample(expiryN, lagS)) {
+      throw new HttpError(425, "waiting for close print");
+    }
+    throw new HttpError(404, "no sample");
   }
+
+  // Finalize any already-settled windows on startup before accepting requests.
+  finalizeDue();
 
   async function handle(req: http.IncomingMessage, res: http.ServerResponse) {
     let parsed: URL;
@@ -293,7 +302,7 @@ export async function createOracle(deps: OracleDeps) {
     try {
       if (req.method === "GET" && (url === "/" || url === "/api/status")) return sendJson(res, 200, status());
       if (req.method === "GET" && url === "/api/prices") return sendJson(res, 200, pricePage(parsed.searchParams));
-      if (req.method === "GET" && url === "/api/fixing") return sendJson(res, 200, await getFixing(parsed.searchParams.get("expiry")));
+      if (req.method === "GET" && url === "/api/fixing") return sendJson(res, 200, getFixing(parsed.searchParams.get("expiry")));
       if (req.method === "POST" && url === "/api/intent") {
         requireAdmin(req);
         const body = asRecord(await readBody(req, 4096));
@@ -334,24 +343,37 @@ export async function createOracle(deps: OracleDeps) {
       console.error("oracle sample", err instanceof Error ? err.message : "sample failed");
     }));
   };
-  const timer = deps.sampleEveryMs && deps.sampleEveryMs > 0 ? setInterval(poll, deps.sampleEveryMs) : undefined;
-  if (timer) poll();
+  const sampleTimer = deps.sampleEveryMs && deps.sampleEveryMs > 0 ? setInterval(poll, deps.sampleEveryMs) : undefined;
+  if (sampleTimer) poll();
+
+  const finalizeMs = deps.finalizeEveryMs ?? 1_000;
+  const finalizeTimer = finalizeMs > 0
+    ? setInterval(() => {
+        try {
+          finalizeDue();
+        } catch (err) {
+          console.error("oracle finalize", err instanceof Error ? err.message : "finalize failed");
+        }
+      }, finalizeMs)
+    : undefined;
 
   return {
     port,
     url: `http://127.0.0.1:${port}`,
+    finalizeDue,
     ingestIntent: (intent: DiaIntent) => {
       const job = recordIntent(intent);
       track(job);
       return job;
     },
     close: async () => {
-      if (timer) clearInterval(timer);
+      if (sampleTimer) clearInterval(sampleTimer);
+      if (finalizeTimer) clearInterval(finalizeTimer);
       await Promise.all([...pending]);
-      await writeChain;
       await new Promise<void>((resolve, reject) => {
         server.close((err) => (err ? reject(err) : resolve()));
       });
+      store.close();
     },
   };
 }

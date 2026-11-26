@@ -270,7 +270,7 @@ test("a prediction fills from the desk float, settles standalone with a signed f
     })).json;
     const cents = centsOf(intent.price);
     assert.equal(sample.price, cents.toString(), `sample ${JSON.stringify(sample)}`);
-    await sleepUntil(Number(expiry) + expiryLag + 31, "predict fixing");
+    await sleepUntil(Number(expiry) + expiryLag + 32, "predict fixing");
 
     const fetched = await fetchOracleFixing(oracle.url, Number(expiry), oraclePkHex);
     assert.equal(fetched.status, 200, fetched.error);

@@ -40,13 +40,13 @@ import { intentProgram } from "../protocol/programs.ts";
 import { openSqliteStorage, revision } from "../protocol/sqlite-storage.ts";
 import { openingSample, WINDOW_LINE_WITHIN_S, windowOpen } from "../protocol/window-line.ts";
 import { fetchOraclePrices, fetchOracleStatus, parseOracleKey, parseOracleLatest, serviceOrigin, type OracleLatest } from "../settle/oracle.ts";
-import { Book, hasOracle, openPremium, outlay, pageQuotes, quoteCounts, type QuoteFilter, type QuoteRow } from "./book.ts";
+import { Book, hasOracle, outlay, pageQuotes, quoteCounts, type QuoteFilter, type QuoteRow } from "./book.ts";
 import { countFill, countQuote, emptyHour, hourLine, msUntilNextHour } from "./digest.ts";
 import { fillQuote, type PredictFillVerdict } from "./fill.ts";
 import { finalizeDeskSpends, pendingOutpoints } from "./finalize.ts";
 import { adverseSpotCents, coinOutlives, minCoinExpiry, predictFillAllowed, predictSpot } from "./guards.ts";
 import { maintainDeskCoins } from "./maintain.ts";
-import { openQuoteCapRefusal, RfqLimiter } from "./rate-limit.ts";
+import { AsyncMutex, openQuoteCapRefusal, reserveQuote, RfqLimiter } from "./rate-limit.ts";
 import { spotCents } from "./spot.ts";
 
 /**
@@ -351,9 +351,22 @@ async function refuse(to: string, rfqId: string, reason: string) {
   await transport.publish(to, { v: 1, type: "rfq_refusal", rfq_id: rfqId, reason });
 }
 
-async function offer(row: QuoteRow, from: string) {
-  if (!book.hold(row, caps, row.createdAt)) {
-    await refuse(from, row.rfqId, "exposure");
+const holdMutex = new AsyncMutex();
+
+async function offer(row: QuoteRow, from: string, minExpiry: number) {
+  const reserved = await reserveQuote({
+    mutex: holdMutex,
+    book,
+    row,
+    from,
+    now: () => Math.floor(Date.now() / 1000),
+    caps,
+    draining: () => draining,
+    eligibleFloat: () => eligibleFloatBalance(minExpiry),
+    refreshFloat,
+  });
+  if (!reserved.ok) {
+    await refuse(from, row.rfqId, reserved.reason);
     return;
   }
   await book.save();
@@ -475,11 +488,6 @@ async function onRequest(message: RfqRequest, from: string) {
     return;
   }
   const minExpiry = minCoinExpiry(message.profile.expiry);
-  if (eligibleFloatBalance(minExpiry) < openPremium(book.list(), now) + payout) await refreshFloat();
-  if (eligibleFloatBalance(minExpiry) < openPremium(book.list(), now) + payout) {
-    await refuse(from, message.rfq_id, "float short");
-    return;
-  }
   const row: QuoteRow = {
     rfqId: message.rfq_id,
     collateral: payout.toString(),
@@ -516,7 +524,7 @@ async function onRequest(message: RfqRequest, from: string) {
   }
   row.intentAddress = bound.intentAddress;
   row.vaultAddress = bound.vaultAddress;
-  await offer(row, from);
+  await offer(row, from, minExpiry);
 }
 
 async function onStatus(rfqId: string, from: string) {

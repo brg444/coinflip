@@ -13,7 +13,7 @@ import { createOracle } from "./service.ts";
  *   ORACLE_ADMIN   optional bearer protecting POST /api/intent.
  *   SAMPLE_MS      how often to read the latest DIA OracleUpdate. Default 20000.
  *   DIA_WS         default wss://rpc.diadata.org. IntentRegistered, then getLatestIntentByType.
- *   DATA_DIR       oracle.json. Default ./data
+ *   DATA_DIR       oracle.sqlite (WAL; auto-migrates legacy oracle.json). Default ./data
  *   PORT           default 8789
  *   HOST           default 127.0.0.1
  */

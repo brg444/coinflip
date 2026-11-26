@@ -1,4 +1,4 @@
-import type { QuoteRow } from "./book.ts";
+import { openPremium, type Book, type Caps, type QuoteRow } from "./book.ts";
 
 export const MAX_OPEN_PER_CLIENT = 3;
 export const MAX_OPEN_QUOTES = 200;
@@ -9,6 +9,29 @@ export type LimiterOpts = {
   maxGlobal?: number;
   maxTrackedKeys?: number;
 };
+
+/**
+ * Serializes async critical sections so concurrent RFQ bursts cannot interleave
+ * across `await` boundaries (e.g. `refreshFloat`) to over-commit desk float,
+ * open-quote caps, or strike/total exposure limits.
+ */
+export class AsyncMutex {
+  private tail: Promise<void> = Promise.resolve();
+
+  async run<T>(fn: () => Promise<T> | T): Promise<T> {
+    const prev = this.tail;
+    let release!: () => void;
+    this.tail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await prev;
+    try {
+      return await fn();
+    } finally {
+      release();
+    }
+  }
+}
 
 /**
  * In-memory sliding-window RFQ rate limiter (per-pubkey and global) with bounded memory.
@@ -74,4 +97,41 @@ export function openQuoteCapRefusal(
   if (clientOpen >= perClientMax) return "too many open quotes";
   if (totalOpen >= globalMax) return "desk busy";
   return "";
+}
+
+/**
+ * Atomic check-and-hold critical section for Predict quotes.
+ * Serialized behind `mutex` so concurrent Nostr requests cannot race across
+ * `refreshFloat()` to bypass `openQuoteCapRefusal`, `eligibleFloat`, or `caps`.
+ */
+export async function reserveQuote(opts: {
+  mutex: AsyncMutex;
+  book: Pick<Book, "list" | "hold">;
+  row: QuoteRow;
+  from: string;
+  now: () => number;
+  caps: Caps;
+  draining: () => boolean;
+  eligibleFloat: () => bigint;
+  refreshFloat: () => Promise<void>;
+  limits?: { perClient?: number; global?: number };
+}): Promise<{ ok: true } | { ok: false; reason: string }> {
+  return opts.mutex.run(async () => {
+    const now = opts.now();
+    if (opts.draining()) return { ok: false, reason: "draining" };
+    if (opts.row.deadline <= now) return { ok: false, reason: "expired" };
+    const capRefusal = openQuoteCapRefusal(opts.book.list(), opts.from, now, opts.limits);
+    if (capRefusal) return { ok: false, reason: capRefusal };
+    const payout = BigInt(opts.row.collateral);
+    if (opts.eligibleFloat() < openPremium(opts.book.list(), now) + payout) {
+      await opts.refreshFloat();
+    }
+    if (opts.eligibleFloat() < openPremium(opts.book.list(), now) + payout) {
+      return { ok: false, reason: "float short" };
+    }
+    if (!opts.book.hold(opts.row, opts.caps, now)) {
+      return { ok: false, reason: "exposure" };
+    }
+    return { ok: true };
+  });
 }
