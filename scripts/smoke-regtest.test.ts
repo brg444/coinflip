@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -9,40 +9,44 @@ import { fileURLToPath } from "node:url";
 
 import {
   arkade,
-  asset,
   REGTEST_EMULATOR_PUBKEY,
   RestArkProvider,
   RestEmulatorProvider,
   RestIndexerProvider,
   SingleKey,
-  Wallet,
 } from "@arkade-os/sdk";
 
-import { beaconIdOf, bindBeacon } from "../protocol/beacon.ts";
-import { centsOf, fetchPinnedIntent } from "../protocol/dia.ts";
 import { fillQuote } from "../desk/fill.ts";
 import type { QuoteRow } from "../desk/book.ts";
-import { BEACON_READ_FEE, DUST_SATS, EXIT, PREDICT_READ_FEE, Q_MIN } from "../protocol/constants.ts";
+import { createOracle } from "../oracle/service.ts";
+import {
+  EXIT,
+  PREDICT_FALLBACK_DELAY,
+  PREDICT_FINAL_EXIT_DELAY,
+  PREDICT_VOID_AFTER,
+} from "../protocol/constants.ts";
 import { assertServerExit, bindContracts, payoutVtxo } from "../protocol/contracts.ts";
+import { centsOf, fetchPinnedIntent } from "../protocol/dia.ts";
+import { FIX_EXPIRY_LAG } from "../protocol/fixing.ts";
 import { bytesToHex, hexToBytes } from "../protocol/hex.ts";
 import { networkByName } from "../protocol/network.ts";
-import { intentProgram, predictVaultProgram, vaultProgram } from "../protocol/programs.ts";
-import { openSqliteStorage } from "../protocol/sqlite-storage.ts";
-import { createOracle } from "../oracle/service.ts";
-import { fetchOracleFixing, parseOracleBeacon } from "../settle/oracle.ts";
-import { refundQuote, settlePredictQuote, settleQuote } from "../settle/vault.ts";
+import { intentProgram, predictVaultProgram } from "../protocol/programs.ts";
+import { fetchOracleFixing } from "../settle/oracle.ts";
+import { refundQuote, settlePredictQuote } from "../settle/vault.ts";
 
 /**
- * Option covenant on a local arkade-regtest stack (bitcoin regtest + arkd + emulator).
+ * Standalone PredictVaultV3 end-to-end smoke test on a local arkade-regtest stack
+ * (bitcoin regtest + arkd + emulator).
  *
  *   pnpm smoke:regtest
  *
  * Clones arkade-regtest if needed, starts it with `.env.regtest` (2048s exit, zero
- * intent fees), and runs the option the contracts actually settle:
- * the oracle service issues and deploys the beacon, the ark client funds two
- * intents and the desk, one intent is finalized, the other is cancelled, then
- * the oracle publishes the strike and the vault settles. Fails unless the
- * beacon is deployed and the strike settlement outputs land.
+ * intent fees), starts a stateless fixing oracle, and exercises:
+ *   1. Filling a Predict intent from desk float (`OptionIntent` side 1 -> `PredictVaultV3`).
+ *   2. Cancelling an unfilled stake back to the bettor after its deadline.
+ *   3. Void-refunding an unfixed vault after `expiry + voidAfter`.
+ *   4. Standalone direct-signature settlement (`PredictVaultV3.settle`) using a live
+ *      DIA print + oracle Schnorr signature, paying 100% of `payout` to the bettor.
  */
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -51,12 +55,6 @@ const ARK = process.env.ARK_URL?.trim() || "http://127.0.0.1:7070";
 const EMULATOR = process.env.EMULATOR_URL?.trim() || "http://127.0.0.1:7073";
 const PASSWORD = process.env.ARKD_PASSWORD?.trim() || "secret";
 const ADMIN = "regtest-admin";
-
-const collateral = 50_000n;
-const premium = 1_000n;
-const strike = 9_700_000n;
-/** Sats the seeded ark client sends the oracle. `issue` keeps this coin; deploy pays `DUST_SATS` to the beacon. */
-const oracleFunding = Q_MIN;
 
 type Info = {
   network?: string;
@@ -69,245 +67,16 @@ type Info = {
 
 type Coin = { txid: string; vout: number; value: number };
 
-test("option intent fills, cancels, and settles at the strike on local arkade regtest", async () => {
-  const regtestDir = ensureCheckout();
-  await ensureStack(regtestDir);
-
-  const writer = SingleKey.fromHex("1".padStart(64, "0"));
-  const desk = SingleKey.fromHex("2".padStart(64, "0"));
-  const oracleSecret = "3".padStart(64, "0");
-  const oracleKey = SingleKey.fromHex(oracleSecret);
-  const network = networkByName("regtest");
-  const indexer = new RestIndexerProvider(ARK);
-  const emulator = new RestEmulatorProvider(EMULATOR);
-  const connect = (identity: SingleKey) => arkade.Arkade.connect({
-    arkade: new RestArkProvider(ARK),
-    indexer,
-    emulator,
-    identity,
-    network,
-  });
-  const writerClient = await connect(writer);
-  const deskClient = await connect(desk);
-  assert.equal(bytesToHex(writerClient.emulatorKey!), REGTEST_EMULATOR_PUBKEY);
-  await assertServerExit(ARK);
-
-  const dataDir = await mkdtemp(path.join(tmpdir(), "arkade-options-oracle-"));
-  const storage = await openSqliteStorage(dataDir, "oracle.sqlite");
-  const wallet = await Wallet.create({
-    identity: oracleKey,
-    arkProvider: new RestArkProvider(ARK),
-    indexerProvider: indexer,
-    settlementConfig: false,
-    storage: {
-      walletRepository: storage.walletRepository,
-      contractRepository: storage.contractRepository,
-    },
-  });
-  const oracle = await createOracle({
-    dataDir,
-    adminToken: ADMIN,
-    oracleKey: hexToBytes(oracleSecret),
-    emulatorKey: writerClient.emulatorKey!,
-    wallet,
-    indexer,
-    emulator,
-  });
-  try {
-    const oracleAddress = await wallet.getAddress();
-    console.log("oracle", oracleAddress);
-    arkSend(regtestDir, [{ to: oracleAddress, amount: Number(oracleFunding) }]);
-    await waitFor(async () => (await wallet.getVtxos()).some((coin) => !coin.isSpent && BigInt(coin.value) >= oracleFunding), "oracle wallet");
-
-    const issued = await oracleCall(oracle.url, "/api/issue", {});
-    assert.match(String(issued.json.txid ?? ""), /^[0-9a-f]{64}$/, `issue ${JSON.stringify(issued.json)}`);
-    let deployed: Record<string, unknown> | null = null;
-    for (let attempt = 1; attempt <= 15; attempt += 1) {
-      const response = await oracleCall(oracle.url, "/api/deploy", {}, true);
-      if (response.status === 200) {
-        deployed = response.json;
-        break;
-      }
-      console.log("deploy", response.json.error ?? response.status, `(${attempt})`);
-      await new Promise((resolve) => setTimeout(resolve, 2_000));
-    }
-    assert.ok(deployed, "beacon was not deployed");
-    const status = (await oracleCall(oracle.url, "/api/status")).json;
-    const parsed = parseOracleBeacon(status);
-    assert.equal(parsed.ok, true, parsed.ok ? "" : parsed.error);
-    if (!parsed.ok) return;
-    assert.match(String(status.deployTxid ?? ""), /^[0-9a-f]{64}$/);
-    assert.equal(parsed.beacon.readFee, BEACON_READ_FEE);
-    assert.equal(parsed.beacon.exit, EXIT);
-    const beaconScript = bytesToHex(bindBeacon({
-      id: beaconIdOf(asset.AssetId.fromString(parsed.beacon.assetId)),
-      domain: parsed.beacon.domain,
-      expiryLag: parsed.beacon.expiryLag,
-      readFee: parsed.beacon.readFee,
-      adminPk: parsed.beacon.adminPk,
-      exit: parsed.beacon.exit,
-      serverKey: wallet.arkServerPublicKey,
-      emulatorKey: writerClient.emulatorKey!,
-    }).pkScript);
-    await waitFor(async () => {
-      const page = await indexer.getVtxos({ scripts: [beaconScript], spendableOnly: true });
-      return (page.vtxos ?? []).some((coin) => BigInt(coin.value) === DUST_SATS && holdsUnit(coin, parsed.beacon.assetId));
-    }, "beacon coin");
-    console.log("beacon", parsed.beacon.assetId, status.deployTxid);
-
-    const now = BigInt(Math.floor(Date.now() / 1000));
-    const expiry = nextGridExpiry(now);
-    const writerPk = await writer.xOnlyPublicKey();
-    const holderPk = await desk.xOnlyPublicKey();
-    const beacon = beaconIdOf(asset.AssetId.fromString(parsed.beacon.assetId));
-    const shared = {
-      kind: 0 as const,
-      strike,
-      collateral,
-      premium,
-      expiry,
-      exit: EXIT,
-      writerPk,
-      holderPk,
-      beacon,
-      readFee: BEACON_READ_FEE,
-      serverKey: writerClient.serverKey,
-      emulatorKey: writerClient.emulatorKey!,
-    };
-    const fill = bindContracts({ ...shared, deadline: now + 3_600n });
-    const cancel = bindContracts({ ...shared, deadline: now + 45n });
-    const deskScript = payoutVtxo(holderPk, deskClient.serverKey, EXIT);
-    const deskAddress = deskScript.address(network.hrp, deskClient.serverKey).encode();
-    console.log("fill intent", fill.intentAddress);
-    console.log("cancel intent", cancel.intentAddress);
-    console.log("desk", deskAddress);
-
-    arkSend(regtestDir, [
-      { to: fill.intentAddress, amount: Number(collateral) },
-      { to: cancel.intentAddress, amount: Number(collateral) },
-      { to: deskAddress, amount: Number(premium) },
-    ]);
-
-    const fillIntent = deskClient.contract(intentProgram(), fill.intent);
-    const cancelIntent = writerClient.contract(intentProgram(), cancel.intent);
-    await waitFor(async () => (await fillIntent.getUtxos()).some((coin) => BigInt(coin.value) >= collateral), "fill intent");
-    await waitFor(async () => (await cancelIntent.getUtxos()).some((coin) => BigInt(coin.value) >= collateral), "cancel intent");
-    await waitFor(async () => (await scriptCoins(indexer, deskScript.pkScript)).some((coin) => BigInt(coin.value) >= premium), "desk float");
-
-    const writerBefore = ids(await scriptCoins(indexer, fill.writerPkScript));
-    const row = quoteRow(fill, now, Number(now + 3_600n), writerPk, holderPk, String(status.issueTxid));
-    const filled = await fillQuote({
-      client: deskClient,
-      deskScript,
-      row,
-      now: Number(now),
-      ark: deskClient.arkProvider as RestArkProvider,
-      termsFor: () => ({ ...shared, deadline: now + 3_600n }),
-    });
-    console.log("finalize", filled.result, filled.txid ?? "");
-    assert.equal(filled.result, "filled", `finalize ${filled.result}`);
-    assert.match(filled.txid ?? "", /^[0-9a-f]{64}$/);
-
-    const vault = deskClient.contract(vaultProgram(), fill.vault);
-    await waitFor(async () => (await vault.getUtxos()).some((coin) => BigInt(coin.value) >= collateral), "vault");
-    await waitFor(async () => fresh(await scriptCoins(indexer, fill.writerPkScript), writerBefore, premium), "premium");
-
-    const cancelCoin = (await cancelIntent.getUtxos()).find((coin) => BigInt(coin.value) >= collateral);
-    assert.ok(cancelCoin, "cancel coin missing");
-    await sleepUntil(Number(cancel.intent.deadline) + 2, "cancel");
-    const writerAtCancel = ids(await scriptCoins(indexer, cancel.writerPkScript));
-    const sent = await writerClient.contract(intentProgram(), cancel.intent).functions
-      .cancel()
-      .from(cancelCoin)
-      .to(cancel.writerPkScript, BigInt(cancelCoin.value))
-      .send();
-    console.log("cancel", sent.txid);
-    assert.match(sent.txid, /^[0-9a-f]{64}$/);
-    assert.notEqual(sent.txid, filled.txid);
-    await waitFor(
-      async () => fresh(await scriptCoins(indexer, cancel.writerPkScript), writerAtCancel, collateral),
-      "cancel refund",
-    );
-
-    const expiryLag = Number(parsed.beacon.expiryLag);
-    await sleepUntil(Number(expiry), "sample");
-    const intent = await fetchWindowIntent(Number(expiry), expiryLag);
-    const sample = (await oracleCall(oracle.url, "/api/intent", {
-      price: intent.price.toString(),
-      time: intent.time,
-      nonce: intent.nonce.toString(),
-      intentExpiry: intent.intentExpiry,
-      sig: bytesToHex(intent.sig),
-    })).json;
-    const cents = centsOf(intent.price);
-    assert.equal(sample.price, cents.toString(), `sample ${JSON.stringify(sample)}`);
-    await sleepUntil(Number(expiry) + expiryLag, "publish");
-    const published = (await oracleCall(oracle.url, "/api/publish", { expiry: Number(expiry) })).json;
-    console.log("publish", published.txid, published.price);
-    assert.equal(published.price, cents.toString());
-    assert.match(String(published.txid ?? ""), /^[0-9a-f]{64}$/);
-
-    await waitFor(async () => {
-      const page = await indexer.getVtxos({ scripts: [beaconScript], spendableOnly: true });
-      return (page.vtxos ?? []).some((coin) => holdsUnit(coin, parsed.beacon.assetId) && BigInt(coin.value) === DUST_SATS);
-    }, "beacon after publish");
-
-    let settled: Awaited<ReturnType<typeof settleQuote>> | undefined;
-    for (let attempt = 1; attempt <= 20; attempt += 1) {
-      settled = await settleQuote({
-        chain: indexer,
-        serverKey: writerClient.serverKey,
-        emulatorKey: writerClient.emulatorKey!,
-        emulator,
-        checkpoint: deskClient.checkpoint,
-        fillTxid: filled.txid,
-        terms: { ...shared, deadline: now + 3_600n },
-        beacon: parsed.beacon,
-        now: Math.floor(Date.now() / 1000),
-      });
-      console.log("settle", settled.result, "txid" in settled ? settled.txid : "", `(${attempt})`);
-      if (settled.result === "settled" && settled.price != null) break;
-      await new Promise((resolve) => setTimeout(resolve, 2_000));
-    }
-    assert.ok(settled && settled.result === "settled" && settled.price != null, `settle ${settled?.result}`);
-    if (!settled || settled.result !== "settled" || settled.price == null) return;
-    assert.equal(settled.price, cents);
-    assert.equal(settled.holder, 0n);
-    assert.equal(settled.writer, collateral - BEACON_READ_FEE);
-    assert.match(settled.txid, /^[0-9a-f]{64}$/);
-
-    const writerSats = settled.writer ?? 0n;
-    await waitFor(async () => {
-      const coins = await scriptCoins(indexer, fill.writerPkScript);
-      return coins.some((coin) => BigInt(coin.value) === writerSats);
-    }, "settlement writer");
-    await waitFor(async () => {
-      const page = await indexer.getVtxos({ scripts: [beaconScript], spendableOnly: true });
-      return (page.vtxos ?? []).some((coin) => holdsUnit(coin, parsed.beacon.assetId) && BigInt(coin.value) === DUST_SATS + BEACON_READ_FEE);
-    }, "beacon after read");
-    await waitFor(async () => (await vault.getUtxos()).length === 0, "vault spent");
-    console.log("settled", settled.txid, "writer", settled.writer.toString(), "holder", settled.holder?.toString());
-  } finally {
-    await oracle.close();
-    await wallet.dispose();
-    storage.db.close();
-  }
-});
-
-/**
- * Predict on the same stack: the bettor holds and pays the stake (OptionIntent
- * side 1), the desk writes and funds the payout into a PredictVault from its
- * float, the oracle publishes a close above the line, and the vault pays the
- * bettor's own address. A second stake that the desk never fills is cancelled
- * back to the bettor after its deadline.
- */
-test("a prediction fills from the desk float, pays the bettor above the line, and an unfilled stake refunds", async () => {
+test("a prediction fills from the desk float, settles standalone with a signed fixing, voids after voidAfter, and cancels when unfilled", async () => {
   const regtestDir = ensureCheckout();
   await ensureStack(regtestDir);
 
   const bettor = SingleKey.fromHex("4".padStart(64, "0"));
   const desk = SingleKey.fromHex("5".padStart(64, "0"));
   const oracleSecret = "6".padStart(64, "0");
+  const oracleKey = SingleKey.fromHex(oracleSecret);
+  const oraclePk = await oracleKey.xOnlyPublicKey();
+  const oraclePkHex = bytesToHex(oraclePk);
   const network = networkByName("regtest");
   const indexer = new RestIndexerProvider(ARK);
   const emulator = new RestEmulatorProvider(EMULATOR);
@@ -320,15 +89,16 @@ test("a prediction fills from the desk float, pays the bettor above the line, an
   });
   const bettorClient = await connect(bettor);
   const deskClient = await connect(desk);
-  const oracleDir = await mkdtemp(path.join(tmpdir(), "arkade-options-predict-oracle-"));
+  assert.equal(bytesToHex(bettorClient.emulatorKey!), REGTEST_EMULATOR_PUBKEY);
+  await assertServerExit(ARK);
+
+  const dataDir = await mkdtemp(path.join(tmpdir(), "coinflip-regtest-oracle-"));
   const oracle = await createOracle({
-    dataDir: oracleDir,
+    dataDir,
     adminToken: ADMIN,
     oracleKey: hexToBytes(oracleSecret),
-    stateless: true,
+    network: "regtest",
   });
-  const oraclePk = await SingleKey.fromHex(oracleSecret).xOnlyPublicKey();
-  const oraclePkHex = bytesToHex(oraclePk);
   try {
     const initial = await fetchPinnedIntent();
     const line = centsOf(initial.price) - 50_000n;
@@ -338,7 +108,6 @@ test("a prediction fills from the desk float, pays the bettor above the line, an
     const expiry = nextGridExpiry(now);
     const serverKey = deskClient.serverKey;
     const deskPk = await desk.xOnlyPublicKey();
-    // The page pays the bettor at the taproot key of their own Arkade address.
     const bettorVtxo = payoutVtxo(await bettor.xOnlyPublicKey(), serverKey, EXIT);
     const bettorKey = bettorVtxo.tweakedPublicKey;
     const shared = {
@@ -352,7 +121,6 @@ test("a prediction fills from the desk float, pays the bettor above the line, an
       holderPk: bettorKey,
       holderPayoutKey: bettorKey,
       oraclePk,
-      readFee: PREDICT_READ_FEE,
       serverKey,
       emulatorKey: bettorClient.emulatorKey!,
     };
@@ -382,17 +150,19 @@ test("a prediction fills from the desk float, pays the bettor above the line, an
     await waitFor(async () => (await scriptCoins(indexer, deskScript.pkScript)).some((coin) => BigInt(coin.value) >= payout * 2n), "desk float");
 
     const deskBefore = ids(await scriptCoins(indexer, deskScript.pkScript));
-    const row: QuoteRow = {
-      ...quoteRow(fill, now, Number(now + 3_600n), deskPk, bettorKey, "00".repeat(32)),
-      collateral: payout.toString(),
-      premium: stake.toString(),
-      kind: 2,
-      strike: line.toString(),
+    const row = quoteRow({
+      rfqId: "11".repeat(32),
+      bound: fill,
+      now,
       expiry: Number(expiry),
-      writerPkScript: bytesToHex(fill.writerPkScript),
-      holderPkScript: bytesToHex(fill.holderPkScript),
-      oraclePubkey: oraclePkHex,
-    };
+      deadline: Number(now + 3_600n),
+      collateral: payout,
+      premium: stake,
+      strike: line,
+      writerPk: deskPk,
+      holderPk: bettorKey,
+      oraclePkHex,
+    });
     const filled = await fillQuote({
       client: deskClient,
       deskScript,
@@ -408,18 +178,19 @@ test("a prediction fills from the desk float, pays the bettor above the line, an
     await waitFor(async () => fresh(await scriptCoins(indexer, deskScript.pkScript), deskBefore, stake), "stake to the desk");
     await waitFor(async () => (await scriptCoins(indexer, deskScript.pkScript)).some((coin) => BigInt(coin.value) >= payout), "desk float for void");
 
-    const voidRow: QuoteRow = {
-      ...quoteRow(voidFill, now, Number(now + 3_600n), deskPk, bettorKey, "00".repeat(32)),
+    const voidRow = quoteRow({
       rfqId: "fe".repeat(32),
-      collateral: payout.toString(),
-      premium: stake.toString(),
-      kind: 2,
-      strike: line.toString(),
+      bound: voidFill,
+      now,
       expiry: Number(voidTerms.expiry),
-      writerPkScript: bytesToHex(voidFill.writerPkScript),
-      holderPkScript: bytesToHex(voidFill.holderPkScript),
-      oraclePubkey: oraclePkHex,
-    };
+      deadline: Number(now + 3_600n),
+      collateral: payout,
+      premium: stake,
+      strike: line,
+      writerPk: deskPk,
+      holderPk: bettorKey,
+      oraclePkHex,
+    });
     const voidFilled = await fillQuote({
       client: deskClient,
       deskScript,
@@ -447,15 +218,15 @@ test("a prediction fills from the desk float, pays the bettor above the line, an
 
     const cancelCoin = (await cancelIntent.getUtxos()).find((coin) => BigInt(coin.value) >= stake);
     assert.ok(cancelCoin, "unfilled stake missing");
-    await sleepUntil(Number(cancel.intent.deadline) + 2, "refund");
+    await sleepUntil(Number(cancel.intent.deadline) + 2, "cancel");
     const bettorAtCancel = ids(await scriptCoins(indexer, cancel.userPkScript));
     const refunded = await bettorClient.contract(intentProgram(), cancel.intent).functions
       .cancel()
       .from(cancelCoin)
       .to(cancel.userPkScript, BigInt(cancelCoin.value))
       .send();
-    console.log("predict refund", refunded.txid);
-    await waitFor(async () => fresh(await scriptCoins(indexer, cancel.userPkScript), bettorAtCancel, stake), "refund");
+    console.log("predict cancel refund", refunded.txid);
+    await waitFor(async () => fresh(await scriptCoins(indexer, cancel.userPkScript), bettorAtCancel, stake), "cancel refund");
 
     await sleepUntil(Number(voidTerms.expiry + voidTerms.voidAfter) + 2, "predict void refund");
     const bettorBeforeVoid = ids(await scriptCoins(indexer, voidFill.holderPkScript));
@@ -487,7 +258,7 @@ test("a prediction fills from the desk float, pays the bettor above the line, an
     await waitFor(async () => fresh(await scriptCoins(indexer, deskScript.pkScript), deskBeforeVoid, payout - stake), "void house share");
     await waitFor(async () => (await voidVault.getUtxos()).length === 0, "predict void vault spent");
 
-    const expiryLag = 60;
+    const expiryLag = Number(FIX_EXPIRY_LAG);
     await sleepUntil(Number(expiry), "predict sample");
     const intent = await fetchWindowIntent(Number(expiry), expiryLag);
     const sample = (await oracleCall(oracle.url, "/api/intent", {
@@ -500,8 +271,10 @@ test("a prediction fills from the desk float, pays the bettor above the line, an
     const cents = centsOf(intent.price);
     assert.equal(sample.price, cents.toString(), `sample ${JSON.stringify(sample)}`);
     await sleepUntil(Number(expiry) + expiryLag + 31, "predict fixing");
+
     const fetched = await fetchOracleFixing(oracle.url, Number(expiry), oraclePkHex);
-    assert.ok(fetched.fixing, `fixing missing: ${fetched.error ?? fetched.status}`);
+    assert.equal(fetched.status, 200, fetched.error);
+    assert.ok(fetched.fixing, "oracle fixing missing");
     assert.equal(fetched.fixing.cents, cents);
 
     const bettorBefore = ids(await scriptCoins(indexer, fill.holderPkScript));
@@ -535,98 +308,47 @@ test("a prediction fills from the desk float, pays the bettor above the line, an
     console.log("predict settled", settled.txid, "bettor", settled.holder?.toString());
   } finally {
     await oracle.close();
+    await rm(dataDir, { recursive: true, force: true });
   }
 });
 
-/** A fresh oracle with its own beacon, issued and deployed on the regtest stack. */
-async function bootOracle(
-  regtestDir: string,
-  oracleSecret: string,
-  indexer: RestIndexerProvider,
-  emulator: RestEmulatorProvider,
-  emulatorKey: Uint8Array,
-) {
-  const dataDir = await mkdtemp(path.join(tmpdir(), "arkade-options-oracle-"));
-  const storage = await openSqliteStorage(dataDir, "oracle.sqlite");
-  const wallet = await Wallet.create({
-    identity: SingleKey.fromHex(oracleSecret),
-    arkProvider: new RestArkProvider(ARK),
-    indexerProvider: indexer,
-    settlementConfig: false,
-    storage: {
-      walletRepository: storage.walletRepository,
-      contractRepository: storage.contractRepository,
-    },
-  });
-  const oracle = await createOracle({
-    dataDir,
-    adminToken: ADMIN,
-    oracleKey: hexToBytes(oracleSecret),
-    emulatorKey,
-    wallet,
-    indexer,
-    emulator,
-  });
-  const oracleAddress = await wallet.getAddress();
-  arkSend(regtestDir, [{ to: oracleAddress, amount: Number(oracleFunding) }]);
-  await waitFor(async () => (await wallet.getVtxos()).some((coin) => !coin.isSpent && BigInt(coin.value) >= oracleFunding), "oracle wallet");
-  const issued = await oracleCall(oracle.url, "/api/issue", {});
-  assert.match(String(issued.json.txid ?? ""), /^[0-9a-f]{64}$/, `issue ${JSON.stringify(issued.json)}`);
-  let deployed = false;
-  for (let attempt = 1; attempt <= 15 && !deployed; attempt += 1) {
-    const response = await oracleCall(oracle.url, "/api/deploy", {}, true);
-    deployed = response.status === 200;
-    if (!deployed) await new Promise((resolve) => setTimeout(resolve, 2_000));
-  }
-  assert.ok(deployed, "beacon was not deployed");
-  const status = (await oracleCall(oracle.url, "/api/status")).json;
-  const parsed = parseOracleBeacon(status);
-  if (!parsed.ok) throw new Error(parsed.error);
-  const beaconScript = bytesToHex(bindBeacon({
-    id: beaconIdOf(asset.AssetId.fromString(parsed.beacon.assetId)),
-    domain: parsed.beacon.domain,
-    expiryLag: parsed.beacon.expiryLag,
-    readFee: parsed.beacon.readFee,
-    adminPk: parsed.beacon.adminPk,
-    exit: parsed.beacon.exit,
-    serverKey: wallet.arkServerPublicKey,
-    emulatorKey,
-  }).pkScript);
-  await waitFor(async () => {
-    const page = await indexer.getVtxos({ scripts: [beaconScript], spendableOnly: true });
-    return (page.vtxos ?? []).some((coin) => BigInt(coin.value) === DUST_SATS && holdsUnit(coin, parsed.beacon.assetId));
-  }, "beacon coin");
-  return { oracle, wallet, storage, parsed, issueTxid: String(status.issueTxid), beaconScript };
-}
-
-function quoteRow(
-  bound: ReturnType<typeof bindContracts>,
-  now: bigint,
-  deadline: number,
-  writerPk: Uint8Array,
-  holderPk: Uint8Array,
-  beaconTxid: string,
-): QuoteRow {
+function quoteRow(opts: {
+  rfqId: string;
+  bound: ReturnType<typeof bindContracts>;
+  now: bigint;
+  expiry: number;
+  deadline: number;
+  collateral: bigint;
+  premium: bigint;
+  strike: bigint;
+  writerPk: Uint8Array;
+  holderPk: Uint8Array;
+  oraclePkHex: string;
+}): QuoteRow {
   return {
-    rfqId: "11".repeat(32),
-    collateral: collateral.toString(),
-    premium: premium.toString(),
-    kind: 0,
-    strike: strike.toString(),
-    expiry: Number(now + 120n),
-    deadline,
-    validUntil: Number(now + 30n),
+    rfqId: opts.rfqId,
+    collateral: opts.collateral.toString(),
+    premium: opts.premium.toString(),
+    kind: 2,
+    strike: opts.strike.toString(),
+    expiry: opts.expiry,
+    deadline: opts.deadline,
+    validUntil: Number(opts.now + 30n),
     exit: Number(EXIT),
-    writerPubkey: bytesToHex(writerPk),
-    writerPkScript: bytesToHex(bound.writerPkScript),
-    holderPubkey: bytesToHex(holderPk),
-    beaconTxid,
-    beaconGidx: 0,
-    intentAddress: bound.intentAddress,
-    vaultAddress: bound.vaultAddress,
+    writerPubkey: bytesToHex(opts.writerPk),
+    writerPkScript: bytesToHex(opts.bound.writerPkScript),
+    holderPubkey: bytesToHex(opts.holderPk),
+    holderPkScript: bytesToHex(opts.bound.holderPkScript),
+    oraclePubkey: opts.oraclePkHex,
+    backupPubkey: REGTEST_EMULATOR_PUBKEY.slice(2),
+    voidAfter: Number(PREDICT_VOID_AFTER),
+    fallbackDelay: Number(PREDICT_FALLBACK_DELAY),
+    finalExitDelay: Number(PREDICT_FINAL_EXIT_DELAY),
+    intentAddress: opts.bound.intentAddress,
+    vaultAddress: opts.bound.vaultAddress,
     status: "open",
-    createdAt: Number(now),
-    clientPubkey: bytesToHex(writerPk),
+    createdAt: Number(opts.now),
+    clientPubkey: bytesToHex(opts.holderPk),
   };
 }
 
@@ -643,11 +365,6 @@ async function oracleCall(url: string, pathName: string, body?: unknown, allowEr
   const json = text ? JSON.parse(text) as Record<string, unknown> : {};
   if (!allowError && !res.ok) throw new Error(`${pathName} ${res.status} ${text}`);
   return { status: res.status, json };
-}
-
-function holdsUnit(coin: { assets?: readonly { assetId?: string; amount?: bigint | number }[] }, assetId: string): boolean {
-  const want = assetId.toLowerCase();
-  return (coin.assets ?? []).some((item) => (item.assetId ?? "").toLowerCase() === want && BigInt(item.amount ?? 0) === 1n);
 }
 
 async function fetchWindowIntent(expiry: number, expiryLag: number) {

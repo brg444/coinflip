@@ -49,18 +49,18 @@ test("the sample window is expiry through expiry plus 60", () => {
   assert.equal(inside(time - 61), false);
 });
 
-test("the compiled attest checks the DIA digest, the pinned key, and the window", () => {
-  const artifact = JSON.parse(readFileSync(new URL("../contracts/attestation_beacon.artifact.json", import.meta.url), "utf8")) as {
+test("the compiled PredictVault settle checks the DIA digest, the pinned key, and the window", () => {
+  const artifact = JSON.parse(readFileSync(new URL("../contracts/predict_vault.artifact.json", import.meta.url), "utf8")) as {
     compiler: { version: string };
     functions: { name: string; arkade?: { asm: string[] } }[];
   };
   assert.equal(artifact.compiler.version, "0.1.0");
-  const asm = artifact.functions.find((fn) => fn.name === "attest")?.arkade?.asm ?? [];
+  const asm = artifact.functions.find((fn) => fn.name === "settle")?.arkade?.asm ?? [];
   assert.ok(asm.includes("OP_DIGEST"));
   assert.ok(asm.includes("OP_DIV"));
   assert.ok(asm.includes("OP_MOD"));
   assert.ok(asm.includes("OP_CHECKTIME"));
-  assert.ok(asm.includes("OP_CHECKSIGFROMSTACK"));
+  assert.equal(asm.filter((op) => op === "OP_CHECKSIGFROMSTACK").length, 2);
   assert.ok(asm.includes("0x" + Buffer.from(DIA_PUBKEY).toString("hex")));
   assert.ok(asm.includes("0xf57d55f057fd4aba6b1a7f8bccb6a3e826cf71fd34971f22a39d7ffd6e620fb3"));
 });

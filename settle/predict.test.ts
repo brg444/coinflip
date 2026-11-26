@@ -1,24 +1,27 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import test from "node:test";
 
 import { schnorr } from "@noble/curves/secp256k1.js";
 import { base64 } from "@scure/base";
-import { arkade, asset, CSVMultisigTapscript, Extension, SingleKey, Transaction } from "@arkade-os/sdk";
+import { arkade, CSVMultisigTapscript, Extension, SingleKey, Transaction } from "@arkade-os/sdk";
 
 import { holderPayoff, settlementOutputs } from "../app/settle-math.js";
-import { beaconIdOf, predictFixDigest } from "../protocol/beacon.ts";
 import {
   EXIT,
   PAIR,
   PREDICT_FALLBACK_DELAY,
   PREDICT_FINAL_EXIT_DELAY,
-  PREDICT_READ_FEE,
+  PREDICT_VAULT_PROGRAM_ID,
   PREDICT_VOID_AFTER,
   STAKE_MIN,
 } from "../protocol/constants.ts";
 import { bindContracts, type Terms } from "../protocol/contracts.ts";
 import { predictSettlePriceCents, refundOutputs } from "../protocol/cospend.ts";
-import { SCALE } from "../protocol/dia.ts";
+import { centsOf, SCALE, type DiaIntent } from "../protocol/dia.ts";
+import { predictFixDigest } from "../protocol/fixing.ts";
 import { bytesToHex, hexToBytes } from "../protocol/hex.ts";
 import { classifyIntent } from "../protocol/intent-state.ts";
 import { parsePosition, parseWire, payoutRefusal, predictRefusal, requestRefusal, type RfqRequest } from "../protocol/messages.ts";
@@ -26,16 +29,25 @@ import { positionEvent, readPosition } from "../protocol/nostr.ts";
 import { payoutMultiplier, predictMultiplier, predictPayout, probAbove } from "../protocol/pricing.ts";
 import { predictVaultProgram } from "../protocol/programs.ts";
 import { outlay, openPremium, type QuoteRow } from "../desk/book.ts";
-import type { OracleFixing } from "./oracle.ts";
-import { positionFromAnnouncement, termsFor } from "./positions.ts";
+import { parseOracleFixing, parseOracleKey, parseOracleLatest, serviceOrigin, type OracleFixing } from "./oracle.ts";
+import { duePositions, manualPositions, positionFromAnnouncement, termsFor } from "./positions.ts";
+import { Progress } from "./progress.ts";
 import { refundQuote, settlePayouts, settlePredictQuote, type ChainCoin } from "./vault.ts";
 
 const CHECKPOINT = "03080040b27520dfcaec558c7e78cf3e38b898ba8a43cfb5727266bae32c5c5b3aeb32c558aa0bac";
-const DISPLAY = "00".repeat(31) + "07";
 const EXPIRY = 1_700_000_100;
 const LINE = 8_231_500n;
 const STAKE = 50_000n;
 const PAYOUT = 95_000n;
+
+/** Real Lasernet DIA OracleUpdate on 5-minute close 1795593000. */
+const RECORDED_DIA: DiaIntent = {
+  price: 58728258984125017358336n,
+  time: 1795593002,
+  nonce: 1793790301274586439n,
+  intentExpiry: 1795596602,
+  sig: Buffer.from("7980c73f7210211fd2887cc55bd0df6e049ccb57771131a81ed1bb655a6b52887fa15bb26be0e35f0de52badce56190ec3df541814e8652d0f9314a088c26280", "hex"),
+};
 
 const key = (n: number) => SingleKey.fromHex(n.toString(16).padStart(64, "0"));
 
@@ -55,7 +67,6 @@ async function predictTerms(kind: 2 | 3 = 2): Promise<Terms> {
     holderPk: bettor,
     holderPayoutKey: bettor,
     oraclePk: oracle,
-    readFee: PREDICT_READ_FEE,
     serverKey: await key(1).xOnlyPublicKey(),
     emulatorKey: await key(2).compressedPublicKey(),
   };
@@ -76,9 +87,8 @@ test("predict is all or nothing, and a close on the line pays the desk", () => {
   assert.equal(holderPayoff(3, LINE - 1n, LINE, PAYOUT), PAYOUT);
   assert.equal(holderPayoff(3, LINE, LINE, PAYOUT), 0n);
   assert.equal(holderPayoff(3, LINE + 1n, LINE, PAYOUT), 0n);
-  // Standalone PredictVaultV3 has zero read fee: the winner takes the entire vault in one output.
-  assert.deepEqual(settlementOutputs(PAYOUT, PAYOUT, PREDICT_READ_FEE), { mode: "holder", holder: 95_000n, writer: 0n });
-  assert.deepEqual(settlementOutputs(0n, PAYOUT, PREDICT_READ_FEE), { mode: "writer", holder: 0n, writer: 95_000n });
+  assert.deepEqual(settlementOutputs(PAYOUT, PAYOUT), { mode: "holder", holder: 95_000n, writer: 0n });
+  assert.deepEqual(settlementOutputs(0n, PAYOUT), { mode: "writer", holder: 0n, writer: 95_000n });
 });
 
 test("PredictVault exposes three-tier exit leaves and direct-signature settle opcodes", async () => {
@@ -131,17 +141,12 @@ test("a prediction binds intent side 1: the bettor holds, the desk writes", asyn
   assert.equal(bound.intent.premium, STAKE);
   assert.equal(bound.intent.collateral, PAYOUT);
   assert.equal(bytesToHex(bound.intent.userPk as Uint8Array), bytesToHex(terms.holderPk));
-  // The bettor is paid at the key of their own address, the desk at its vtxo script.
   assert.equal(bytesToHex(bound.holderPkScript), `5120${bytesToHex(terms.holderPk)}`);
   assert.deepEqual(bound.userPkScript, bound.holderPkScript);
   assert.deepEqual(bound.solverPkScript, bound.writerPkScript);
-  // Published script dialect: a script argument is its witness program and version.
   assert.deepEqual(bound.intent["solverScript.program"], bound.writerProgram);
   assert.deepEqual(bound.intent["optionScript.program"], bound.optionProgram);
   assert.equal(bound.intent["userScript.version"], 1n);
-  // Same terms on the option vault would be a different contract.
-  const asOption = bindContracts({ ...terms, kind: 0, beacon: beaconIdOf(asset.AssetId.create(DISPLAY, 0)) });
-  assert.notEqual(asOption.vaultAddress, bound.vaultAddress);
   assert.notEqual(bindContracts({ ...terms, kind: 3 }).vaultAddress, bound.vaultAddress);
 });
 
@@ -163,7 +168,6 @@ test("predict requests and quotes round-trip, and each side names the desk once"
   };
   assert.deepEqual(parseWire(JSON.parse(JSON.stringify(request))), request);
   assert.equal(parseWire({ ...request, profile: { ...request.profile, kind: 4 } }), null);
-  // A predict request carries the bettor, not a writer.
   assert.equal(parseWire({
     ...request,
     profile: { kind: 2, strike: 1, expiry: EXPIRY, writer_pubkey: "22".repeat(32), writer_pk_script: `5120${"22".repeat(32)}` },
@@ -198,8 +202,6 @@ test("predict requests and quotes round-trip, and each side names the desk once"
   assert.equal(parseWire({ ...quote, profile: { ...quote.profile, backup_pubkey: "21".repeat(32) } }), null);
   assert.equal(parseWire({ ...quote, profile: { ...quote.profile, final_exit_delay: Number(PREDICT_FALLBACK_DELAY) } }), null);
   assert.equal(parseWire({ ...quote, profile: { ...quote.profile, fallback_delay: 2049 } }), null);
-  const both = { ...quote, profile: { ...quote.profile, holder_pubkey: "21".repeat(32), holder_pk_script: `5120${"21".repeat(32)}` } };
-  assert.equal(parseWire(both), null);
   const neither = { ...quote, profile: binding };
   assert.equal(parseWire(neither), null);
 });
@@ -222,9 +224,9 @@ test("a predict close is on the 5-minute grid, far enough out, and at most an ho
 });
 
 test("a payout has to beat the stake", () => {
-  assert.equal(payoutRefusal(PAYOUT, STAKE, PREDICT_READ_FEE), "");
-  assert.equal(payoutRefusal(STAKE, STAKE, PREDICT_READ_FEE), "payout");
-  assert.equal(payoutRefusal(STAKE + 1n, STAKE, PREDICT_READ_FEE), "");
+  assert.equal(payoutRefusal(PAYOUT, STAKE), "");
+  assert.equal(payoutRefusal(STAKE, STAKE), "payout");
+  assert.equal(payoutRefusal(STAKE + 1n, STAKE), "");
 });
 
 test("the multiplier is 1.90 at even odds, pays more for the far line, and refuses long shots", () => {
@@ -243,14 +245,15 @@ test("the multiplier is 1.90 at even odds, pays more for the far line, and refus
 });
 
 test("the desk's float covers the whole payout of an open prediction", () => {
-  const row = (kind: 0 | 2, premium: string, collateral: string): QuoteRow => ({
+  const row = (kind: 2 | 3, premium: string, collateral: string): QuoteRow => ({
     rfqId: "ab".repeat(32), collateral, premium, kind, strike: "1", expiry: EXPIRY, deadline: EXPIRY, validUntil: EXPIRY,
-    exit: 2048, writerPubkey: "", writerPkScript: "", holderPubkey: "", beaconTxid: DISPLAY, beaconGidx: 0,
+    exit: 2048, writerPubkey: "", writerPkScript: "", holderPubkey: "", holderPkScript: "", oraclePubkey: "44".repeat(32),
+    backupPubkey: "33".repeat(32), voidAfter: Number(PREDICT_VOID_AFTER),
+    fallbackDelay: Number(PREDICT_FALLBACK_DELAY), finalExitDelay: Number(PREDICT_FINAL_EXIT_DELAY),
     intentAddress: "", vaultAddress: "", status: "open", createdAt: 0, clientPubkey: "",
   });
-  assert.equal(outlay(row(0, "1000", "50000")), 1_000n);
   assert.equal(outlay(row(2, "50000", "95000")), 95_000n);
-  assert.equal(openPremium([row(0, "1000", "50000"), row(2, "50000", "95000")], EXPIRY - 1), 96_000n);
+  assert.equal(openPremium([row(2, "50000", "95000"), row(3, "20000", "38000")], EXPIRY - 1), 133_000n);
 });
 
 test("a prediction's fill funds the vault, and the stake back is a refund", () => {
@@ -274,6 +277,93 @@ test("a prediction's fill funds the vault, and the stake back is a refund", () =
     spends: { [coin.spentBy]: [{ script: desk, amount: STAKE }, { script: vault, amount: PAYOUT - 1n }] },
   });
   assert.equal(short.phase, "open");
+});
+
+test("oracle client helpers parse status, verify real dual-signed fixings, and reject tampering", async () => {
+  assert.equal(serviceOrigin("https://oracle.example.com/api/status?foo=1"), "https://oracle.example.com");
+  assert.throws(() => serviceOrigin("ftp://oracle.example.com"), /http/);
+
+  const oracleSecret = hexToBytes(key(9).toHex());
+  const oraclePk = await key(9).xOnlyPublicKey();
+  const oraclePkHex = bytesToHex(oraclePk);
+  const keyInfo = parseOracleKey({ pubkeys: [oraclePkHex], args: { adminPk: oraclePkHex, expiryLag: 60 } });
+  assert.equal(keyInfo?.oraclePkHex, oraclePkHex);
+  assert.equal(keyInfo?.expiryLag, 60n);
+  assert.deepEqual(parseOracleLatest({ latest: { price: "5872826", time: 1795593002 } }), { cents: 5_872_826n, time: 1795593002 });
+
+  const expiry = 1795593000;
+  const cents = centsOf(RECORDED_DIA.price);
+  const digest = predictFixDigest({ expiry: BigInt(expiry), cents, time: BigInt(RECORDED_DIA.time) });
+  const oracleSig = bytesToHex(schnorr.sign(digest, oracleSecret));
+  const payload = {
+    expiry,
+    price: cents.toString(),
+    time: RECORDED_DIA.time,
+    raw: RECORDED_DIA.price.toString(),
+    nonce: RECORDED_DIA.nonce.toString(),
+    intentExpiry: RECORDED_DIA.intentExpiry,
+    sig: bytesToHex(RECORDED_DIA.sig),
+    oracleSig,
+    oraclePk: oraclePkHex,
+  };
+  const verified = parseOracleFixing(payload, oraclePkHex);
+  assert.ok(verified);
+  assert.equal(verified.cents, cents);
+  assert.equal(parseOracleFixing(payload, "00".repeat(32)), null);
+  assert.equal(parseOracleFixing({ ...payload, raw: (RECORDED_DIA.price + 1n).toString() }, oraclePkHex), null);
+  assert.equal(parseOracleFixing({ ...payload, expiry: expiry - 300 }, oraclePkHex), null);
+  assert.equal(parseOracleFixing({ ...payload, oracleSig: "00".repeat(64) }, oraclePkHex), null);
+});
+
+test("duePositions, manualPositions, and Progress track settlement queue oldest-first", async () => {
+  const row = (id: string, expiry: number) => ({ id, expiry });
+  const due = duePositions([
+    row("early", EXPIRY + 10),
+    row("later", EXPIRY),
+    row("older", EXPIRY - 5),
+    row("done", EXPIRY - 10),
+  ], EXPIRY, new Set(["done"]));
+  assert.deepEqual(due.map((item) => item.id), ["older", "later"]);
+
+  assert.equal(manualPositions([{ kind: 0 }]).length, 0);
+  const validManual = manualPositions([{
+    v: 1,
+    type: "option_position",
+    program_id: PREDICT_VAULT_PROGRAM_ID,
+    rfq_id: "aa".repeat(32),
+    pair: PAIR,
+    kind: 2,
+    collateral: "95000",
+    stake: "50000",
+    strike: "8231500",
+    expiry: EXPIRY,
+    exit: Number(EXIT),
+    writer_pubkey: "21".repeat(32),
+    writer_pk_script: `5120${"21".repeat(32)}`,
+    holder_pubkey: "22".repeat(32),
+    holder_pk_script: `5120${"22".repeat(32)}`,
+    oracle_pubkey: "09".repeat(32),
+    backup_pubkey: "33".repeat(32),
+    void_after: Number(PREDICT_VOID_AFTER),
+    fallback_delay: Number(PREDICT_FALLBACK_DELAY),
+    final_exit_delay: Number(PREDICT_FINAL_EXIT_DELAY),
+    vault_address: "tark1vault00000",
+    fill_txid: "bb".repeat(32),
+  }]);
+  assert.equal(validManual.length, 1);
+
+  const dir = await mkdtemp(path.join(tmpdir(), "coinflip-progress-"));
+  try {
+    const prog = await Progress.open(dir);
+    assert.equal(prog.has("aa"), false);
+    prog.note("aa", "cc".repeat(32));
+    await prog.save();
+    const reopened = await Progress.open(dir);
+    assert.equal(reopened.has("aa"), true);
+    assert.equal(reopened.ids().size, 1);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test("a filled prediction settles standalone via signed fixing to the bettor above the line and to the desk at it", async () => {
@@ -327,6 +417,7 @@ test("a filled prediction settles standalone via signed fixing to the bettor abo
   const announcement = parsePosition({
     v: 1,
     type: "option_position",
+    program_id: PREDICT_VAULT_PROGRAM_ID,
     rfq_id: "aa".repeat(32),
     pair: PAIR,
     kind: 2,
@@ -348,7 +439,6 @@ test("a filled prediction settles standalone via signed fixing to the bettor abo
     fill_txid: vaultTx.id,
   });
   assert.ok(announcement);
-  // A desk-signed Predict position (signer is writer_pubkey) passes readPosition; a third party does not.
   const deskEvent = positionEvent(hexToBytes(key(21).toHex()), announcement, EXPIRY);
   assert.deepEqual(readPosition(deskEvent), announcement);
   const bettorEvent = positionEvent(hexToBytes(key(22).toHex()), announcement, EXPIRY);
@@ -358,7 +448,7 @@ test("a filled prediction settles standalone via signed fixing to the bettor abo
   const { holder_pk_script: _dropped, ...withoutHolder } = announcement;
   assert.equal(parsePosition(withoutHolder), null);
   const watched = positionFromAnnouncement(announcement)!;
-  const rebuilt = termsFor(watched, terms.serverKey, terms.emulatorKey, PREDICT_READ_FEE);
+  const rebuilt = termsFor(watched, terms.serverKey, terms.emulatorKey);
   assert.equal(bindContracts(rebuilt).vaultAddress, bound.vaultAddress);
 
   const env = {
@@ -407,12 +497,22 @@ test("a filled prediction settles standalone via signed fixing to the bettor abo
     strike: LINE,
     collateral: PAYOUT,
     locked: PAYOUT,
-    readFee: PREDICT_READ_FEE,
     holderScript: bound.holderPkScript,
     writerScript: bound.writerPkScript,
   });
   assert.ok("payouts" in lower);
   if ("payouts" in lower) assert.deepEqual(lower.payouts, [{ script: bound.holderPkScript, amount: 95_000n }]);
+
+  const under = settlePayouts({
+    kind: 2,
+    price: LINE + 1n,
+    strike: LINE,
+    collateral: PAYOUT,
+    locked: PAYOUT - 1n,
+    holderScript: bound.holderPkScript,
+    writerScript: bound.writerPkScript,
+  });
+  assert.deepEqual(under, { error: "underfunded" });
 
   const earlyRefund = await refundQuote({ ...env, now: EXPIRY + Number(PREDICT_VOID_AFTER) - 1 });
   assert.deepEqual(earlyRefund, { result: "waiting", reason: "early" });

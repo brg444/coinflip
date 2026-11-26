@@ -5,41 +5,17 @@ import { probAbove } from "../protocol/pricing.ts";
 const YEAR = 365 * 24 * 60 * 60;
 
 export const COIN_EXPIRY_MARGIN_S = 300;
-export const BEACON_RATCHET_MARGIN_S = 0;
 export const ORACLE_SPOT_MAX_AGE_S = 90;
 export const BASIS_MAX_BPS = 50;
 
-export function parseRatchetMargin(raw?: string): number {
-  const trimmed = raw?.trim();
-  if (!trimmed) return BEACON_RATCHET_MARGIN_S;
-  if (!/^(0|[1-9][0-9]*)$/.test(trimmed)) throw new Error("DESK_RATCHET_MARGIN_S must be a non-negative integer");
-  return Number(trimmed);
-}
-
 export function minCoinExpiry(expiry: number, margin = COIN_EXPIRY_MARGIN_S): number {
   return expiry + Number(VAULT_EXPIRY_LAG) + margin;
-}
-
-export function minFillCoinExpiry(
-  expiry: number,
-  beaconExpiry: number | null,
-  margin = COIN_EXPIRY_MARGIN_S,
-  ratchetMargin = BEACON_RATCHET_MARGIN_S,
-): number {
-  const floor = minCoinExpiry(expiry, margin);
-  if (beaconExpiry == null || beaconExpiry <= 0) return floor;
-  return Math.max(floor, beaconExpiry - ratchetMargin);
 }
 
 export function coinOutlives(coin: { expiresAt?: Date }, minExpiryS: number): boolean {
   if (coin.expiresAt == null) return true;
   const ms = coin.expiresAt.getTime();
   return Number.isFinite(ms) && Math.floor(ms / 1000) >= minExpiryS;
-}
-
-export function beaconExpiryRefusal(expiry: number, beaconExpiry: number | null, margin = COIN_EXPIRY_MARGIN_S): string {
-  if (beaconExpiry == null || beaconExpiry <= 0) return "beacon expiry";
-  return minCoinExpiry(expiry, margin) > beaconExpiry ? "beacon expiry" : "";
 }
 
 export function predictSpot(opts: {

@@ -1,9 +1,9 @@
-import { LIVE_BEACON_STATUS } from "./src/beacon-status.ts";
-
 export const RELAYS = ["wss://nostr.arkade.sh"];
 
+export const MUTINYNET_ORACLE_PUBKEY = "e96d459a88359d713db09e7b226644b84765ac33b0b84f4cb60bc9d39ffb5bbe";
+
 export const PINNED_BACKUP_PUBKEY = demoBackupPubkey();
-export const PINNED_ORACLE_PUBKEY = demoOraclePubkey() ?? LIVE_BEACON_STATUS.args.adminPk.toLowerCase();
+export const PINNED_ORACLE_PUBKEY = demoOraclePubkey() ?? MUTINYNET_ORACLE_PUBKEY;
 
 export const PINNED_DESKS = demoDesks() ?? [
   {
@@ -17,10 +17,7 @@ function demoOraclePubkey() {
   if (demo && typeof demo.oraclePubkey === "string" && /^[0-9a-f]{64}$/i.test(demo.oraclePubkey)) {
     return demo.oraclePubkey.toLowerCase();
   }
-  const fromBeacon = demo?.beacon?.args?.adminPk ?? demo?.beacon?.pubkeys?.[0];
-  return typeof fromBeacon === "string" && /^[0-9a-f]{64}$/i.test(fromBeacon)
-    ? fromBeacon.toLowerCase()
-    : null;
+  return null;
 }
 
 function demoBackupPubkey() {

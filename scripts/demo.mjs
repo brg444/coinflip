@@ -1,8 +1,9 @@
-// COINFLIP demo on Mutinynet. One command runs the whole system on this
-// machine: an oracle with its own beacon, a desk, a settler, and the page built
-// against them, served locally and through a Cloudflare tunnel URL. The page
-// and its link come up first; the page then walks through funding the oracle
-// and the desk, so the rest happens in the browser.
+// COINFLIP demo on Mutinynet (or Bitcoin mainnet with NETWORK=bitcoin). One
+// command runs the whole system on this machine: a stateless DIA fixing oracle,
+// a desk, a settler, and the page built against them, served locally and
+// through a Cloudflare tunnel URL. The page and its link come up first; the
+// page then walks through funding the desk float, so the rest happens in the
+// browser.
 //
 //   pnpm demo                start, or resume, the demo
 //   pnpm demo -- --pages     also publish the page to Cloudflare Pages (needs `wrangler login`)
@@ -12,7 +13,7 @@
 //                            coinflip.Dockerfile runs this.
 //
 // Keys, data and logs live in ~/.coinflip-demo (COINFLIP_DEMO_DIR to move it).
-// Delete that folder to start over with a new beacon and a new desk.
+// Delete that folder to start over with fresh keys and a new desk.
 
 import { spawn, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
@@ -38,8 +39,6 @@ if (!["bitcoin", "mutinynet", "regtest", "testnet", "signet"].includes(netId)) {
 const NET_LABEL = isMainnet ? "Bitcoin" : netId === "regtest" ? "Regtest" : "Mutinynet";
 const WALLET_HOME = isMainnet ? "https://arkade.money" : "https://mutinynet.arkade.money";
 const PORTS = { oracle: 8789, desk: 8788, settler: 8790, page: Number(process.env.PAGE_PORT?.trim() || 4173) };
-/** Stateless Predict oracle needs no on-Arkade wallet funding or beacon coin. */
-const ORACLE_FUND = 0n;
 /** The desk funds whole payouts. */
 const DESK_FUND = isMainnet ? 500_000n : 1_000_000n;
 const oracleUrl = `http://127.0.0.1:${PORTS.oracle}`;
@@ -51,7 +50,6 @@ let stopping = false;
 /** What the page shows while the demo sets itself up. Served at /demo.json (minimal healthcheck on mainnet). */
 const setup = {
   stage: "starting",
-  oracle: { wallet: "", balance: "0", need: ORACLE_FUND.toString() },
   desk: { address: "", balance: "0", need: DESK_FUND.toString() },
   wallet: WALLET_HOME,
 };
@@ -230,39 +228,20 @@ async function until(read, label, everyMs = 2_000) {
   }
 }
 
-function admin(token) {
-  return { authorization: `Bearer ${token}`, "content-type": "application/json" };
-}
-
 const sats = (value) => BigInt(value ?? 0).toLocaleString("en-US");
 
 async function oracleUp(key) {
-  const esbuild = await import("esbuild");
-  await esbuild.build({
-    entryPoints: [path.join(root, "oracle/page.ts")],
-    bundle: true,
-    format: "esm",
-    platform: "browser",
-    outfile: path.join(root, "oracle/page.js"),
-    logLevel: "warning",
-  });
   start("oracle", "oracle/main.ts", {
-    ...networkEnv(),
-    STATELESS_ORACLE: "1",
     ORACLE_KEY: key.oracleKey,
     ORACLE_ADMIN: key.admin,
-    DESK_PUBKEY: getPublicKey(Uint8Array.from(Buffer.from(key.deskKey, "hex"))),
     SAMPLE_MS: "20000",
     DATA_DIR: path.join(home, "oracle"),
     PORT: String(PORTS.oracle),
   });
-  const status = await until(async () => {
+  return until(async () => {
     const body = (await json(`${oracleUrl}/api/status`)).body;
     return Array.isArray(body.pubkeys) && body.pubkeys.length > 0 && body;
   }, "Starting the oracle…");
-  setup.oracle.wallet = status.wallet ?? "";
-  setup.oracle.balance = String(status.balance ?? "0");
-  return status;
 }
 
 async function deskUp(key, oracle) {
@@ -305,27 +284,22 @@ async function deskUp(key, oracle) {
   return status;
 }
 
-function settlerUp(key) {
+function settlerUp() {
   start("settler", "settle/main.ts", {
     ...networkEnv(),
     ORACLE_URL: oracleUrl,
-    ORACLE_ADMIN: key.admin,
     DATA_DIR: path.join(home, "settler"),
     PORT: String(PORTS.settler),
   });
 }
 
 /**
- * The page, pinned to this desk and, once it exists, this beacon instead of
- * arkade.trade's. The desk's nostr key is known before the desk starts, so the
- * page can go up first and be rebuilt when the beacon is deployed.
+ * Build the page pinned to this desk and oracle pubkey. Both keys are known
+ * before the services start, so the page can come up immediately.
  */
 function buildPage(key, oracle) {
   const config = path.join(home, "site.json");
   const oraclePubkey = oracle?.pubkeys?.[0] || getPublicKey(Uint8Array.from(Buffer.from(key.oracleKey, "hex")));
-  const status = oracle && oracle.issueTxid && oracle.assetId && oracle.address
-    ? { pubkeys: oracle.pubkeys, assetId: oracle.assetId, issueTxid: oracle.issueTxid, address: oracle.address, args: oracle.args }
-    : null;
   const pubkey = getPublicKey(Uint8Array.from(Buffer.from(key.deskKey, "hex")));
   const backupPubkey = process.env.BACKUP_EMULATOR_PUBKEY?.trim().toLowerCase();
   const stakeMax = process.env.DESK_STAKE_MAX?.trim();
@@ -335,7 +309,6 @@ function buildPage(key, oracle) {
       network: netId,
       desks: [{ name: isMainnet ? "COINFLIP" : "Demo desk", pubkey }],
       oraclePubkey,
-      beacon: status,
       setup: !isMainnet,
       ...(backupPubkey ? { backupPubkey } : {}),
       ...(stakeMax ? { stakeMax } : {}),
@@ -414,7 +387,7 @@ function pages() {
   return match[0];
 }
 
-/** The desk float and the oracle balance move as deposits land; the page reads them here. */
+/** The desk float moves as deposits land; the page reads it here. */
 async function watchSetup() {
   for (;;) {
     try {
@@ -449,14 +422,14 @@ say("");
 const oracle = await oracleUp(key);
 buildPage(key, oracle);
 const desk = await deskUp(key, oracle);
-settlerUp(key);
+settlerUp();
 void watchSetup();
 
 say("");
 say("The demo is running.");
 say(server ? `  Page      port ${PORTS.page}` : `  Page      http://127.0.0.1:${PORTS.page}/#/predict`);
 if (publicUrl) say(`  Public    ${publicUrl}/#/predict`);
-say(isMainnet ? `  Oracle    ${oracleUrl}/` : `  Oracle    ${oracleUrl}/  (admin token in ${path.join(home, "keys.json")})`);
+say(isMainnet ? `  Oracle    ${oracleUrl}/api/status` : `  Oracle    ${oracleUrl}/api/status  (admin token in ${path.join(home, "keys.json")})`);
 say(`  Desk      ${deskUrl}/status  (float ${desk.address})`);
 say(`  Settler   http://127.0.0.1:${PORTS.settler}/status`);
 say(`  Logs      ${path.join(home, "logs")}`);

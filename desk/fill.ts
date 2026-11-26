@@ -1,6 +1,6 @@
 import { arkade, DefaultVtxo, type ArkTxInput } from "@arkade-os/sdk";
 
-import { DUST_SATS, isPredict } from "../protocol/constants.ts";
+import { DUST_SATS } from "../protocol/constants.ts";
 import { bindContracts, type Terms } from "../protocol/contracts.ts";
 import { bytesToHex } from "../protocol/hex.ts";
 import { classifyIntent, psbtView } from "../protocol/intent-state.ts";
@@ -8,7 +8,7 @@ import { intentProgram } from "../protocol/programs.ts";
 import { virtualTxsById } from "../protocol/virtual-txs.ts";
 import type { QuoteRow } from "./book.ts";
 import { finalizeDeskSpends, pendingOutpoints, settleEmulatorTx, type PendingArk } from "./finalize.ts";
-import { beaconExpiryRefusal, coinOutlives, minCoinExpiry, minFillCoinExpiry } from "./guards.ts";
+import { coinOutlives, minCoinExpiry } from "./guards.ts";
 
 type Client = Awaited<ReturnType<typeof arkade.Arkade.connect>>;
 export type Coin = { txid: string; vout: number; value: number; expiresAt?: Date };
@@ -72,11 +72,11 @@ export type FillResult = "waiting" | "filled" | "expired" | "short" | "declined"
 export type PredictFillVerdict = "allow" | "decline" | "retry";
 
 /**
- * Happy path. Options: collateral on the intent is finalized, premium to the
- * writer, collateral to the vault. Predict: the stake on the intent goes to the
- * desk and the desk's float funds the payout into the vault.
+ * Fill a funded Predict intent (`OptionIntent` side 1): the bettor's stake goes
+ * to the desk (output 0) and the desk's float funds the full payout into
+ * `PredictVault` (output 1).
  * No live coin: recover a prior finalize from spent history before expiring past the deadline.
- * A live coin past the wall-clock deadline expires; the user cancels that coin.
+ * A live coin past the wall-clock deadline expires; the bettor (or executord) cancels it.
  */
 export async function fillQuote(opts: {
   client: Client;
@@ -88,88 +88,59 @@ export async function fillQuote(opts: {
   float?: Coin[];
   /**
    * Ark server that can finish a covenant spend. `send()` stops after the emulator
-   * submits; without finalizeTx the premium and the desk change never become vtxos.
+   * submits; without finalizeTx the stake and desk change never become vtxos.
    */
   ark?: PendingArk;
-  beaconExpiry?: number | null;
-  ratchetMargin?: number;
   checkPredict?: (row: QuoteRow, now: number) => Promise<PredictFillVerdict>;
 }): Promise<{ result: FillResult; reason?: string; txid?: string; spent?: Coin[] }> {
   const bound = bindContracts(opts.termsFor(opts.row));
   const intent = opts.client.contract(intentProgram(), bound.intent);
   const coins = await intent.getUtxos();
   const collateral = BigInt(opts.row.collateral);
-  const premium = BigInt(opts.row.premium);
-  const predict = isPredict(opts.row.kind);
-  // The user's coin: the collateral they lock, or the stake they bet.
-  const locks = predict ? premium : collateral;
-  // PredictVaultV3 settles standalone with direct signatures (no shared beacon coin), so it only
-  // needs inputs that outlive settlement margin — never anchored to a beacon coin's expiry.
-  const minExpiry = predict
-    ? minCoinExpiry(opts.row.expiry)
-    : minFillCoinExpiry(opts.row.expiry, opts.beaconExpiry ?? null, undefined, opts.ratchetMargin);
-  const funding = coins.filter((item) => BigInt(item.value) >= locks);
+  const stake = BigInt(opts.row.premium);
+  const minExpiry = minCoinExpiry(opts.row.expiry);
+  const funding = coins.filter((item) => BigInt(item.value) >= stake);
   const coin = funding.find((item) => coinOutlives(item, minExpiry));
   if (!coin) {
     const intentScript = bytesToHex(intent.pkScript);
     const recovered = await recoverFilled(opts.client, bound.userPkScript, intentScript, {
       collateral,
-      premium,
+      premium: stake,
       now: opts.now,
       deadline: opts.row.deadline,
-      ...(predict ? { side: 1 as const, vaultScript: bytesToHex(bound.vaultPkScript) } : {}),
+      vaultScript: bytesToHex(bound.vaultPkScript),
     });
     if (recovered) return { result: "filled", txid: recovered };
     if (funding.length > 0) return opts.now >= opts.row.deadline ? { result: "expired" } : { result: "declined", reason: "coin_expiry" };
-    // Spent, but the payout vtxo is not in the indexer yet. Expiring here drops the retry.
-    if (await collateralSpent(opts.client, intentScript, locks)) return { result: "waiting" };
+    // Spent, but the vault vtxo is not in the indexer yet. Expiring here drops the retry.
+    if (await collateralSpent(opts.client, intentScript, stake)) return { result: "waiting" };
     return { result: opts.now >= opts.row.deadline ? "expired" : "waiting" };
   }
   if (opts.now >= opts.row.deadline) return { result: "expired" };
-  if (!predict && "beaconExpiry" in opts && beaconExpiryRefusal(opts.row.expiry, opts.beaconExpiry ?? null)) {
-    return { result: "declined", reason: "beacon_expiry" };
-  }
-  if (predict && opts.checkPredict) {
+  if (opts.checkPredict) {
     const verdict = await opts.checkPredict(opts.row, opts.now);
     if (verdict === "decline") return { result: "declined", reason: "price_moved" };
     if (verdict === "retry") return { result: "waiting" };
   }
 
-  // The desk pays the premium for an option, and the whole payout for a prediction.
-  const outlay = predict ? collateral : premium;
   const float = opts.float ?? await deskFloat(opts.client, opts.deskScript);
-  const picked = selectFloat(float, outlay, minExpiry, { allowSmallChange: predict });
+  const picked = selectFloat(float, collateral, minExpiry, { allowSmallChange: true });
   if (!picked) return { result: "short" };
 
   const locked = BigInt(coin.value);
   const deskSum = picked.reduce((sum, item) => sum + BigInt(item.value), 0n);
   const funded = intent.functions.finalize().from(coin).fund(picked.map((item) => asInput(item, opts.deskScript)));
-  let spend;
-  if (predict) {
-    // OptionIntent side 1: output 0 pays the stake to the desk, output 1 funds
-    // the vault, output 2 returns change above dust to the bettor. The desk's
-    // own surplus rides on output 0, its own script.
-    const change = locked - premium;
-    const back = change > DUST_SATS ? change : 0n;
-    const deskAmount = premium + (change - back) + (deskSum - collateral);
-    spend = funded.to([
-      { script: bound.solverPkScript, amount: deskAmount },
-      { script: bound.vaultPkScript, amount: collateral },
-      ...(back > 0n ? [{ script: bound.userPkScript, amount: back }] : []),
-    ]);
-  } else {
-    let writerAmount = premium + (locked - collateral);
-    let surplus = deskSum - premium;
-    if (surplus > 0n && surplus <= DUST_SATS) {
-      writerAmount += surplus;
-      surplus = 0n;
-    }
-    spend = funded.to([
-      { script: bound.writerPkScript, amount: writerAmount },
-      { script: bound.vaultPkScript, amount: collateral },
-    ]);
-    if (surplus > 0n) spend.change(opts.deskScript.pkScript);
-  }
+  // OptionIntent side 1: output 0 pays the stake (+ desk surplus + any user dust) to the desk,
+  // output 1 funds PredictVault with collateral, output 2 returns user change above dust.
+  const change = locked - stake;
+  const back = change > DUST_SATS ? change : 0n;
+  const deskAmount = stake + (change - back) + (deskSum - collateral);
+  const spend = funded.to([
+    { script: bound.solverPkScript, amount: deskAmount },
+    { script: bound.vaultPkScript, amount: collateral },
+    ...(back > 0n ? [{ script: bound.userPkScript, amount: back }] : []),
+  ]);
+
   // Covenant send() posts to the emulator and returns. The emulator submits to arkd
   // only when it is the last signer, and it may do that submit and then fail its own
   // finalize. The thrown error still leaves the inputs spent, so a failed send has to
@@ -241,13 +212,13 @@ async function finishSpend(opts: {
 
 /**
  * If finalize already landed but the book never saved, classify the spend as filled.
- * `writerPkScript` is the user's script: the writer for options, the bettor for predict.
+ * `userPkScript` is the bettor's script.
  */
 export async function recoverFilled(
   client: Client,
-  writerPkScript: Uint8Array,
+  userPkScript: Uint8Array,
   intentScriptHex: string,
-  terms: { collateral: bigint; premium: bigint; now: number; deadline: number; side?: 0 | 1; vaultScript?: string },
+  terms: { collateral: bigint; premium: bigint; now: number; deadline: number; vaultScript: string },
 ): Promise<string | undefined> {
   if (!client.indexer) return undefined;
   const intentScript = intentScriptHex.toLowerCase();
@@ -276,25 +247,23 @@ export async function recoverFilled(
     spends,
     collateral: terms.collateral,
     premium: terms.premium,
-    writerScript: bytesToHex(writerPkScript),
+    writerScript: bytesToHex(userPkScript),
     now: terms.now,
     deadline: terms.deadline,
-    side: terms.side,
+    side: 1,
     vaultScript: terms.vaultScript,
   });
   if (seen.phase !== "filled") return undefined;
   const txid = seen.closeTxid || coins.find((coin) => spends[coin.spentBy])?.spentBy;
   if (!txid) return undefined;
-  // The virtual tx can exist before arkd finalizes it. The fill landed only once
-  // its output is a vtxo: the writer's premium, or for predict the vault.
-  const landing = terms.side === 1 && terms.vaultScript ? terms.vaultScript : bytesToHex(writerPkScript);
-  const writer = landing.toLowerCase();
-  const payouts = await client.indexer.getVtxos({ scripts: [writer] });
+  // The virtual tx can exist before arkd finalizes it. The fill landed only once the vault vtxo exists.
+  const vault = terms.vaultScript.toLowerCase();
+  const payouts = await client.indexer.getVtxos({ scripts: [vault] });
   const landed = (payouts.vtxos ?? []).some((coin) => (coin.txid || "").toLowerCase() === txid.toLowerCase());
   return landed ? txid : undefined;
 }
 
-/** The user's coin on the intent was spent. `locks` is the collateral, or the stake for predict. */
+/** The bettor's stake coin on the intent was spent. */
 async function collateralSpent(client: Client, intentScript: string, locks: bigint): Promise<boolean> {
   if (!client.indexer) return false;
   const spent = await client.indexer.getVtxos({ scripts: [intentScript], spentOnly: true });

@@ -1,5 +1,5 @@
 {
-  "name": "arkade-options",
+  "name": "coinflip",
   "private": true,
   "type": "module",
   "exports": {
@@ -12,13 +12,12 @@
   "scripts": {
     "dev": "node scripts/dev.mjs",
     "build": "node scripts/build.mjs",
+    "typecheck": "tsc --noEmit",
     "compile:contracts": "node scripts/compile-contracts.mjs",
-    "test": "node --experimental-strip-types --test app/settle-math.test.mjs app/account.test.mjs app/wallet-link.test.mjs app/src/browser-crypto.test.ts app/src/position-status.test.ts app/src/rfq.test.ts protocol/programs.test.ts protocol/protocol.test.ts protocol/lifecycle.test.ts protocol/intent-state.test.ts protocol/deribit.test.ts protocol/window-line.test.ts protocol/beacon.test.ts protocol/dia.test.ts protocol/sqlite-storage.test.ts contracts/index.test.ts oracle/service.test.ts oracle/preview.test.ts desk/book.test.ts desk/digest.test.ts desk/fill.test.ts desk/finalize.test.ts desk/guards.test.ts desk/maintain.test.ts desk/rate-limit.test.ts settle/settle.test.ts settle/predict.test.ts scripts/beacon-renewal.test.mjs scripts/page-server.test.mjs scripts/backup-refund.test.ts",
+    "test": "node --experimental-strip-types --test app/settle-math.test.mjs app/account.test.mjs app/wallet-link.test.mjs app/src/position-status.test.ts app/src/rfq.test.ts protocol/fixing.test.ts protocol/programs.test.ts protocol/protocol.test.ts protocol/intent-state.test.ts protocol/deribit.test.ts protocol/window-line.test.ts protocol/dia.test.ts protocol/sqlite-storage.test.ts contracts/index.test.ts oracle/service.test.ts desk/book.test.ts desk/digest.test.ts desk/fill.test.ts desk/finalize.test.ts desk/guards.test.ts desk/maintain.test.ts desk/rate-limit.test.ts settle/predict.test.ts scripts/page-server.test.mjs scripts/backup-refund.test.ts",
     "settle": "node --experimental-strip-types settle/main.ts",
     "desk": "node --experimental-strip-types --experimental-eventsource desk/main.ts",
-    "oracle:page": "esbuild oracle/page.ts --bundle --format=esm --platform=browser --outfile=oracle/page.js --log-level=warning",
-    "oracle": "pnpm oracle:page && node --experimental-strip-types --experimental-eventsource oracle/main.ts",
-    "e2e": "node --experimental-strip-types scripts/e2e-mutinynet.ts",
+    "oracle": "node --experimental-strip-types oracle/main.ts",
     "demo": "node scripts/demo.mjs",
     "smoke:regtest": "node --experimental-strip-types --test --test-timeout 1800000 scripts/smoke-regtest.test.ts"
   },

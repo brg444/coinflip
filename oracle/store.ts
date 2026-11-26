@@ -4,7 +4,7 @@ import path from "node:path";
 import { writeJsonFile } from "../protocol/sqlite-storage.ts";
 
 export type StoredSample = {
-  /** USD cents derived from the DIA price. What the beacon stores and the settler reads. */
+  /** USD cents derived from the DIA price. */
   price: string;
   time: number;
   /** 18-decimal DIA price. */
@@ -35,34 +35,21 @@ export function pruneFixings(fixings: readonly StoredFixing[], now: number): Sto
 export type StoredFixing = {
   expiry: number;
   price: string;
-  /** Sample time signed for this expiry. The same pair is what a later rewrite may use. */
-  time?: number;
-  raw?: string;
-  nonce?: string;
-  intentExpiry?: number;
-  sig?: string;
+  /** Sample time signed for this expiry. */
+  time: number;
+  raw: string;
+  nonce: string;
+  intentExpiry: number;
+  sig: string;
   /** 64-byte BIP340 Schnorr signature from `oraclePk` over `predictFixDigest`. */
-  oracleSig?: string;
-  txid: string;
+  oracleSig: string;
 };
 
 /**
- * The sample for an expiry. Prefer one taken inside `[expiry, expiry + expiryLag]`.
- * If that minute was missed, the newest sample in the expiryLag before expiry.
- * Anything older is not a fixing.
+ * The canonical sample for an expiry: the newest print strictly inside `[expiry, expiry + expiryLag]`.
+ * PredictVaultV3 rejects any sample outside this window.
  */
 export function chooseSample<T extends { time: number }>(samples: readonly T[], expiry: number, expiryLag: number): T | null {
-  const hi = expiry + expiryLag;
-  const close = samples.filter((sample) => sample.time >= expiry && sample.time <= hi);
-  const pool = close.length > 0
-    ? close
-    : samples.filter((sample) => sample.time >= expiry - expiryLag && sample.time < expiry);
-  if (!pool.length) return null;
-  return pool.reduce((best, sample) => (sample.time >= best.time ? sample : best));
-}
-
-/** Strict in-window fixing sample (`[expiry, expiry + expiryLag]`), with no pre-expiry fallback. */
-export function chooseStrictSample<T extends { time: number }>(samples: readonly T[], expiry: number, expiryLag: number): T | null {
   const hi = expiry + expiryLag;
   const close = samples.filter((sample) => sample.time >= expiry && sample.time <= hi);
   if (!close.length) return null;
@@ -88,14 +75,11 @@ export function windowSettled(
 }
 
 export type OracleFile = {
-  assetId: string | null;
-  issueTxid: string | null;
-  deployTxid: string | null;
   samples: StoredSample[];
   fixings: StoredFixing[];
 };
 
-const empty = (): OracleFile => ({ assetId: null, issueTxid: null, deployTxid: null, samples: [], fixings: [] });
+const empty = (): OracleFile => ({ samples: [], fixings: [] });
 
 function normalizeSample(value: unknown): StoredSample | null {
   if (!value || typeof value !== "object") return null;
@@ -111,15 +95,44 @@ function normalizeSample(value: unknown): StoredSample | null {
   };
 }
 
-/** Only this service writes the file, so it is read back as is. */
+function normalizeFixing(value: unknown): StoredFixing | null {
+  if (!value || typeof value !== "object") return null;
+  const row = value as Partial<StoredFixing>;
+  if (
+    typeof row.expiry !== "number"
+    || typeof row.price !== "string"
+    || typeof row.time !== "number"
+    || typeof row.raw !== "string"
+    || typeof row.nonce !== "string"
+    || typeof row.intentExpiry !== "number"
+    || typeof row.sig !== "string"
+    || typeof row.oracleSig !== "string"
+  ) {
+    return null;
+  }
+  return {
+    expiry: row.expiry,
+    price: row.price,
+    time: row.time,
+    raw: row.raw,
+    nonce: row.nonce,
+    intentExpiry: row.intentExpiry,
+    sig: row.sig,
+    oracleSig: row.oracleSig,
+  };
+}
+
+/** Only this service writes the file, so it is read back as is (ignoring any legacy beacon fields). */
 export async function loadStore(dir: string): Promise<OracleFile> {
   try {
     const parsed = JSON.parse(await readFile(path.join(dir, "oracle.json"), "utf8")) as Partial<OracleFile>;
     return {
-      ...empty(),
-      ...parsed,
-      samples: Array.isArray(parsed.samples) ? parsed.samples.map(normalizeSample).filter((sample): sample is StoredSample => sample != null) : [],
-      fixings: Array.isArray(parsed.fixings) ? parsed.fixings : [],
+      samples: Array.isArray(parsed.samples)
+        ? parsed.samples.map(normalizeSample).filter((sample): sample is StoredSample => sample != null)
+        : [],
+      fixings: Array.isArray(parsed.fixings)
+        ? parsed.fixings.map(normalizeFixing).filter((row): row is StoredFixing => row != null)
+        : [],
     };
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;

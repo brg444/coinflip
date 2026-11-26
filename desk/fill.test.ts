@@ -1,9 +1,7 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
 
-import { asset, SingleKey, Transaction } from "@arkade-os/sdk";
+import { SingleKey, Transaction } from "@arkade-os/sdk";
 import { base64 } from "@scure/base";
 
 import { EXIT } from "../protocol/constants.ts";
@@ -13,101 +11,115 @@ import type { QuoteRow } from "./book.ts";
 import { fillQuote, recoverFilled, selectFloat } from "./fill.ts";
 import { minCoinExpiry } from "./guards.ts";
 
-const writer = "5120806de010d4f26b83a7d2b0cc29973a7ffc3b17d163651bfc4de55aec4cc8d44b";
-const intentScript = "51205327a5c6693c7f8f932418d934b5517509f3d01cc5a3a8f9e509503c15bcf5bd";
-const fillB64 = readFileSync(fileURLToPath(new URL("../protocol/testdata/fill.b64", import.meta.url)), "utf8").trim();
-const fillId = Transaction.fromPSBT(base64.decode(fillB64)).id;
+const bettorScript = "5120" + "11".repeat(32);
+const deskScriptHex = "5120" + "22".repeat(32);
+const vaultScript = "5120" + "33".repeat(32);
+const intentScript = "5120" + "44".repeat(32);
 
-test("recoverFilled classifies a spent intent via indexer history and fill.b64", async () => {
+function predictFillPsbt() {
+  const tx = new Transaction({ version: 3 });
+  tx.addInput({ txid: new Uint8Array(32).fill(1), index: 0 });
+  tx.addInput({ txid: new Uint8Array(32).fill(2), index: 0 });
+  tx.addOutput({ script: hexToBytes(deskScriptHex), amount: 50_000n });
+  tx.addOutput({ script: hexToBytes(vaultScript), amount: 95_000n });
+  return { id: tx.id, b64: base64.encode(tx.toPSBT()) };
+}
+
+test("recoverFilled classifies a spent Predict intent via indexer history and vault output", async () => {
+  const fill = predictFillPsbt();
   const client = {
     indexer: {
       async getVtxos(filter: { scripts?: string[]; spentOnly?: boolean }) {
-        if (filter.scripts?.[0] === writer) {
+        if (filter.scripts?.[0] === vaultScript) {
           assert.equal(filter.spentOnly, undefined);
-          return { vtxos: [{ txid: fillId, value: 414 }] };
+          return { vtxos: [{ txid: fill.id, value: 95_000 }] };
         }
         assert.equal(filter.spentOnly, true);
         assert.deepEqual(filter.scripts, [intentScript]);
         return {
           vtxos: [{
-            value: 20_000,
-            arkTxId: fillId,
-            spentBy: fillId,
+            value: 50_000,
+            arkTxId: fill.id,
+            spentBy: fill.id,
           }],
         };
       },
       async getVirtualTxs(ids: string[]) {
-        assert.deepEqual(ids, [fillId]);
-        return { txs: [fillB64] };
+        assert.deepEqual(ids, [fill.id]);
+        return { txs: [fill.b64] };
       },
     },
   };
 
-  const txid = await recoverFilled(client as never, hexToBytes(writer), intentScript, {
-    collateral: 20_000n,
-    premium: 414n,
+  const txid = await recoverFilled(client as never, hexToBytes(bettorScript), intentScript, {
+    collateral: 95_000n,
+    premium: 50_000n,
     now: 1_790_380_800,
     deadline: 1_790_380_900,
+    vaultScript,
   });
-  assert.equal(txid, fillId);
+  assert.equal(txid, fill.id);
 });
 
-test("recoverFilled waits until the premium output exists as a vtxo", async () => {
+test("recoverFilled waits until the vault output exists as a vtxo", async () => {
+  const fill = predictFillPsbt();
   const client = {
     indexer: {
       async getVtxos(filter: { scripts?: string[]; spentOnly?: boolean }) {
-        if (filter.scripts?.[0] === writer) return { vtxos: [] };
-        return { vtxos: [{ value: 20_000, arkTxId: fillId, spentBy: fillId }] };
+        if (filter.scripts?.[0] === vaultScript) return { vtxos: [] };
+        return { vtxos: [{ value: 50_000, arkTxId: fill.id, spentBy: fill.id }] };
       },
       async getVirtualTxs() {
-        return { txs: [fillB64] };
+        return { txs: [fill.b64] };
       },
     },
   };
-  const txid = await recoverFilled(client as never, hexToBytes(writer), intentScript, {
-    collateral: 20_000n,
-    premium: 414n,
+  const txid = await recoverFilled(client as never, hexToBytes(bettorScript), intentScript, {
+    collateral: 95_000n,
+    premium: 50_000n,
     now: 1_790_380_800,
     deadline: 1_790_380_900,
+    vaultScript,
   });
   assert.equal(txid, undefined);
 });
 
 test("recoverFilled matches virtual txs by decoded PSBT txid even when indexer reorders results", async () => {
+  const fill = predictFillPsbt();
   const other = new Transaction({ version: 3 });
   other.addInput({ txid: new Uint8Array(32).fill(9), index: 0 });
-  other.addOutput({ script: hexToBytes(writer), amount: 100n });
+  other.addOutput({ script: hexToBytes(bettorScript), amount: 50_000n });
   const otherB64 = base64.encode(other.toPSBT());
   const otherId = other.id;
 
   const client = {
     indexer: {
       async getVtxos(filter: { scripts?: string[]; spentOnly?: boolean }) {
-        if (filter.scripts?.[0] === writer) {
-          return { vtxos: [{ txid: fillId, value: 414 }] };
+        if (filter.scripts?.[0] === vaultScript) {
+          return { vtxos: [{ txid: fill.id, value: 95_000 }] };
         }
         return {
           vtxos: [
-            { value: 20_000, arkTxId: otherId, spentBy: otherId },
-            { value: 20_000, arkTxId: fillId, spentBy: fillId },
+            { value: 50_000, arkTxId: otherId, spentBy: otherId },
+            { value: 50_000, arkTxId: fill.id, spentBy: fill.id },
           ],
         };
       },
       async getVirtualTxs(ids: string[]) {
-        assert.deepEqual(ids, [otherId, fillId]);
-        // Return in reversed order from the request.
-        return { txs: [fillB64, otherB64] };
+        assert.deepEqual(ids, [otherId, fill.id]);
+        return { txs: [fill.b64, otherB64] };
       },
     },
   };
 
-  const txid = await recoverFilled(client as never, hexToBytes(writer), intentScript, {
-    collateral: 20_000n,
-    premium: 414n,
+  const txid = await recoverFilled(client as never, hexToBytes(bettorScript), intentScript, {
+    collateral: 95_000n,
+    premium: 50_000n,
     now: 1_790_380_800,
     deadline: 1_790_380_900,
+    vaultScript,
   });
-  assert.equal(txid, fillId);
+  assert.equal(txid, fill.id);
 });
 
 test("selectFloat skips coins expiring before the required settlement margin", () => {
@@ -179,6 +191,10 @@ async function predictFixture(expiry: number, deadline: number) {
     holderPubkey: bytesToHex(bettorPk),
     holderPkScript: bytesToHex(bound.holderPkScript),
     oraclePubkey: bytesToHex(oraclePk),
+    backupPubkey: bytesToHex(emulatorKey.subarray(1)),
+    voidAfter: 86_400,
+    fallbackDelay: 22_016,
+    finalExitDelay: 108_032,
     intentAddress: bound.intentAddress,
     vaultAddress: bound.vaultAddress,
     status: "open",
@@ -188,7 +204,7 @@ async function predictFixture(expiry: number, deadline: number) {
   return { terms, bound, deskScript, row };
 }
 
-test("fillQuote declines short-expiry intent coins, honors checkPredict, and ignores beacon ratchet for Predict", async () => {
+test("fillQuote declines short-expiry intent coins, honors checkPredict, and rejects short float", async () => {
   const now = 1_700_000_000;
   const expiry = now + 300;
   const deadline = now + 60;
@@ -256,30 +272,4 @@ test("fillQuote declines short-expiry intent coins, honors checkPredict, and ign
     checkPredict: async () => "allow",
   });
   assert.equal(shortFloat.result, "short");
-
-  // PredictVaultV3 does not co-spend a beacon coin: neither beaconExpiry=0 nor a far-future beaconExpiry blocks a valid coin.
-  const noBeaconBlock = await fillQuote({
-    client: mockClient([goodCoin]) as never,
-    termsFor: () => terms,
-    deskScript,
-    row,
-    now,
-    beaconExpiry: 0,
-    float: [{ txid: "bb".repeat(32), vout: 0, value: 100_000, expiresAt: new Date((minExpiry + 600) * 1000) }],
-    checkPredict: async () => "retry",
-  });
-  assert.equal(noBeaconBlock.result, "waiting");
-
-  const liveBeacon = expiry + 28 * 86_400;
-  const noRatchetBlock = await fillQuote({
-    client: mockClient([goodCoin]) as never,
-    termsFor: () => terms,
-    deskScript,
-    row,
-    now,
-    beaconExpiry: liveBeacon,
-    float: [{ txid: "bb".repeat(32), vout: 0, value: 100_000, expiresAt: new Date((minExpiry + 600) * 1000) }],
-    checkPredict: async () => "retry",
-  });
-  assert.equal(noRatchetBlock.result, "waiting");
 });

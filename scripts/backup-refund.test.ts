@@ -4,7 +4,7 @@ import test from "node:test";
 import { schnorr } from "@noble/curves/secp256k1.js";
 import { SingleKey } from "@arkade-os/sdk";
 
-import { EXIT, PREDICT_FALLBACK_DELAY, PREDICT_FINAL_EXIT_DELAY, PREDICT_READ_FEE, PREDICT_VOID_AFTER } from "../protocol/constants.ts";
+import { EXIT, PREDICT_FALLBACK_DELAY, PREDICT_FINAL_EXIT_DELAY, PREDICT_VOID_AFTER } from "../protocol/constants.ts";
 import { bindContracts, type Terms } from "../protocol/contracts.ts";
 import { bytesToHex, hexToBytes } from "../protocol/hex.ts";
 import { exitSequence } from "../protocol/programs.ts";
@@ -39,7 +39,6 @@ test("Tier-2 backup-refund builds a valid tweaked refundBackup L1 transaction wi
     voidAfter: PREDICT_VOID_AFTER,
     fallbackDelay: PREDICT_FALLBACK_DELAY,
     finalExitDelay: PREDICT_FINAL_EXIT_DELAY,
-    readFee: PREDICT_READ_FEE,
     serverKey,
     emulatorKey,
   };

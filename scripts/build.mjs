@@ -20,7 +20,6 @@ await esbuild.build({
   outfile: path.join(dist, "app.js"),
   platform: "browser",
   target: "es2022",
-  alias: { "node:crypto": path.join(root, "app/src/browser-crypto.ts") },
   minify: true,
   sourcemap: !isMainnet && process.env.SOURCEMAP !== "0",
   logLevel: "info",

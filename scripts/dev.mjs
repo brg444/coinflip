@@ -34,7 +34,6 @@ const ctx = await esbuild.context({
   outfile: path.join(dist, "app.js"),
   platform: "browser",
   target: "es2022",
-  alias: { "node:crypto": path.join(root, "app/src/browser-crypto.ts") },
   sourcemap: true,
   logLevel: "info",
   plugins: [
@@ -58,10 +57,9 @@ const types = {
 };
 http
   .createServer((req, res) => {
-    let url;
     let rel;
     try {
-      url = new URL(req.url ?? "/", "http://localhost");
+      const url = new URL(req.url ?? "/", "http://localhost");
       rel = decodeURIComponent(url.pathname);
     } catch {
       res.writeHead(400);
@@ -89,5 +87,5 @@ http
     stream.pipe(res);
   })
   .listen(port, "127.0.0.1", () => {
-    console.log(`options http://127.0.0.1:${port}`);
+    console.log(`coinflip http://127.0.0.1:${port}`);
   });

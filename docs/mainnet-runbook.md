@@ -19,9 +19,9 @@ Setting `NETWORK=bitcoin` selects the Bitcoin mainnet profile in `protocol/netwo
 
 On `NETWORK=bitcoin`, `scripts/demo.mjs` refuses to auto-generate keys and exits unless all four secrets are supplied via encrypted environment variables:
 
-1. `ORACLE_KEY` — 64-hex private key for the stateless oracle (`PredictVaultV3.oraclePk` canonical fixing co-signer).
+1. `ORACLE_KEY` — 64-hex private key for the stateless oracle (`PredictVault.oraclePk`), which co-signs canonical DIA fixings via BIP340 Schnorr. Holds no Arkade wallet or funds.
 2. `DESK_KEY` — 64-hex private key for the desk Nostr identity & float wallet (must differ from `ORACLE_KEY`).
-3. `ORACLE_ADMIN` — random bearer token (`>= 16` chars) protecting oracle admin endpoints and desk `/drain`.
+3. `ORACLE_ADMIN` — random bearer token (`>= 16` chars) protecting oracle `/api/intent` and desk `/drain` (unless `DESK_ADMIN` is set separately).
 4. `BACKUP_EMULATOR_PUBKEY` — 64-hex x-only public key of an **independent** Tier-2 backup keypair (must differ from `DESK_KEY`, `ORACLE_KEY`, and `emulator.arkade.computer`). Keep the corresponding `BACKUP_KEY` offline / separate from the server.
 
 Generate fresh independent keys locally (never commit or log them):
@@ -46,44 +46,33 @@ ORACLE_ADMIN=<secret>
 BACKUP_EMULATOR_PUBKEY=<64-hex x-only pubkey>
 ```
 
-Optional overrides: `DESK_STAKE_MAX`, `DESK_STRIKE_CAP`, `DESK_TOTAL_CAP`, `DESK_DRAIN`, `BEACON_RENEW_BEFORE_S` (default `432000` / 5 days on mainnet), `ALERT_WEBHOOK_URL` (optional webhook for `[ALERT]` notifications on renewal failure or upcoming `deprecatedSigners` cutoff).
+Optional overrides: `DESK_ADMIN`, `DESK_STAKE_MAX`, `DESK_STRIKE_CAP`, `DESK_TOTAL_CAP`, `DESK_DRAIN`, `DESK_LINE_MODE` (`any` or `window`), `DESK_EDGE`, `DESK_VOL`.
 
 Startup sequence:
 1. Deploy the service. `/demo.json` returns `{ "ok": true, "network": "bitcoin", "stage": "..." }` (setup wizard and wallet balances are not exposed publicly on mainnet).
-2. Verify the stateless oracle is live and streaming DIA prints via `railway ssh -- wget -qO- http://127.0.0.1:8789/api/status` (no oracle wallet funding is needed for `PredictVaultV3`).
+2. Verify the stateless oracle is streaming DIA prices via `railway ssh -- wget -qO- http://127.0.0.1:8789/api/status` (no wallet funding needed).
 3. Inspect the desk funding address via `railway ssh -- wget -qO- http://127.0.0.1:8788/status` and fund the canary float (e.g., 1,000,000–5,000,000 sats).
-4. Place one minimum-size (10,000 sats) canary prediction end-to-end and verify fill, `/api/fixing`, and automatic standalone settlement.
+4. Place one minimum-size (10,000 sats) canary prediction end-to-end and verify fill, canonical fixing (`GET /api/fixing?expiry=<unix>`), and automatic settlement.
 
 ## 4. Routine Maintenance
 
-### A. Stateless Predict Oracle & Graceful Desk Drain
+### A. Graceful Drain & Redeploy
 
-`PredictVaultV3` settles standalone with direct DIA + `oraclePk` signatures and has no shared beacon VTXO to renew. To pause quoting cleanly before maintenance or upgrades:
+Before rotating keys or performing maintenance on the desk:
 
-1. Enable graceful drain:
+1. Enable graceful drain (stops quoting new bets while letting live quotes and vaults settle):
    ```bash
    curl -X POST -H "Authorization: Bearer $ORACLE_ADMIN" "http://127.0.0.1:8788/drain?enabled=1"
    ```
-2. Wait until `quoteCounts.live == 0` on desk `/status` and open vaults settle.
-3. Re-enable quoting:
+2. Wait until `quoteCounts.live == 0` on `http://127.0.0.1:8788/status` and all open vaults have settled on `http://127.0.0.1:8790/status`.
+3. Perform maintenance / deploy, then re-enable quoting:
    ```bash
    curl -X POST -H "Authorization: Bearer $ORACLE_ADMIN" "http://127.0.0.1:8788/drain?enabled=0"
    ```
 
-*(Legacy `AttestationBeacon` 30-day batch renewal applies only if an `OptionVault` beacon deployment is running separately.)*
+### B. Unfixed Windows (Void Refund)
 
-### B. Contract Upgrade or `arkd` Server Key Rotation (`deprecatedSigners`)
-
-Monitor `deprecatedSigners` on `http://127.0.0.1:8789/api/status`. Before any `cutoffDate` (or before deploying a new `AttestationBeacon` artifact):
-
-1. Drain the desk (`POST /drain?enabled=1`) and wait for all open positions to settle.
-2. Deploy the new code (for contract upgrades) and run:
-   ```bash
-   NETWORK=bitcoin OLD_ARTIFACT=/path/to/prev.artifact.json \
-     node --experimental-strip-types scripts/migrate-beacon.ts
-   ```
-   For server-key rotation with the same artifact, pass `OLD_SERVER_KEY=<64-hex deprecated pubkey>`.
-3. Verify `beaconExpiry > 0` on both oracle and desk `/status`, then disable drain (`POST /drain?enabled=0`).
+If DIA fails to emit any `BTC/USD` update within `[expiry, expiry + 60]` (or the oracle cannot produce a fixing), `PredictVault.settle()` cannot execute. After `expiry + voidAfter` (24 hours), the settler automatically invokes `PredictVault.refund()` (returning `stake` to the bettor and `collateral - stake` to the desk), or anyone can trigger **Void & refund stake** from the position page.
 
 ### C. Tier-2 Emergency Recovery (`PredictVault.refundBackup`)
 

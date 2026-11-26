@@ -8,12 +8,12 @@ import { EXIT } from "../../protocol/constants.ts";
 import { bindContracts } from "../../protocol/contracts.ts";
 import { cancelIntentDelegation, executorArtifact, reboardVaultDelegation, scriptNumHex } from "../../protocol/executor.ts";
 import { bytesToHex } from "../../protocol/hex.ts";
-import { LIVE_BEACON_STATUS } from "./beacon-status.ts";
+import { MUTINYNET_ORACLE_PUBKEY } from "../rfq-config.js";
 import { explainError } from "./explain.ts";
 import { backupKeyMatches, oracleKeyMatches } from "./rfq.ts";
 
 test("oracleKeyMatches accepts only the pinned oracle x-only pubkey", () => {
-  const pinned = LIVE_BEACON_STATUS.args.adminPk;
+  const pinned = MUTINYNET_ORACLE_PUBKEY;
   assert.equal(oracleKeyMatches(pinned, pinned), true);
   assert.equal(oracleKeyMatches(pinned.toUpperCase(), pinned), true);
   assert.equal(oracleKeyMatches("00".repeat(32), pinned), false);

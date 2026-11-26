@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { asset, SingleKey } from "@arkade-os/sdk";
+import { SingleKey } from "@arkade-os/sdk";
 
-import { EXIT, PREDICT_READ_FEE } from "../protocol/constants.ts";
+import { EXIT } from "../protocol/constants.ts";
 import { bindContracts, directPayoutKey, payoutVtxo } from "../protocol/contracts.ts";
 import { bytesToHex } from "../protocol/hex.ts";
 import { clearAddress, parseWriterAddress, paymentUri, readAddress, readPubkey, saveAddress, verifiedSignerKey } from "./src/fund.ts";
@@ -71,7 +71,6 @@ test("wallet connect signer pubkey verifies against DefaultVtxo and binds identi
     writerPk: deskKey,
     holderPk: verified,
     oraclePk: oracleKey,
-    readFee: PREDICT_READ_FEE,
     serverKey,
     emulatorKey,
   };

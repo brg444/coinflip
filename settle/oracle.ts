@@ -1,26 +1,12 @@
 import { schnorr } from "@noble/curves/secp256k1.js";
-import { asset } from "@arkade-os/sdk";
 
-import { beaconIdOf } from "../protocol/beacon-id.ts";
-import { predictFixDigest } from "../protocol/beacon.ts";
 import { centsOf, intentSigned } from "../protocol/dia.ts";
-import { bytesToHex, hexToBytes } from "../protocol/hex.ts";
+import { FIX_EXPIRY_LAG, predictFixDigest } from "../protocol/fixing.ts";
+import { bytesToHex } from "../protocol/hex.ts";
 
 /**
- * The oracle's public status. Settlement needs the beacon constructor from
- * here, then reads the price from the beacon coin itself.
+ * Client helpers for the stateless fixing oracle (`/api/status`, `/api/prices`, `/api/fixing`).
  */
-
-export type BeaconSpec = {
-  assetId: string;
-  address: string;
-  domain: Uint8Array;
-  expiryLag: bigint;
-  readFee: bigint;
-  adminPk: Uint8Array;
-  exit: bigint;
-  beaconExpiry?: number | null;
-};
 
 export type OracleLatest = { cents: bigint; time: number };
 
@@ -42,8 +28,6 @@ export type OracleFixing = {
   oraclePk: Uint8Array;
   oraclePkHex: string;
 };
-
-export type ParsedBeacon = { ok: true; beacon: BeaconSpec } | { ok: false; error: string };
 
 const HEX = /^[0-9a-fA-F]+$/;
 
@@ -102,59 +86,6 @@ export async function fetchOracleStatus(origin: string, signal?: AbortSignal): P
   return await res.json();
 }
 
-/**
- * Accept a deployed oracle `/api/status` body.
- * When `beaconTxid` is set, the body must be that identity asset.
- */
-export function parseOracleBeacon(body: unknown, beaconTxid?: string, gidx = 0, expectedHrp?: string): ParsedBeacon {
-  const root = record(body);
-  if (!root) return { ok: false, error: "oracle status" };
-  const issue = typeof root.issueTxid === "string" ? root.issueTxid.toLowerCase() : "";
-  if (!/^[0-9a-f]{64}$/.test(issue)) return { ok: false, error: "oracle beacon" };
-  const expected = beaconTxid?.toLowerCase();
-  if (expected && issue !== expected) return { ok: false, error: "oracle beacon" };
-  if (typeof root.assetId !== "string") return { ok: false, error: "oracle asset" };
-  let parsed: ReturnType<typeof asset.AssetId.fromString>;
-  try {
-    parsed = asset.AssetId.fromString(root.assetId);
-  } catch {
-    return { ok: false, error: "oracle asset" };
-  }
-  if (bytesToHex(parsed.txid) !== issue) return { ok: false, error: "oracle asset" };
-  if (expected && Number(parsed.groupIndex) !== gidx) return { ok: false, error: "oracle beacon" };
-  const addr = typeof root.address === "string" ? root.address : "";
-  const validAddr = expectedHrp ? addr.startsWith(`${expectedHrp}1`) : (addr.startsWith("ark1") || addr.startsWith("tark1"));
-  if (!validAddr) return { ok: false, error: "oracle address" };
-  const args = record(root.args);
-  if (!args) return { ok: false, error: "oracle args" };
-  const ctrl = typeof args.ctrlTxid === "string" ? args.ctrlTxid.toLowerCase() : "";
-  if (ctrl !== bytesToHex(beaconIdOf(parsed).txid)) return { ok: false, error: "ctrl txid" };
-  const expiryLag = whole(args.expiryLag);
-  const readFee = whole(args.readFee);
-  const exit = whole(args.exit);
-  const domain = typeof args.domain === "string" && args.domain.length > 0 && args.domain.length % 2 === 0 && HEX.test(args.domain)
-    ? hexBytes(args.domain, args.domain.length / 2)
-    : null;
-  const adminPk = hexBytes(args.adminPk, 32);
-  if (expiryLag == null || readFee == null || exit == null || !domain || !adminPk) return { ok: false, error: "oracle args" };
-  const beaconExpiry = typeof root.beaconExpiry === "number" && Number.isSafeInteger(root.beaconExpiry) && root.beaconExpiry >= 0
-    ? root.beaconExpiry
-    : null;
-  return {
-    ok: true,
-    beacon: {
-      assetId: parsed.toString(),
-      address: addr,
-      domain,
-      expiryLag,
-      readFee,
-      adminPk,
-      exit,
-      beaconExpiry,
-    },
-  };
-}
-
 export function parseOracleLatest(body: unknown): OracleLatest | null {
   const root = record(body);
   const latest = record(root?.latest);
@@ -165,7 +96,7 @@ export function parseOracleLatest(body: unknown): OracleLatest | null {
   return { cents, time };
 }
 
-/** Extract the oracle's x-only signing pubkey and expiry lag from `/api/status` (works with or without a beacon). */
+/** Extract the oracle's x-only signing pubkey and expiry lag from `/api/status`. */
 export function parseOracleKey(body: unknown): OracleKeyInfo | null {
   const root = record(body);
   if (!root) return null;
@@ -177,7 +108,7 @@ export function parseOracleKey(body: unknown): OracleKeyInfo | null {
       : "";
   const oraclePk = hexBytes(adminRaw, 32);
   if (!oraclePk) return null;
-  const expiryLag = whole(args?.expiryLag) ?? 60n;
+  const expiryLag = whole(args?.expiryLag) ?? FIX_EXPIRY_LAG;
   return { oraclePk, oraclePkHex: bytesToHex(oraclePk), expiryLag };
 }
 
@@ -198,7 +129,7 @@ export function parseOracleFixing(body: unknown, expectedOraclePkHex?: string): 
   }
   const oraclePkHex = bytesToHex(oraclePk);
   if (expectedOraclePkHex && oraclePkHex !== expectedOraclePkHex.trim().toLowerCase()) return null;
-  if (time < expiry || time > expiry + 60) return null;
+  if (time < expiry || time > expiry + Number(FIX_EXPIRY_LAG)) return null;
   let cents: bigint;
   try {
     cents = centsOf(price);

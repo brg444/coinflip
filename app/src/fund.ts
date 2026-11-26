@@ -2,11 +2,9 @@ import {
   ArkAddress,
   BIP21,
   arkade,
-  asset,
   ContractManager,
   IndexedDBContractRepository,
   IndexedDBWalletRepository,
-  networks,
   RestArkProvider,
   RestEmulatorProvider,
   RestIndexerProvider,
@@ -14,15 +12,14 @@ import {
   type ContractEvent,
 } from "@arkade-os/sdk";
 
-import { beaconIdOf } from "../../protocol/beacon-id.ts";
-import { BEACON_READ_FEE, DUST_SATS, isPredict, PREDICT_READ_FEE, type Kind } from "../../protocol/constants.ts";
+import intentArtifact from "../../contracts/option_intent.artifact.json" with { type: "json" };
+import predictArtifact from "../../contracts/predict_vault.artifact.json" with { type: "json" };
+import { DUST_SATS, type PredictKind } from "../../protocol/constants.ts";
 import { assertServerExit, bindContracts, payoutVtxo, type Terms } from "../../protocol/contracts.ts";
 import { cancelIntentDelegation, cancelIntentTemplate, Executor, reboardVaultDelegation, reboardVaultTemplate } from "../../protocol/executor.ts";
 import { bytesToHex, hexToBytes, xOnly } from "../../protocol/hex.ts";
 import { networkByName, networkProfile, type NetworkProfile } from "../../protocol/network.ts";
-import { intentProgram, vaultProgram, vaultProgramFor } from "../../protocol/programs.ts";
-import intentArtifact from "../../contracts/option_intent.artifact.json" with { type: "json" };
-import predictArtifact from "../../contracts/predict_vault.artifact.json" with { type: "json" };
+import { intentProgram, predictVaultProgram } from "../../protocol/programs.ts";
 
 type DemoConfig = {
   network?: string;
@@ -54,37 +51,24 @@ const NETWORK_NAME = ACTIVE_PROFILE.label;
 export const WALLET_URL = demoCfg?.walletUrl?.trim() || ACTIVE_PROFILE.walletUrl;
 
 /**
- * Options: the page is the writer. `collateral` is what it locks, `premium`
- * what the desk pays, `holderPkHex` the desk. Predict: the page is the holder.
- * `premium` is the stake, `collateral` the payout, `writerPkHex` the desk, and
- * `holderAddress` the bettor's own address.
+ * PredictVaultV3 funding request: the bettor holds (`holderAddress`), pays
+ * `premium` (stake), and the desk (`writerPkHex`) locks `collateral` (full payout).
  */
 export type FundRequest = {
-  kind: Kind;
+  kind: PredictKind;
   strike: bigint;
   collateral: bigint;
   premium: bigint;
   expiry: bigint;
   deadline: bigint;
-  /** Pasted Mutinynet address. Premium and settlement pay its taproot key. */
-  writerAddress?: string;
-  /** Older positions that stored a private key. */
-  writerHex?: string;
-  holderPkHex?: string;
-  /** Predict: the bettor's address. The payout and a refund pay its taproot key. */
-  holderAddress?: string;
+  holderAddress: string;
   holderPubkey?: string;
-  /** Predict: the desk's key. */
-  writerPkHex?: string;
-  /** Predict: the oracle's x-only pubkey co-signing canonical fixings. */
-  oraclePkHex?: string;
+  writerPkHex: string;
+  oraclePkHex: string;
   backupPkHex?: string;
   voidAfter?: bigint;
   fallbackDelay?: bigint;
   finalExitDelay?: bigint;
-  /** Options: display txid of the beacon identity asset. */
-  beaconTxidHex?: string;
-  beaconGidx?: number;
   exit?: bigint;
 };
 
@@ -94,12 +78,8 @@ export type Deposit = {
   vaultAddress: string;
   amountSats: bigint;
   uri: string;
-  holderPkHex: string;
-  /** Predict: the desk's key. */
   writerPkHex: string;
   oraclePkHex: string;
-  beaconTxidHex: string;
-  beaconGidx: number;
   exit: number;
 };
 
@@ -317,66 +297,6 @@ export async function deskPkScript(deskPkHex: string, exit?: bigint | number): P
   return bytesToHex(payoutVtxo(hexToBytes(deskPkHex), client.serverKey, exit ? BigInt(exit) : ACTIVE_PROFILE.exit).pkScript);
 }
 
-async function build(req: FundRequest) {
-  if (isPredict(req.kind)) return buildPredict(req);
-  if (!req.holderPkHex || !req.beaconTxidHex) {
-    throw new Error("Selling needs a desk quote that names the beacon.");
-  }
-  let writerPk: Uint8Array;
-  let payoutKey: Uint8Array | undefined;
-  let serverKey: Uint8Array;
-  let emulatorKey: Uint8Array;
-  let identity: SingleKey;
-  if (req.writerAddress) {
-    const binding = await writerBinding(req.writerAddress);
-    writerPk = binding.payoutKey;
-    payoutKey = binding.payoutKey;
-    serverKey = binding.serverKey;
-    emulatorKey = binding.emulatorKey;
-    identity = SingleKey.fromHex(sessionHex());
-  } else if (req.writerHex) {
-    identity = SingleKey.fromHex(req.writerHex);
-    const { client } = await openSession(identity);
-    if (!client.emulatorKey) throw new Error("The emulator key is missing.");
-    await assertServerExit(ACTIVE_ARK_URL, req.exit ?? ACTIVE_PROFILE.exit);
-    writerPk = await identity.xOnlyPublicKey();
-    serverKey = client.serverKey;
-    emulatorKey = client.emulatorKey;
-  } else {
-    throw new Error("Paste your Arkade address first.");
-  }
-  const { client } = await openSession(identity);
-  const holderPk = hexToBytes(req.holderPkHex);
-  const beaconTxidHex = req.beaconTxidHex.toLowerCase();
-  const beaconGidx = req.beaconGidx ?? 0;
-  const exit = req.exit ?? ACTIVE_PROFILE.exit;
-  const terms: Terms = {
-    kind: req.kind,
-    strike: req.strike,
-    collateral: req.collateral,
-    premium: req.premium,
-    expiry: req.expiry,
-    deadline: req.deadline,
-    exit,
-    writerPk,
-    payoutKey,
-    holderPk,
-    beacon: beaconIdOf(asset.AssetId.create(beaconTxidHex, beaconGidx)),
-    readFee: BEACON_READ_FEE,
-    serverKey,
-    emulatorKey,
-    hrp: ACTIVE_PROFILE.hrp,
-  };
-  const bound = bindContracts(terms);
-  const intent = client.contract(intentProgram(), bound.intent);
-  const vault = client.contract(vaultProgram(), bound.vault);
-  if (intent.address !== bound.intentAddress || vault.address !== bound.vaultAddress) {
-    throw new Error("The contract address does not match the local derivation.");
-  }
-  return { bound, intent, vault, deskPk: holderPk, oraclePkHex: "", beaconTxidHex, beaconGidx, exit, client, terms };
-}
-
-/** Predict: the bettor holds, and their address is paid. The desk writes. */
 async function buildPredict(req: FundRequest) {
   if (!req.writerPkHex || !req.oraclePkHex) {
     throw new Error("A prediction needs a desk quote that names the oracle.");
@@ -404,23 +324,22 @@ async function buildPredict(req: FundRequest) {
     voidAfter: req.voidAfter ?? ACTIVE_PROFILE.voidAfter,
     fallbackDelay: req.fallbackDelay ?? ACTIVE_PROFILE.fallbackDelay,
     finalExitDelay: req.finalExitDelay ?? ACTIVE_PROFILE.finalExitDelay,
-    readFee: PREDICT_READ_FEE,
     serverKey: binding.serverKey,
     emulatorKey: binding.emulatorKey,
     hrp: ACTIVE_PROFILE.hrp,
   };
   const bound = bindContracts(terms);
   const intent = client.contract(intentProgram(), bound.intent);
-  const vault = client.contract(vaultProgramFor(req.kind), bound.vault);
+  const vault = client.contract(predictVaultProgram(), bound.vault);
   if (intent.address !== bound.intentAddress || vault.address !== bound.vaultAddress) {
     throw new Error("The contract address does not match the local derivation.");
   }
-  return { bound, intent, vault, deskPk: writerPk, oraclePkHex, beaconTxidHex: "", beaconGidx: 0, exit, client, terms };
+  return { bound, intent, vault, deskPk: writerPk, oraclePkHex, exit, client, terms };
 }
 
 /** The same contract the quote was built from, plus the connected Arkade client. */
 export async function openContract(req: FundRequest) {
-  const built = await build(req);
+  const built = await buildPredict(req);
   if (!built.client.emulator || !built.client.emulatorKey || !built.client.indexer) {
     throw new Error("The emulator is missing.");
   }
@@ -428,30 +347,25 @@ export async function openContract(req: FundRequest) {
 }
 
 /**
- * Mutinynet address the user funds: the collateral a seller locks, or the
- * stake a bettor puts in. It stays theirs until the desk finalizes.
+ * Intent address the bettor funds with their stake. It stays theirs until the desk finalizes.
  */
 export async function depositAddress(req: FundRequest): Promise<Deposit> {
-  const { bound, deskPk, oraclePkHex, beaconTxidHex, beaconGidx, exit } = await build(req);
-  const amount = isPredict(req.kind) ? req.premium : req.collateral;
+  const { bound, deskPk, oraclePkHex, exit } = await buildPredict(req);
   return {
     network: NETWORK_NAME,
     address: bound.intentAddress,
     vaultAddress: bound.vaultAddress,
-    amountSats: amount,
-    uri: paymentUri(bound.intentAddress, amount),
-    holderPkHex: isPredict(req.kind) ? "" : bytesToHex(deskPk),
-    writerPkHex: isPredict(req.kind) ? bytesToHex(deskPk) : "",
+    amountSats: req.premium,
+    uri: paymentUri(bound.intentAddress, req.premium),
+    writerPkHex: bytesToHex(deskPk),
     oraclePkHex,
-    beaconTxidHex,
-    beaconGidx,
     exit: Number(exit),
   };
 }
 
 /** Store the intent with the contract manager and return its pkScript. */
 export async function registerIntent(req: FundRequest): Promise<string> {
-  const { intent } = await build(req);
+  const { intent } = await buildPredict(req);
   await intent.register();
   return bytesToHex(intent.pkScript);
 }
@@ -473,9 +387,9 @@ export async function onContractEvent(cb: (event: ContractEvent) => void): Promi
   return manager.onContractEvent(cb);
 }
 
-/** After the deadline, cancel pays every live coin above dust back to the user's address. */
+/** After the deadline, cancel pays every live coin above dust back to the bettor's address. */
 export async function cancelIntent(req: FundRequest): Promise<string> {
-  const { intent, bound } = await build(req);
+  const { intent, bound } = await buildPredict(req);
   const manager = await contracts();
   await intent.register().catch(() => undefined);
   await manager.refreshVtxos({ scripts: [bytesToHex(intent.pkScript)], after: 0 });
@@ -501,17 +415,14 @@ function connectExecutor(serverKey: Uint8Array, emulatorKey: Uint8Array): Promis
 /** Best-effort registration with executord for automatic intent refund and vault reboard/renewal. */
 export async function registerExecutorDelegations(req: FundRequest): Promise<{ cancel: boolean; reboard: boolean }> {
   try {
-    const { client, bound } = await build(req);
+    const { client, bound } = await buildPredict(req);
     if (!client.emulatorKey) return { cancel: false, reboard: false };
     const executor = await connectExecutor(client.serverKey, client.emulatorKey);
     if (!executor) return { cancel: false, reboard: false };
     const cancelId = await executor.ensureTemplate("cancel_intent", intentArtifact as arkade.ContractArtifact, cancelIntentTemplate);
     const cancel = cancelId ? await executor.delegate(cancelIntentDelegation(cancelId, bound)) : false;
-    let reboard = false;
-    if (isPredict(req.kind)) {
-      const reboardId = await executor.ensureTemplate("reboard_vault", predictArtifact as arkade.ContractArtifact, reboardVaultTemplate);
-      reboard = reboardId ? await executor.delegate(reboardVaultDelegation(reboardId, bound)) : false;
-    }
+    const reboardId = await executor.ensureTemplate("reboard_vault", predictArtifact as arkade.ContractArtifact, reboardVaultTemplate);
+    const reboard = reboardId ? await executor.delegate(reboardVaultDelegation(reboardId, bound)) : false;
     return { cancel, reboard };
   } catch {
     return { cancel: false, reboard: false };

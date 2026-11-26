@@ -1,17 +1,17 @@
-# COINFLIP on one server: the page, an oracle with its own beacon, a desk and a
+# COINFLIP on one server: the page, a stateless DIA fixing oracle, a desk, and a
 # settler, all from `pnpm demo -- --server`. Only the page port is exposed; the
 # services talk to each other on loopback inside the container.
 #
 #   docker build -f coinflip.Dockerfile -t coinflip .
 #   docker run -p 4173:4173 --mount source=coinflip-data,target=/data coinflip
 #
-# Railway reads railway.toml, which points here. Dokploy: Build Type Dockerfile,
-# Docker File `coinflip.Dockerfile`, Docker Context Path `.`. Either way, mount
-# persistent storage at /data and route the domain to port 4173. The README's
-# Deploy section has the steps.
+# Railway reads railway.toml, which points here. Mount persistent storage at
+# /data and route the domain to port 4173. See README.md and
+# docs/mainnet-runbook.md.
 #
-# /data holds the keys, the beacon, the desk's book and the settler's progress.
-# Keep that storage: a fresh /data starts a new beacon and a new, unfunded desk.
+# /data holds the oracle sample/fixing log, the desk's quote book and wallet DB,
+# and the settler's progress (plus auto-generated keys on Mutinynet). Keep that
+# storage across deploys.
 FROM node:22-alpine
 WORKDIR /app
 RUN corepack enable

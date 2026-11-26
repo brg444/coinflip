@@ -1,43 +1,29 @@
 import {
   arkade,
-  asset,
-  Batch,
   buildOffchainTx,
   ConditionWitness,
   EmulatorPacket,
   Extension,
   P2A,
   PrevArkTxField,
-  Proof,
   setArkPsbtField,
   Transaction,
-  TreeSignerSession,
-  UnknownPacket,
-  type ArkProvider,
   type ArkTxInput,
   type CSVMultisigTapscript,
   type EmulatorProvider,
   type ExtensionPacket,
   type Identity,
-  type Network,
 } from "@arkade-os/sdk";
 import { base64 } from "@scure/base";
 
-import { bin2num, internalTxid, reseedState, STATE_TYPE } from "./beacon.ts";
 import { DUST_SATS } from "./constants.ts";
 import { centsOf } from "./dia.ts";
+import { bin2num } from "./fixing.ts";
 import { bytesToHex } from "./hex.ts";
 
 /**
- * Arkade transactions with more than one covenant input.
- *
- * The SDK's ArkadeTransactionBuilder spends one covenant coin plus coins the
- * identity signs. A beacon read spends two covenants: the consumer at input 0
- * and the beacon at input 1, each with its own emulator entry. This module
- * assembles that shape from the SDK's primitives: one checkpoint per input
- * through buildOffchainTx, the previous Arkade transaction on every input,
- * and one extension output carrying the asset packet, the beacon state, and
- * the emulator packet, ahead of the anchor.
+ * Covenant off-chain transaction builders for standalone PredictVaultV3
+ * settlement (`settle`) and post-void-window refund (`refund`).
  */
 
 type ProgramScript = InstanceType<typeof arkade.ArkadeProgramScript>;
@@ -161,47 +147,6 @@ export function build(spends: Spend[], outputs: { script: Uint8Array; amount: bi
   return { arkTx, checkpoints, signIndexes };
 }
 
-function unitTransfer(id: asset.AssetId, vin: number, vout: number): asset.Packet {
-  return asset.Packet.create([
-    asset.AssetGroup.create(id, null, [asset.AssetInput.create(vin, 1n)], [asset.AssetOutput.create(vout, 1n)], []),
-  ]);
-}
-
-export function statePacket(state: Uint8Array): ExtensionPacket {
-  return new UnknownPacket(STATE_TYPE, state);
-}
-
-export type BeaconCoin = {
-  script: ProgramScript;
-  coin: Coin;
-  /** The state packet of the transaction that created the coin. */
-  state: Uint8Array;
-  id: asset.AssetId;
-};
-
-/**
- * Settle a beacon vault: the vault at input 0, the beacon at input 1 through
- * `read`. Output 0 continues the beacon plus `readFee`. The payouts are the
- * vault's locked value minus that fee. No extra coin.
- */
-export function buildSettle(input: {
-  vault: { script: ProgramScript; coin: Coin };
-  beacon: BeaconCoin;
-  readFee: bigint;
-  payouts: { script: Uint8Array; amount: bigint }[];
-  checkpoint: CSVMultisigTapscript.Type;
-}): Built {
-  const spends: Spend[] = [
-    { script: input.vault.script, fn: "settle", coin: input.vault.coin },
-    { script: input.beacon.script, fn: "read", callArgs: { selfIndex: 1n }, coin: input.beacon.coin },
-  ];
-  const outputs = [
-    { script: input.beacon.script.pkScript, amount: BigInt(input.beacon.coin.value) + input.readFee },
-    ...input.payouts,
-  ];
-  return build(spends, outputs, [unitTransfer(input.beacon.id, 1, 0), statePacket(input.beacon.state)], input.checkpoint);
-}
-
 export type PredictFixingInput = {
   /** 18-decimal DIA BTC/USD price. */
   price: bigint;
@@ -219,7 +164,7 @@ export type PredictFixingInput = {
 
 /**
  * Settle a standalone PredictVaultV3: 1 input (vault), payouts starting at output 0.
- * No shared beacon coin, no asset transfer, no state packet.
+ * Direct stack signature verification — no shared oracle coin, no asset transfer, no state packet.
  */
 export function buildPredictSettle(input: {
   vault: { script: ProgramScript; coin: Coin };
@@ -301,227 +246,12 @@ export function buildRefund(input: {
   return build([{ script: input.vault.script, fn: "refund", coin: input.vault.coin }], outputs, [], input.checkpoint);
 }
 
-/** Publish a fixing: the beacon at input 0, continued at output 0 with the next state. */
-export function buildAttest(input: {
-  beacon: BeaconCoin;
-  /** Option expiry. The slot key. */
-  expiry: bigint;
-  /** DIA price, 18 decimals. */
-  price: bigint;
-  /** DIA timestamp. */
-  time: bigint;
-  nonce: bigint;
-  intentExpiry: bigint;
-  /** 64-byte r||s of the DIA signature. */
-  sig: Uint8Array;
-  /** 64-byte BIP340 Schnorr signature from `adminPk` over `attestDigest`. */
-  adminSig: Uint8Array;
-  next: Uint8Array;
-  checkpoint: CSVMultisigTapscript.Type;
-}): Built {
-  if (input.sig.length !== 64) throw new Error("dia signature");
-  if (input.adminSig.length !== 64) throw new Error("admin signature");
-  const callArgs: Record<string, bigint | Uint8Array> = {
-    expiry: input.expiry,
-    price: input.price,
-    time: input.time,
-    nonce: input.nonce,
-    intentExpiry: input.intentExpiry,
-    sig: input.sig,
-    adminSig: input.adminSig,
-  };
-  return build(
-    [{
-      script: input.beacon.script,
-      fn: "attest",
-      callArgs,
-      coin: input.beacon.coin,
-    }],
-    [{ script: input.beacon.script.pkScript, amount: BigInt(input.beacon.coin.value) }],
-    [unitTransfer(input.beacon.id, 0, 0), statePacket(input.next)],
-    input.checkpoint,
-  );
-}
-
-/** Migrate the beacon coin to a new Taproot script while preserving its identity asset and state packet. */
-export function buildMigrate(input: {
-  beacon: BeaconCoin;
-  nextProgram: Uint8Array;
-  nextPkScript: Uint8Array;
-  opSig: Uint8Array;
-  checkpoint: CSVMultisigTapscript.Type;
-}): Built {
-  if (input.nextProgram.length !== 32) throw new Error("nextProgram must be 32 bytes");
-  if (input.opSig.length !== 64) throw new Error("op signature");
-  return build(
-    [{
-      script: input.beacon.script,
-      fn: "migrate",
-      callArgs: {
-        "next.program": input.nextProgram,
-        "next.version": 1n,
-        opSig: input.opSig,
-      },
-      coin: input.beacon.coin,
-    }],
-    [{ script: input.nextPkScript, amount: BigInt(input.beacon.coin.value) }],
-    [unitTransfer(input.beacon.id, 0, 0), statePacket(input.beacon.state)],
-    input.checkpoint,
-  );
-}
-
-/**
- * Restore the 329-byte STATE packet on a freshly batch-renewed beacon VTXO that lacks STATE.
- * `sign` receives the checkpoint outpoint (`txid` in internal byte order) so `opSig` is bound to this exact spend.
- */
-export function buildReseed(input: {
-  beacon: Omit<BeaconCoin, "state">;
-  round: bigint;
-  lastExpiry: bigint;
-  sign: (outpoint: { txid: Uint8Array; vout: number }) => Uint8Array;
-  checkpoint: CSVMultisigTapscript.Type;
-}): Built {
-  const fn = input.beacon.script.functionByName("reseed");
-  if (!fn || !fn.arkadeScript) throw new Error("AttestationBeacon.reseed not found");
-  const next = reseedState(input.round, input.lastExpiry);
-  const { arkTx, checkpoints } = buildOffchainTx(
-    [{
-      txid: input.beacon.coin.txid,
-      vout: input.beacon.coin.vout,
-      value: Number(input.beacon.coin.value),
-      tapLeafScript: fn.tapLeafScript,
-      tapTree: input.beacon.script.encode(),
-    }],
-    [{ script: input.beacon.script.pkScript, amount: BigInt(input.beacon.coin.value) }],
-    input.checkpoint,
-  );
-  setArkPsbtField(arkTx, 0, PrevArkTxField, input.beacon.coin.prevTx);
-  const cpIn = arkTx.getInput(0);
-  if (!cpIn?.txid || cpIn.index == null) throw new Error("checkpoint input missing");
-  const opSig = input.sign({ txid: internalTxid(bytesToHex(cpIn.txid)), vout: cpIn.index });
-  if (opSig.length !== 64) throw new Error("op signature");
-  const callArgs: Record<string, bigint | Uint8Array> = {
-    round: input.round,
-    lastExpiry: input.lastExpiry,
-    opSig,
-  };
-  const stack = (fn.def.arkadeScript?.witness ?? []).map((ref) => arkade.witnessRefToBytes(ref, callArgs, input.beacon.script.args));
-  attachExtension(arkTx, [
-    unitTransfer(input.beacon.id, 0, 0),
-    statePacket(next),
-    EmulatorPacket.create([{ vin: 0, script: fn.arkadeScript, witness: encodeWitness(stack) }]),
-  ]);
-  return { arkTx, checkpoints, signIndexes: [] };
-}
-
-/** Renew the beacon VTXO in an Arkade batch round via `AttestationBeacon.reboard`, keeping its identity asset. */
-export async function reboardBeacon(input: {
-  arkProvider: ArkProvider;
-  emulator: EmulatorProvider;
-  network: Network;
-  script: ProgramScript;
-  address: string;
-  coin: { txid: string; vout: number; value: number; script: string; prevTx: Uint8Array; assets?: { assetId: string; amount: bigint | number }[] };
-  id: asset.AssetId;
-  opSig: Uint8Array;
-  signal?: AbortSignal;
-}): Promise<{ commitmentTxid: string; intentId: string }> {
-  if (input.opSig.length !== 64) throw new Error("op signature");
-  const fn = input.script.functionByName("reboard");
-  if (!fn || !fn.arkadeScript) throw new Error("AttestationBeacon.reboard not found");
-  const callArgs: Record<string, bigint | Uint8Array> = { opSig: input.opSig };
-  const stack = (fn.def.arkadeScript?.witness ?? []).map((ref) => arkade.witnessRefToBytes(ref, callArgs, input.script.args));
-  const witness = encodeWitness(stack);
-  const coinInput = {
-    txid: input.coin.txid,
-    vout: input.coin.vout,
-    value: input.coin.value,
-    script: input.coin.script,
-    prevTx: input.coin.prevTx,
-    tapTree: input.script.encode(),
-    forfeitTapLeafScript: fn.tapLeafScript,
-    proofTapLeafScript: fn.tapLeafScript,
-    assets: input.coin.assets,
-  };
-  const recipients = [{
-    address: input.address,
-    amount: input.coin.value,
-    assets: [{ assetId: input.id.toString(), amount: 1n }],
-  }];
-  const packets: ExtensionPacket[] = [
-    unitTransfer(input.id, 1, 0),
-    EmulatorPacket.create([{ vin: 1, script: fn.arkadeScript, witness }]),
-  ];
-  const session = TreeSignerSession.random();
-  const sessionKey = bytesToHex(await session.getPublicKey());
-  const registerMessage = {
-    type: "register" as const,
-    onchain_output_indexes: [] as number[],
-    valid_at: 0,
-    expire_at: 0,
-    cosigners_public_keys: [sessionKey],
-  };
-  const deleteMessage = { type: "delete" as const, expire_at: 0 };
-  const outputs = [
-    { script: input.script.pkScript, amount: BigInt(input.coin.value) },
-    Extension.create(packets).txOut(),
-  ];
-  const [signedProof, deleteProof] = await Promise.all(
-    [registerMessage, deleteMessage].map((message) =>
-      input.emulator.submitIntent({
-        proof: base64.encode(Proof.create(message, [coinInput as never], outputs).toPSBT()),
-        message,
-      })
-    ),
-  );
-  const abort = new AbortController();
-  let registering = false;
-  let forfeiting = false;
-  try {
-    const outpoint = `${input.coin.txid}:${input.coin.vout}`;
-    const events = Batch.prime(input.arkProvider.getEventStream(abort.signal, [sessionKey, outpoint]));
-    registering = true;
-    const intentId = await input.arkProvider.registerIntent({ proof: signedProof, message: registerMessage });
-    const handler = arkade.createArkadeBatchHandler(
-      intentId,
-      [{ ...coinInput, arkadeScriptBytes: fn.arkadeScript } as never],
-      undefined,
-      signedProof,
-      registerMessage,
-      session,
-      input.arkProvider,
-      input.emulator,
-      input.network,
-      recipients,
-    );
-    const commitmentTxid = await Batch.join(
-      events,
-      {
-        ...handler,
-        onBatchFinalization: (...args) => {
-          forfeiting = true;
-          return handler.onBatchFinalization(...args);
-        },
-      },
-      { abortController: abort },
-    );
-    return { commitmentTxid, intentId };
-  } catch (err) {
-    if (registering && !forfeiting) {
-      await input.arkProvider.deleteIntent({ proof: deleteProof, message: deleteMessage }).catch(() => undefined);
-    }
-    throw err;
-  } finally {
-    abort.abort();
-  }
-}
-
-/** Sign the identity's inputs and submit to the emulator. */
+/** Sign the identity's inputs (if any) and submit to the emulator. */
 export async function submit(built: Built, emulator: Pick<EmulatorProvider, "submitTx">, identity?: Identity): Promise<{ txid: string; signedArkTx: string }> {
   let arkTx = built.arkTx;
   let checkpoints = built.checkpoints;
   if (built.signIndexes.length > 0) {
-    if (!identity) throw new Error("an identity is required to sign the fee coin");
+    if (!identity) throw new Error("an identity is required to sign inputs");
     arkTx = await identity.sign(arkTx, built.signIndexes);
     checkpoints = await Promise.all(checkpoints.map((cp, i) => (built.signIndexes.includes(i) ? identity.sign(cp, [0]) : Promise.resolve(cp))));
   }

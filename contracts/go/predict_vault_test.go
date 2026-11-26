@@ -27,7 +27,7 @@ const (
 	testExitDelay      int64 = 2_048
 )
 
-type predictDiaSample struct {
+type recordedDia struct {
 	expiry       int64
 	rawPrice     string
 	cents        int64
@@ -37,18 +37,35 @@ type predictDiaSample struct {
 	sigHex       string
 }
 
-// Real Lasernet BTC/USD OracleUpdate print signed by the pinned DIA key on a 5-minute close.
-var predictRecordedDia = predictDiaSample{
-	expiry:       1795593000,
-	rawPrice:     "58728258984125017358336",
-	cents:        5872826,
-	sampleTime:   1795593002,
-	nonce:        "1793790301274586439",
-	intentExpiry: 1795596602,
-	sigHex:       "7980c73f7210211fd2887cc55bd0df6e049ccb57771131a81ed1bb655a6b52887fa15bb26be0e35f0de52badce56190ec3df541814e8652d0f9314a088c26280",
+// Real Lasernet BTC/USD OracleUpdate prints signed by the pinned DIA key on 5-minute closes.
+var (
+	recordedDia1 = recordedDia{
+		expiry:       1795593000,
+		rawPrice:     "58728258984125017358336",
+		cents:        5872826,
+		sampleTime:   1795593002,
+		nonce:        "1793790301274586439",
+		intentExpiry: 1795596602,
+		sigHex:       "7980c73f7210211fd2887cc55bd0df6e049ccb57771131a81ed1bb655a6b52887fa15bb26be0e35f0de52badce56190ec3df541814e8652d0f9314a088c26280",
+	}
+	recordedDia2 = recordedDia{
+		expiry:       1795593300,
+		rawPrice:     "58625783362453267021824",
+		cents:        5862578,
+		sampleTime:   1795593302,
+		nonce:        "1793790301274586451",
+		intentExpiry: 1795596902,
+		sigHex:       "20ff8e96d370f05b83595e832a8825505ccdaa12633f2ef12186cc851ed0af0d1b4a3b1cd5a066df39fe5c244748997f06c367ee9b60ed2bc7378590eaf07af4",
+	}
+)
+
+func leUint64(n uint64) []byte {
+	var b [8]byte
+	binary.LittleEndian.PutUint64(b[:], n)
+	return b[:]
 }
 
-func predictMustBigInt(s string) *big.Int {
+func mustBigInt(s string) *big.Int {
 	v, ok := new(big.Int).SetString(s, 10)
 	if !ok {
 		panic(s)
@@ -56,7 +73,7 @@ func predictMustBigInt(s string) *big.Int {
 	return v
 }
 
-func predictMustHex(s string) []byte {
+func mustDecodeHex(s string) []byte {
 	b, err := hex.DecodeString(s)
 	if err != nil {
 		panic(err)
@@ -68,13 +85,9 @@ func predictFixDigest(expiry, cents, sampleTime int64) []byte {
 	h := sha256.New()
 	h.Write([]byte("BTCUSD-FIX"))
 	h.Write([]byte("fix"))
-	var b [8]byte
-	binary.LittleEndian.PutUint64(b[:], uint64(expiry))
-	h.Write(b[:])
-	binary.LittleEndian.PutUint64(b[:], uint64(cents))
-	h.Write(b[:])
-	binary.LittleEndian.PutUint64(b[:], uint64(sampleTime))
-	h.Write(b[:])
+	h.Write(leUint64(uint64(expiry)))
+	h.Write(leUint64(uint64(cents)))
+	h.Write(leUint64(uint64(sampleTime)))
 	return h.Sum(nil)
 }
 
@@ -187,191 +200,176 @@ func containsHex(haystack, needle string) bool {
 	return false
 }
 
-func TestPredictVaultSettleDirectSignature(t *testing.T) {
+func TestPredictVaultSettleDirectSigs(t *testing.T) {
 	writer := privKeyFromByte(11)
 	holder := privKeyFromByte(12)
 	backup := privKeyFromByte(13)
-	oracle := privKeyFromByte(14)
-	stranger := privKeyFromByte(15)
-	server := privKeyFromByte(16)
-	emulator := privKeyFromByte(17)
+	server := privKeyFromByte(14)
+	emulator := privKeyFromByte(15)
+	oracle := privKeyFromByte(16)
+	stranger := privKeyFromByte(17)
 	keys := contractKeys{serverKey: server.PubKey(), emulatorKey: emulator.PubKey()}
 
 	writerScript := p2trScript(xOnlyPub(writer))
 	holderScript := p2trScript(xOnlyPub(holder))
 	art := loadArtifact(t, "predict_vault.artifact.json")
 
-	d := predictRecordedDia
-	rawPrice := predictMustBigInt(d.rawPrice)
-	diaSig := predictMustHex(d.sigHex)
-	nonce := predictMustBigInt(d.nonce)
-
-	signOracle := func(signer *btcec.PrivateKey, expiry, cents, sampleTime int64) []byte {
-		sig, err := schnorr.Sign(signer, predictFixDigest(expiry, cents, sampleTime))
-		if err != nil {
-			t.Fatalf("sign oracle: %v", err)
-		}
-		return sig.Serialize()
-	}
-
-	buildSettle := func(
+	runSettle := func(
 		vault compiledContract,
 		locked int64,
 		payScript []byte,
 		payAmt int64,
+		d recordedDia,
 		price *big.Int,
-		sampleTime int64,
-		sampleNonce *big.Int,
-		intentExpiry int64,
-		dia []byte,
-		oracleSig []byte,
-	) (*wire.MsgTx, *mockPrevOuts, wire.TxWitness) {
+		diaSig []byte,
+		oracleSigner *btcec.PrivateKey,
+		signExpiry int64,
+		extraInput bool,
+	) error {
 		op0 := dummyOutPoint(1, 0)
 		tx := wire.NewMsgTx(3)
 		tx.AddTxIn(wire.NewTxIn(&op0, nil, nil))
-		tx.AddTxOut(wire.NewTxOut(payAmt, payScript))
-		prev := &mockPrevOuts{
-			outputs: map[wire.OutPoint]*wire.TxOut{
-				op0: {Value: locked, PkScript: vault.pkScript},
-			},
+		prevOutputs := map[wire.OutPoint]*wire.TxOut{
+			op0: {Value: locked, PkScript: vault.pkScript},
 		}
-		// Witness order matches settle(price, time, nonce, intentExpiry, sig, oracleSig) reversed on stack.
+		if extraInput {
+			op1 := dummyOutPoint(2, 0)
+			tx.AddTxIn(wire.NewTxIn(&op1, nil, nil))
+			prevOutputs[op1] = &wire.TxOut{Value: 1_000, PkScript: writerScript}
+		}
+		tx.AddTxOut(wire.NewTxOut(payAmt, payScript))
+		prev := &mockPrevOuts{outputs: prevOutputs}
+
+		digest := predictFixDigest(signExpiry, d.cents, d.sampleTime)
+		oracleSig, err := schnorr.Sign(oracleSigner, digest)
+		if err != nil {
+			t.Fatalf("sign oracle: %v", err)
+		}
 		witness := wire.TxWitness{
-			oracleSig,
-			dia,
-			int64Bytes(intentExpiry),
-			scriptNumBytes(sampleNonce),
-			int64Bytes(sampleTime),
+			oracleSig.Serialize(),
+			diaSig,
+			int64Bytes(d.intentExpiry),
+			scriptNumBytes(mustBigInt(d.nonce)),
+			int64Bytes(d.sampleTime),
 			scriptNumBytes(price),
 		}
-		return tx, prev, witness
+		return execArkadeLeaf(t, vault, "settle", "settle", emulator.PubKey(), tx, 0, prev, witness)
 	}
 
-	goodOracleSig := signOracle(oracle, d.expiry, d.cents, d.sampleTime)
+	d1 := recordedDia1
+	d2 := recordedDia2
+	p1 := mustBigInt(d1.rawPrice)
+	sig1 := mustDecodeHex(d1.sigHex)
+	p2 := mustBigInt(d2.rawPrice)
+	sig2 := mustDecodeHex(d2.sigHex)
 
-	// Kind 2 above strike pays holder full collateral (0 read fee); paying writer fails.
-	vault2Win := compileArtifact(t, art, predictVaultArgs(2, writer.PubKey(), holder.PubKey(), oracle.PubKey(), backup.PubKey(), writerScript, holderScript, d.cents-1, d.expiry), keys)
-	txWin, prevWin, wWin := buildSettle(vault2Win, testCollateral, holderScript, testCollateral, rawPrice, d.sampleTime, nonce, d.intentExpiry, diaSig, goodOracleSig)
-	if err := execArkadeLeaf(t, vault2Win, "settle", "settle", emulator.PubKey(), txWin, 0, prevWin, wWin); err != nil {
-		t.Fatalf("kind 2 direct-sig win should succeed: %v", err)
+	// Kind 2 above strike pays full collateral to holder; paying writer must fail.
+	vault2Win := compileArtifact(t, art, predictVaultArgs(2, writer.PubKey(), holder.PubKey(), oracle.PubKey(), backup.PubKey(), writerScript, holderScript, d1.cents-1, d1.expiry), keys)
+	if err := runSettle(vault2Win, testCollateral, holderScript, testCollateral, d1, p1, sig1, oracle, d1.expiry, false); err != nil {
+		t.Fatalf("kind 2 win paying holder should succeed: %v", err)
 	}
-	txWrong, prevWrong, wWrong := buildSettle(vault2Win, testCollateral, writerScript, testCollateral, rawPrice, d.sampleTime, nonce, d.intentExpiry, diaSig, goodOracleSig)
-	if err := execArkadeLeaf(t, vault2Win, "settle", "settle", emulator.PubKey(), txWrong, 0, prevWrong, wWrong); err == nil {
+	if err := runSettle(vault2Win, testCollateral, writerScript, testCollateral, d1, p1, sig1, oracle, d1.expiry, false); err == nil {
 		t.Fatal("kind 2 win paying writer must fail")
 	}
 
-	// Kind 2 exact strike pays writer; paying holder fails.
-	vault2Eq := compileArtifact(t, art, predictVaultArgs(2, writer.PubKey(), holder.PubKey(), oracle.PubKey(), backup.PubKey(), writerScript, holderScript, d.cents, d.expiry), keys)
-	txEq, prevEq, wEq := buildSettle(vault2Eq, testCollateral, writerScript, testCollateral, rawPrice, d.sampleTime, nonce, d.intentExpiry, diaSig, goodOracleSig)
-	if err := execArkadeLeaf(t, vault2Eq, "settle", "settle", emulator.PubKey(), txEq, 0, prevEq, wEq); err != nil {
+	// Kind 2 exact strike pays writer; paying holder must fail.
+	vault2Eq := compileArtifact(t, art, predictVaultArgs(2, writer.PubKey(), holder.PubKey(), oracle.PubKey(), backup.PubKey(), writerScript, holderScript, d1.cents, d1.expiry), keys)
+	if err := runSettle(vault2Eq, testCollateral, writerScript, testCollateral, d1, p1, sig1, oracle, d1.expiry, false); err != nil {
 		t.Fatalf("kind 2 exact strike paying writer should succeed: %v", err)
 	}
-	txEqHolder, prevEqHolder, wEqHolder := buildSettle(vault2Eq, testCollateral, holderScript, testCollateral, rawPrice, d.sampleTime, nonce, d.intentExpiry, diaSig, goodOracleSig)
-	if err := execArkadeLeaf(t, vault2Eq, "settle", "settle", emulator.PubKey(), txEqHolder, 0, prevEqHolder, wEqHolder); err == nil {
+	if err := runSettle(vault2Eq, testCollateral, holderScript, testCollateral, d1, p1, sig1, oracle, d1.expiry, false); err == nil {
 		t.Fatal("kind 2 exact strike paying holder must fail")
 	}
 
-	// Kind 3 below strike pays holder; exact strike pays writer.
-	vault3Win := compileArtifact(t, art, predictVaultArgs(3, writer.PubKey(), holder.PubKey(), oracle.PubKey(), backup.PubKey(), writerScript, holderScript, d.cents+1, d.expiry), keys)
-	txLow, prevLow, wLow := buildSettle(vault3Win, testCollateral, holderScript, testCollateral, rawPrice, d.sampleTime, nonce, d.intentExpiry, diaSig, goodOracleSig)
-	if err := execArkadeLeaf(t, vault3Win, "settle", "settle", emulator.PubKey(), txLow, 0, prevLow, wLow); err != nil {
-		t.Fatalf("kind 3 direct-sig win should succeed: %v", err)
+	// Kind 3 below strike pays holder (using second real recorded DIA print); exact strike pays writer.
+	vault3Win := compileArtifact(t, art, predictVaultArgs(3, writer.PubKey(), holder.PubKey(), oracle.PubKey(), backup.PubKey(), writerScript, holderScript, d2.cents+1, d2.expiry), keys)
+	if err := runSettle(vault3Win, testCollateral, holderScript, testCollateral, d2, p2, sig2, oracle, d2.expiry, false); err != nil {
+		t.Fatalf("kind 3 win paying holder should succeed: %v", err)
 	}
-	vault3Eq := compileArtifact(t, art, predictVaultArgs(3, writer.PubKey(), holder.PubKey(), oracle.PubKey(), backup.PubKey(), writerScript, holderScript, d.cents, d.expiry), keys)
-	txLowEq, prevLowEq, wLowEq := buildSettle(vault3Eq, testCollateral, writerScript, testCollateral, rawPrice, d.sampleTime, nonce, d.intentExpiry, diaSig, goodOracleSig)
-	if err := execArkadeLeaf(t, vault3Eq, "settle", "settle", emulator.PubKey(), txLowEq, 0, prevLowEq, wLowEq); err != nil {
+	vault3Eq := compileArtifact(t, art, predictVaultArgs(3, writer.PubKey(), holder.PubKey(), oracle.PubKey(), backup.PubKey(), writerScript, holderScript, d2.cents, d2.expiry), keys)
+	if err := runSettle(vault3Eq, testCollateral, writerScript, testCollateral, d2, p2, sig2, oracle, d2.expiry, false); err != nil {
 		t.Fatalf("kind 3 exact strike paying writer should succeed: %v", err)
 	}
 
-	// Adversarial signature & payload rejections.
-	strangerOracleSig := signOracle(stranger, d.expiry, d.cents, d.sampleTime)
-	txBadOracle, prevBadOracle, wBadOracle := buildSettle(vault2Win, testCollateral, holderScript, testCollateral, rawPrice, d.sampleTime, nonce, d.intentExpiry, diaSig, strangerOracleSig)
-	if err := execArkadeLeaf(t, vault2Win, "settle", "settle", emulator.PubKey(), txBadOracle, 0, prevBadOracle, wBadOracle); err == nil {
-		t.Fatal("stranger oracleSig must fail")
+	// Security rejections.
+	if err := runSettle(vault2Win, testCollateral, holderScript, testCollateral, d1, p1, sig1, stranger, d1.expiry, false); err == nil {
+		t.Fatal("wrong oracle signer must fail")
 	}
-
-	wrongExpiryOracleSig := signOracle(oracle, d.expiry+300, d.cents, d.sampleTime)
-	txWrongExpSig, prevWrongExpSig, wWrongExpSig := buildSettle(vault2Win, testCollateral, holderScript, testCollateral, rawPrice, d.sampleTime, nonce, d.intentExpiry, diaSig, wrongExpiryOracleSig)
-	if err := execArkadeLeaf(t, vault2Win, "settle", "settle", emulator.PubKey(), txWrongExpSig, 0, prevWrongExpSig, wWrongExpSig); err == nil {
-		t.Fatal("oracleSig for different expiry must fail")
+	if err := runSettle(vault2Win, testCollateral, holderScript, testCollateral, d1, p1, sig1, oracle, d1.expiry+300, false); err == nil {
+		t.Fatal("oracle signature for wrong expiry must fail")
 	}
-
-	badDiaSig := append([]byte(nil), diaSig...)
-	badDiaSig[0] ^= 0xff
-	txBadDia, prevBadDia, wBadDia := buildSettle(vault2Win, testCollateral, holderScript, testCollateral, rawPrice, d.sampleTime, nonce, d.intentExpiry, badDiaSig, goodOracleSig)
-	if err := execArkadeLeaf(t, vault2Win, "settle", "settle", emulator.PubKey(), txBadDia, 0, prevBadDia, wBadDia); err == nil {
-		t.Fatal("corrupted DIA signature must fail")
+	badDiaSig := append([]byte(nil), sig1...)
+	badDiaSig[0] ^= 0x01
+	if err := runSettle(vault2Win, testCollateral, holderScript, testCollateral, d1, p1, badDiaSig, oracle, d1.expiry, false); err == nil {
+		t.Fatal("tampered DIA signature must fail")
 	}
-
-	tamperedPrice := new(big.Int).Add(rawPrice, big.NewInt(1))
-	txTamperPrice, prevTamperPrice, wTamperPrice := buildSettle(vault2Win, testCollateral, holderScript, testCollateral, tamperedPrice, d.sampleTime, nonce, d.intentExpiry, diaSig, goodOracleSig)
-	if err := execArkadeLeaf(t, vault2Win, "settle", "settle", emulator.PubKey(), txTamperPrice, 0, prevTamperPrice, wTamperPrice); err == nil {
-		t.Fatal("tampered DIA price must fail")
+	if err := runSettle(vault2Win, testCollateral, holderScript, testCollateral, d1, new(big.Int).Add(p1, big.NewInt(1)), sig1, oracle, d1.expiry, false); err == nil {
+		t.Fatal("tampered price must fail DIA checkSigFromStack")
 	}
-
-	tamperedTimeSig := signOracle(oracle, d.expiry, d.cents, d.sampleTime+1)
-	txTamperTime, prevTamperTime, wTamperTime := buildSettle(vault2Win, testCollateral, holderScript, testCollateral, rawPrice, d.sampleTime+1, nonce, d.intentExpiry, diaSig, tamperedTimeSig)
-	if err := execArkadeLeaf(t, vault2Win, "settle", "settle", emulator.PubKey(), txTamperTime, 0, prevTamperTime, wTamperTime); err == nil {
-		t.Fatal("tampered DIA time must fail")
+	tamperedTime := d1
+	tamperedTime.sampleTime = d1.sampleTime + 1
+	if err := runSettle(vault2Win, testCollateral, holderScript, testCollateral, tamperedTime, p1, sig1, oracle, d1.expiry, false); err == nil {
+		t.Fatal("tampered DIA time must fail DIA checkSigFromStack")
 	}
-
-	// Sample outside [expiry, expiry+60] must fail even with matching oracleSig.
-	laterExpiry := d.expiry + 300
-	vaultEarlySample := compileArtifact(t, art, predictVaultArgs(2, writer.PubKey(), holder.PubKey(), oracle.PubKey(), backup.PubKey(), writerScript, holderScript, d.cents-1, laterExpiry), keys)
-	earlySig := signOracle(oracle, laterExpiry, d.cents, d.sampleTime)
-	txEarlySample, prevEarlySample, wEarlySample := buildSettle(vaultEarlySample, testCollateral, holderScript, testCollateral, rawPrice, d.sampleTime, nonce, d.intentExpiry, diaSig, earlySig)
-	if err := execArkadeLeaf(t, vaultEarlySample, "settle", "settle", emulator.PubKey(), txEarlySample, 0, prevEarlySample, wEarlySample); err == nil {
-		t.Fatal("sample before expiry must fail")
+	if err := runSettle(vault2Win, testCollateral, holderScript, testCollateral, d1, p1, sig1, oracle, d1.expiry, true); err == nil {
+		t.Fatal("extra transaction input must fail tx.numInputs == 1")
 	}
-
-	earlierExpiry := d.expiry - 300
-	vaultLateSample := compileArtifact(t, art, predictVaultArgs(2, writer.PubKey(), holder.PubKey(), oracle.PubKey(), backup.PubKey(), writerScript, holderScript, d.cents-1, earlierExpiry), keys)
-	lateSig := signOracle(oracle, earlierExpiry, d.cents, d.sampleTime)
-	txLateSample, prevLateSample, wLateSample := buildSettle(vaultLateSample, testCollateral, holderScript, testCollateral, rawPrice, d.sampleTime, nonce, d.intentExpiry, diaSig, lateSig)
-	if err := execArkadeLeaf(t, vaultLateSample, "settle", "settle", emulator.PubKey(), txLateSample, 0, prevLateSample, wLateSample); err == nil {
-		t.Fatal("sample after expiry+60 must fail")
+	// activeInputIndex == 1 must fail.
+	{
+		op0 := dummyOutPoint(1, 0)
+		op1 := dummyOutPoint(2, 0)
+		txIdx1 := wire.NewMsgTx(3)
+		txIdx1.AddTxIn(wire.NewTxIn(&op0, nil, nil))
+		txIdx1.AddTxIn(wire.NewTxIn(&op1, nil, nil))
+		txIdx1.AddTxOut(wire.NewTxOut(testCollateral, holderScript))
+		prevIdx1 := &mockPrevOuts{
+			outputs: map[wire.OutPoint]*wire.TxOut{
+				op0: {Value: 1_000, PkScript: writerScript},
+				op1: {Value: testCollateral, PkScript: vault2Win.pkScript},
+			},
+		}
+		oSig, err := schnorr.Sign(oracle, predictFixDigest(d1.expiry, d1.cents, d1.sampleTime))
+		if err != nil {
+			t.Fatalf("sign oracle: %v", err)
+		}
+		wIdx1 := wire.TxWitness{
+			oSig.Serialize(),
+			sig1,
+			int64Bytes(d1.intentExpiry),
+			scriptNumBytes(mustBigInt(d1.nonce)),
+			int64Bytes(d1.sampleTime),
+			scriptNumBytes(p1),
+		}
+		if err := execArkadeLeaf(t, vault2Win, "settle", "settle", emulator.PubKey(), txIdx1, 1, prevIdx1, wIdx1); err == nil {
+			t.Fatal("settle with activeInputIndex == 1 must fail")
+		}
 	}
-
-	// Input count, active input index, payout amount, underfunding, and OP_CHECKTIME rejections.
-	op0 := dummyOutPoint(1, 0)
-	op1 := dummyOutPoint(2, 0)
-	txTwoIn := wire.NewMsgTx(3)
-	txTwoIn.AddTxIn(wire.NewTxIn(&op0, nil, nil))
-	txTwoIn.AddTxIn(wire.NewTxIn(&op1, nil, nil))
-	txTwoIn.AddTxOut(wire.NewTxOut(testCollateral, holderScript))
-	prevTwoIn := &mockPrevOuts{
-		outputs: map[wire.OutPoint]*wire.TxOut{
-			op0: {Value: testCollateral, PkScript: vault2Win.pkScript},
-			op1: {Value: 1_000, PkScript: writerScript},
-		},
-	}
-	if err := execArkadeLeaf(t, vault2Win, "settle", "settle", emulator.PubKey(), txTwoIn, 0, prevTwoIn, wWin); err == nil {
-		t.Fatal("settle with tx.numInputs == 2 must fail")
-	}
-	prevIdx1 := &mockPrevOuts{
-		outputs: map[wire.OutPoint]*wire.TxOut{
-			op0: {Value: 1_000, PkScript: writerScript},
-			op1: {Value: testCollateral, PkScript: vault2Win.pkScript},
-		},
-	}
-	if err := execArkadeLeaf(t, vault2Win, "settle", "settle", emulator.PubKey(), txTwoIn, 1, prevIdx1, wWin); err == nil {
-		t.Fatal("settle with activeInputIndex == 1 must fail")
-	}
-
-	txShort, prevShort, wShort := buildSettle(vault2Win, testCollateral, holderScript, testCollateral-1, rawPrice, d.sampleTime, nonce, d.intentExpiry, diaSig, goodOracleSig)
-	if err := execArkadeLeaf(t, vault2Win, "settle", "settle", emulator.PubKey(), txShort, 0, prevShort, wShort); err == nil {
+	if err := runSettle(vault2Win, testCollateral, holderScript, testCollateral-1, d1, p1, sig1, oracle, d1.expiry, false); err == nil {
 		t.Fatal("short payout must fail")
 	}
-	txUnder, prevUnder, wUnder := buildSettle(vault2Win, testCollateral-1, holderScript, testCollateral-1, rawPrice, d.sampleTime, nonce, d.intentExpiry, diaSig, goodOracleSig)
-	if err := execArkadeLeaf(t, vault2Win, "settle", "settle", emulator.PubKey(), txUnder, 0, prevUnder, wUnder); err == nil {
+	if err := runSettle(vault2Win, testCollateral-1, holderScript, testCollateral-1, d1, p1, sig1, oracle, d1.expiry, false); err == nil {
 		t.Fatal("underfunded vault must fail")
 	}
 
-	futureExpiry := ((time.Now().Unix() + 3_600) / 300) * 300
-	vaultFuture := compileArtifact(t, art, predictVaultArgs(2, writer.PubKey(), holder.PubKey(), oracle.PubKey(), backup.PubKey(), writerScript, holderScript, d.cents-1, futureExpiry), keys)
-	futureSig := signOracle(oracle, futureExpiry, d.cents, futureExpiry+5)
-	txFut, prevFut, wFut := buildSettle(vaultFuture, testCollateral, holderScript, testCollateral, rawPrice, futureExpiry+5, nonce, d.intentExpiry, diaSig, futureSig)
-	if err := execArkadeLeaf(t, vaultFuture, "settle", "settle", emulator.PubKey(), txFut, 0, prevFut, wFut); err == nil {
+	// Sample before expiry (using d1's print against d2's later expiry) and after expiry+60 must both fail.
+	vault2Later := compileArtifact(t, art, predictVaultArgs(2, writer.PubKey(), holder.PubKey(), oracle.PubKey(), backup.PubKey(), writerScript, holderScript, d1.cents-1, d2.expiry), keys)
+	if err := runSettle(vault2Later, testCollateral, holderScript, testCollateral, d1, p1, sig1, oracle, d2.expiry, false); err == nil {
+		t.Fatal("sample before expiry must fail")
+	}
+	if err := runSettle(vault2Win, testCollateral, holderScript, testCollateral, d2, p2, sig2, oracle, d1.expiry, false); err == nil {
+		t.Fatal("sample after expiry+60 must fail")
+	}
+
+	// Off-grid expiry must fail expiry % 300 == 0.
+	vaultOffGrid := compileArtifact(t, art, predictVaultArgs(2, writer.PubKey(), holder.PubKey(), oracle.PubKey(), backup.PubKey(), writerScript, holderScript, d1.cents-1, d1.expiry-60), keys)
+	if err := runSettle(vaultOffGrid, testCollateral, holderScript, testCollateral, d1, p1, sig1, oracle, d1.expiry-60, false); err == nil {
+		t.Fatal("off-grid expiry must fail")
+	}
+
+	// Future expiry must fail OP_CHECKTIME.
+	futureExpiry := ((time.Now().Unix() / 300) + 12) * 300
+	vaultFuture := compileArtifact(t, art, predictVaultArgs(2, writer.PubKey(), holder.PubKey(), oracle.PubKey(), backup.PubKey(), writerScript, holderScript, d1.cents-1, futureExpiry), keys)
+	if err := runSettle(vaultFuture, testCollateral, holderScript, testCollateral, d1, p1, sig1, oracle, futureExpiry, false); err == nil {
 		t.Fatal("settle before expiry+60 must fail OP_CHECKTIME")
 	}
 }
@@ -380,9 +378,9 @@ func TestPredictVaultRefundAndBackup(t *testing.T) {
 	writer := privKeyFromByte(21)
 	holder := privKeyFromByte(22)
 	backup := privKeyFromByte(23)
-	oracle := privKeyFromByte(24)
-	server := privKeyFromByte(25)
-	emulator := privKeyFromByte(26)
+	server := privKeyFromByte(24)
+	emulator := privKeyFromByte(25)
+	oracle := privKeyFromByte(26)
 	keys := contractKeys{serverKey: server.PubKey(), emulatorKey: emulator.PubKey()}
 
 	writerScript := p2trScript(xOnlyPub(writer))
@@ -457,9 +455,9 @@ func TestPredictVaultReboardIntentGuards(t *testing.T) {
 	writer := privKeyFromByte(31)
 	holder := privKeyFromByte(32)
 	backup := privKeyFromByte(33)
-	oracle := privKeyFromByte(34)
-	server := privKeyFromByte(35)
-	emulator := privKeyFromByte(36)
+	server := privKeyFromByte(34)
+	emulator := privKeyFromByte(35)
+	oracle := privKeyFromByte(36)
 	keys := contractKeys{serverKey: server.PubKey(), emulatorKey: emulator.PubKey()}
 
 	writerScript := p2trScript(xOnlyPub(writer))
@@ -531,9 +529,9 @@ func TestPredictVaultClose2of2(t *testing.T) {
 	writer := privKeyFromByte(41)
 	holder := privKeyFromByte(42)
 	backup := privKeyFromByte(43)
-	oracle := privKeyFromByte(44)
-	server := privKeyFromByte(45)
-	emulator := privKeyFromByte(46)
+	server := privKeyFromByte(44)
+	emulator := privKeyFromByte(45)
+	oracle := privKeyFromByte(46)
 	keys := contractKeys{serverKey: server.PubKey(), emulatorKey: emulator.PubKey()}
 
 	writerScript := p2trScript(xOnlyPub(writer))

@@ -1,19 +1,15 @@
 import { generateSecretKey } from "nostr-tools/pure";
 
-import {
-  PAIR,
-  PREDICT_READ_FEE,
-  type PredictKind,
-} from "../../protocol/constants.ts";
+import { PAIR, type PredictKind } from "../../protocol/constants.ts";
 import { bindContracts } from "../../protocol/contracts.ts";
 import { bytesToHex, hexToBytes, xOnly } from "../../protocol/hex.ts";
-import { isPredictQuote, payoutRefusal, type RfqQuote, type RfqRefusal, type RfqRequest } from "../../protocol/messages.ts";
-import { payoutMultiplier } from "../../protocol/pricing.ts";
+import { payoutRefusal, type RfqQuote, type RfqRefusal, type RfqRequest } from "../../protocol/messages.ts";
 import { collectReplies } from "../../protocol/nostr.ts";
-import { LIVE_BEACON_STATUS } from "./beacon-status.ts";
+import { payoutMultiplier } from "../../protocol/pricing.ts";
+import { PINNED_ORACLE_PUBKEY } from "../rfq-config.js";
 import { ACTIVE_PROFILE, ACTIVE_Q_MAX, writerBinding } from "./fund.ts";
 
-export function oracleKeyMatches(quoteOraclePk: string, pinnedOraclePk: string | null = LIVE_BEACON_STATUS.args.adminPk): boolean {
+export function oracleKeyMatches(quoteOraclePk: string, pinnedOraclePk: string | null = PINNED_ORACLE_PUBKEY): boolean {
   const candidate = quoteOraclePk.trim().toLowerCase();
   const expected = pinnedOraclePk?.trim().toLowerCase() || "";
   if (!/^[0-9a-f]{64}$/.test(candidate) || !/^[0-9a-f]{64}$/.test(expected)) return false;
@@ -120,7 +116,6 @@ export async function requestPredictQuotes(input: {
     }
     if (!isQuote(incoming.message)) continue;
     const quote = incoming.message;
-    if (!isPredictQuote(quote.profile)) continue;
     if (quote.from_amount !== request.amount) continue;
     if (quote.solver_pubkey !== incoming.from || quote.profile.writer_pubkey !== incoming.from) continue;
     if (quote.valid_until <= now || quote.profile.deadline < now + 15) continue;
@@ -132,7 +127,7 @@ export async function requestPredictQuotes(input: {
     if (!oracleKeyMatches(quote.profile.oracle_pubkey, input.oraclePubkey)) continue;
     if (!backupKeyMatches(quote.profile.backup_pubkey, quote.profile.writer_pubkey, profile.emulatorKey, input.backupPubkey ?? null, profile.network)) continue;
     const payout = BigInt(quote.to_amount);
-    if (payoutRefusal(payout, input.stake, PREDICT_READ_FEE, ACTIVE_Q_MAX)) continue;
+    if (payoutRefusal(payout, input.stake, ACTIVE_Q_MAX)) continue;
     let bound;
     try {
       bound = bindContracts({
@@ -151,7 +146,6 @@ export async function requestPredictQuotes(input: {
         voidAfter: BigInt(quote.profile.void_after),
         fallbackDelay: BigInt(quote.profile.fallback_delay),
         finalExitDelay: BigInt(quote.profile.final_exit_delay),
-        readFee: PREDICT_READ_FEE,
         serverKey: profile.serverKey,
         emulatorKey: profile.emulatorKey,
         hrp: ACTIVE_PROFILE.hrp,

@@ -15,26 +15,24 @@ export function settlementKnown(position: { settleTxid?: string; closeTxid?: str
 }
 
 /**
- * Payouts after the beacon continuation (if any). At least one party script
- * (user or desk) must match so an unrelated transaction is not misread as a settlement.
+ * Payouts on a standalone PredictVaultV3 settlement, refund, or close tx.
+ * Party outputs start at index 0. At least one party script (user or desk)
+ * must match so an unrelated transaction is not misread as a settlement.
  */
 export function splitPayouts(
   outputs: { amount: bigint; script: string }[],
-  writerScript: string,
+  userScript: string,
   deskScript?: string,
 ): { writer: bigint; desk: bigint } | null {
-  const want = writerScript.toLowerCase();
+  const want = userScript.toLowerCase();
   const wantDesk = (deskScript ?? "").toLowerCase();
   let writer = 0n;
   let desk = 0n;
   let matched = false;
-  // Legacy beacon settle puts the beacon continuation at output 0; standalone PredictV3 settle, refund, and close pay parties starting at output 0.
-  const firstScript = outputs[0]?.script.toLowerCase() ?? "";
-  const startIndex = firstScript === want || (wantDesk !== "" && firstScript === wantDesk) ? 0 : 1;
-  outputs.forEach((output, index) => {
-    if (index < startIndex || output.amount <= 0n) return;
+  for (const output of outputs) {
+    if (output.amount <= 0n) continue;
     const script = output.script.toLowerCase();
-    if (script === "51024e73" || script.startsWith("6a")) return;
+    if (script === "51024e73" || script.startsWith("6a")) continue;
     if (script === want) {
       writer += output.amount;
       matched = true;
@@ -44,7 +42,7 @@ export function splitPayouts(
     } else {
       desk += output.amount;
     }
-  });
+  }
   if (!matched) return null;
   return { writer, desk };
 }

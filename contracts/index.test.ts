@@ -6,23 +6,31 @@ import { fileURLToPath } from "node:url";
 
 import { compileContract } from "./compile.mjs";
 
-import { bindBeacon as bindBeaconFromProtocol } from "../protocol/beacon.ts";
 import { bindContracts as bindContractsFromProtocol } from "../protocol/contracts.ts";
-import { buildSettle as buildSettleFromProtocol } from "../protocol/cospend.ts";
-import { beaconProgram as beaconProgramFromProtocol, predictVaultProgram as predictVaultProgramFromProtocol, vaultProgram as vaultProgramFromProtocol } from "../protocol/programs.ts";
-import { settlePayouts as settlePayoutsFromSettle, slotFixing as slotFixingFromSettle, slotPrice as slotPriceFromSettle } from "../settle/vault.ts";
 import {
-  attestationBeaconArtifact,
-  beaconProgram,
-  bindBeacon,
+  buildPredictSettle as buildPredictSettleFromProtocol,
+  buildRefund as buildRefundFromProtocol,
+  predictSettlePriceCents as predictSettlePriceCentsFromProtocol,
+  submit as submitFromProtocol,
+} from "../protocol/cospend.ts";
+import { predictFixDigest as predictFixDigestFromProtocol } from "../protocol/fixing.ts";
+import {
+  intentProgram as intentProgramFromProtocol,
+  predictVaultProgram as predictVaultProgramFromProtocol,
+} from "../protocol/programs.ts";
+import { settlePayouts as settlePayoutsFromSettle } from "../settle/vault.ts";
+import {
   bindContracts,
-  buildSettle,
-  optionVaultArtifact,
+  buildPredictSettle,
+  buildRefund,
+  intentProgram,
+  optionIntentArtifact,
+  predictFixDigest,
+  predictSettlePriceCents,
+  predictVaultArtifact,
   predictVaultProgram,
   settlePayouts,
-  slotFixing,
-  slotPrice,
-  vaultProgram,
+  submit,
 } from "./index.ts";
 
 type Artifact = {
@@ -50,9 +58,9 @@ function api(artifact: Artifact) {
   };
 }
 
-test("the two artifacts publish the vault and beacon functions", () => {
-  assert.deepEqual(api(optionVaultArtifact as Artifact), {
-    name: "OptionVault",
+test("the two artifacts publish the PredictVault and OptionIntent functions", () => {
+  assert.deepEqual(api(predictVaultArtifact as Artifact), {
+    name: "PredictVault",
     constructor: [
       "kind",
       "writerPk",
@@ -61,60 +69,63 @@ test("the two artifacts publish the vault and beacon functions", () => {
       "holderScript",
       "strike",
       "collateral",
+      "stake",
       "expiry",
-      "beaconTxid",
-      "beaconGidx",
-      "readFee",
-      "exit",
+      "oraclePk",
+      "backupPk",
+      "voidAfter",
+      "fallbackDelay",
+      "finalExitDelay",
     ],
     functions: [
-      { name: "settle", inputs: [] },
+      { name: "settle", inputs: ["price", "time", "nonce", "intentExpiry", "sig", "oracleSig"] },
+      { name: "refund", inputs: [] },
+      { name: "reboard", inputs: [] },
       { name: "close", inputs: ["writerSig", "holderSig"] },
-      { name: "unilateral", inputs: ["writerSig"] },
+      { name: "unilateral", inputs: ["writerSig", "holderSig"] },
     ],
   });
-  assert.deepEqual(api(attestationBeaconArtifact as Artifact), {
-    name: "AttestationBeacon",
+  assert.deepEqual(api(optionIntentArtifact as Artifact), {
+    name: "OptionIntent",
     constructor: [
-      "ctrlTxid",
-      "ctrlGidx",
-      "domain",
-      "expiryLag",
-      "readFee",
-      "adminPk",
+      "userPk",
+      "userScript",
+      "solverScript",
+      "optionScript",
+      "side",
+      "collateral",
+      "premium",
+      "deadline",
       "exit",
     ],
     functions: [
-      { name: "attest", inputs: ["expiry", "price", "time", "nonce", "intentExpiry", "sig", "adminSig"] },
-      { name: "read", inputs: ["selfIndex"] },
-      { name: "migrate", inputs: ["next", "opSig"] },
-      { name: "reboard", inputs: ["opSig"] },
-      { name: "reseed", inputs: ["round", "lastExpiry", "opSig"] },
-      { name: "unilateral", inputs: ["adminSig"] },
+      { name: "finalize", inputs: [] },
+      { name: "cancel", inputs: [] },
+      { name: "cancelAuto", inputs: [] },
+      { name: "unilateral", inputs: ["userSig"] },
     ],
   });
 });
 
-test("the import surface is the protocol bind and settle helpers", () => {
+test("the import surface exposes the PredictVault and OptionIntent helpers", () => {
   assert.equal(bindContracts, bindContractsFromProtocol);
-  assert.equal(bindBeacon, bindBeaconFromProtocol);
-  assert.equal(buildSettle, buildSettleFromProtocol);
-  assert.equal(vaultProgram, vaultProgramFromProtocol);
+  assert.equal(predictFixDigest, predictFixDigestFromProtocol);
+  assert.equal(buildPredictSettle, buildPredictSettleFromProtocol);
+  assert.equal(buildRefund, buildRefundFromProtocol);
+  assert.equal(predictSettlePriceCents, predictSettlePriceCentsFromProtocol);
+  assert.equal(submit, submitFromProtocol);
+  assert.equal(intentProgram, intentProgramFromProtocol);
   assert.equal(predictVaultProgram, predictVaultProgramFromProtocol);
-  assert.equal(beaconProgram, beaconProgramFromProtocol);
-  assert.equal(slotPrice, slotPriceFromSettle);
-  assert.equal(slotFixing, slotFixingFromSettle);
   assert.equal(settlePayouts, settlePayoutsFromSettle);
-  assert.deepEqual(Object.keys(vaultProgram().functions).sort(), ["close", "settle", "unilateral"]);
+  assert.deepEqual(Object.keys(intentProgram().functions).sort(), ["cancel", "cancelCltv", "finalize", "unilateral"]);
   assert.deepEqual(Object.keys(predictVaultProgram().functions).sort(), ["close", "reboard", "refund", "refundBackup", "settle", "unilateral"]);
-  assert.deepEqual(Object.keys(beaconProgram().functions).sort(), ["attest", "migrate", "read", "reboard", "reseed", "unilateral"]);
 });
 
 test("committed contract artifacts match compiled .ark sources", async () => {
   const dir = path.dirname(fileURLToPath(import.meta.url));
   const entries = readdirSync(dir).sort();
   const artifactFiles = entries.filter((name) => name.endsWith(".artifact.json"));
-  assert.ok(artifactFiles.length >= 4);
+  assert.deepEqual(artifactFiles, ["option_intent.artifact.json", "predict_vault.artifact.json"]);
   for (const artifactFile of artifactFiles) {
     const entry = artifactFile.replace(/\.artifact\.json$/, ".ark");
     const committed = JSON.parse(readFileSync(path.join(dir, artifactFile), "utf8")) as Record<string, unknown>;

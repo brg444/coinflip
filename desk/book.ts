@@ -1,22 +1,20 @@
 import { mkdir, readFile } from "node:fs/promises";
 import path from "node:path";
 
-import { isPredict, type Kind } from "../protocol/constants.ts";
+import type { PredictKind } from "../protocol/constants.ts";
 import { writeJsonFile } from "../protocol/sqlite-storage.ts";
 
 export type QuoteStatus = "open" | "filled" | "expired";
 
 /**
- * One quote. Options: the user writes, `collateral` is what they lock and
- * `premium` what the desk pays. Predict: the user holds, `premium` is the
- * stake and `collateral` the payout the desk locks; the writer fields are
- * the desk and the holder fields the bettor.
+ * One Predict quote: the bettor holds and pays `premium` (stake); the desk
+ * writes and locks `collateral` (full payout) in PredictVaultV3.
  */
 export type QuoteRow = {
   rfqId: string;
   collateral: string;
   premium: string;
-  kind: Kind;
+  kind: PredictKind;
   strike: string;
   expiry: number;
   deadline: number;
@@ -25,17 +23,12 @@ export type QuoteRow = {
   writerPubkey: string;
   writerPkScript: string;
   holderPubkey: string;
-  /** Predict: the bettor's Arkade address script, which the payout pays. */
-  holderPkScript?: string;
-  /** Predict: x-only pubkey of the oracle co-signing canonical fixings. */
-  oraclePubkey?: string;
-  backupPubkey?: string;
-  voidAfter?: number;
-  fallbackDelay?: number;
-  finalExitDelay?: number;
-  /** Options: display txid of the beacon identity asset. */
-  beaconTxid?: string;
-  beaconGidx?: number;
+  holderPkScript: string;
+  oraclePubkey: string;
+  backupPubkey: string;
+  voidAfter: number;
+  fallbackDelay: number;
+  finalExitDelay: number;
   intentAddress: string;
   vaultAddress: string;
   status: QuoteStatus;
@@ -53,17 +46,14 @@ type FileShape = {
   quotes: QuoteRow[];
 };
 
-/** Old book rows missing their settlement reference (oraclePubkey for Predict, beacon for Options) cannot be registered. */
-export function hasBeacon(row: QuoteRow): boolean {
-  if (isPredict(row.kind)) {
-    return /^[0-9a-f]{64}$/.test(row.oraclePubkey ?? "");
-  }
-  return /^[0-9a-f]{64}$/.test(row.beaconTxid ?? "") && Number.isInteger(row.beaconGidx) && row.beaconGidx! >= 0 && row.beaconGidx! <= 65_535;
+/** Legacy book rows missing a 64-hex `oraclePubkey` cannot be registered or filled. */
+export function hasOracle(row: Partial<QuoteRow>): boolean {
+  return (row.kind === 2 || row.kind === 3) && /^[0-9a-f]{64}$/.test(row.oraclePubkey ?? "");
 }
 
-/** Float a fill spends: the premium for an option, the whole payout for a prediction. */
-export function outlay(row: Pick<QuoteRow, "kind" | "premium" | "collateral">): bigint {
-  return BigInt(isPredict(row.kind) ? row.collateral : row.premium);
+/** Float a fill spends: the full payout locked into PredictVault. */
+export function outlay(row: Pick<QuoteRow, "collateral">): bigint {
+  return BigInt(row.collateral);
 }
 
 /** Float already promised by open quotes. A new quote has to fit beside this. */

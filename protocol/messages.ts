@@ -1,20 +1,15 @@
 import {
   DUST_SATS,
-  EXIT,
-  isPredict,
   PAIR,
   PREDICT_GRID_S,
   PREDICT_LOCK_S,
   PREDICT_MAX_AHEAD_S,
   PREDICT_MIN_LEFT_S,
+  PREDICT_VAULT_PROGRAM_ID,
   PRICE_MAX,
   Q_MAX,
-  Q_MIN,
   STAKE_MAX,
   STAKE_MIN,
-  vaultProgramId,
-  type Kind,
-  type OptionKind,
   type PredictKind,
 } from "./constants.ts";
 
@@ -22,16 +17,7 @@ const HEX64 = /^[0-9a-f]{64}$/;
 const AMOUNT = /^[1-9][0-9]{0,15}$/;
 const SCRIPT = /^51[0-9a-f]{66}$/;
 
-/** Options: the user writes. `amount` is the collateral they lock. */
-export type OptionRequestProfile = {
-  kind: OptionKind;
-  strike: number;
-  expiry: number;
-  writer_pubkey: string;
-  writer_pk_script: string;
-};
-
-/** Predict: the user holds. `amount` is the stake. `strike` is the line, `expiry` the close. */
+/** Predict request: the bettor holds. `amount` is the stake; `strike` is the line; `expiry` is the close. */
 export type PredictRequestProfile = {
   kind: PredictKind;
   strike: number;
@@ -40,26 +26,10 @@ export type PredictRequestProfile = {
   holder_pk_script: string;
 };
 
-export type RequestProfile = OptionRequestProfile | PredictRequestProfile;
+export type RequestProfile = PredictRequestProfile;
 
-type QuoteBinding = {
-  deadline: number;
-  exit: number;
-  intent_address: string;
-  vault_address: string;
-};
-
-/** An options quote names the desk as the holder. `to_amount` is the premium. */
-export type OptionQuoteProfile = QuoteBinding & {
-  /** Display txid of the beacon identity asset. The vault compares it reversed. */
-  beacon_txid: string;
-  beacon_gidx: number;
-  holder_pubkey: string;
-  holder_pk_script: string;
-};
-
-/** A predict quote names the desk as the writer. `to_amount` is the payout it locks. */
-export type PredictQuoteProfile = QuoteBinding & {
+/** Predict quote: the desk is the writer and locks `to_amount` (the full payout). */
+export type PredictQuoteProfile = {
   writer_pubkey: string;
   writer_pk_script: string;
   /** X-only pubkey of the oracle co-signing canonical fixings for PredictVault.settle. */
@@ -68,17 +38,13 @@ export type PredictQuoteProfile = QuoteBinding & {
   void_after: number;
   fallback_delay: number;
   final_exit_delay: number;
+  deadline: number;
+  exit: number;
+  intent_address: string;
+  vault_address: string;
 };
 
-export type QuoteProfile = OptionQuoteProfile | PredictQuoteProfile;
-
-export function isPredictQuote(profile: QuoteProfile): profile is PredictQuoteProfile {
-  return "writer_pubkey" in profile;
-}
-
-export function isPredictRequest(profile: RequestProfile): profile is PredictRequestProfile {
-  return isPredict(profile.kind);
-}
+export type QuoteProfile = PredictQuoteProfile;
 
 export type RfqRequest = {
   v: 1;
@@ -87,7 +53,7 @@ export type RfqRequest = {
   pair: typeof PAIR;
   amount_side: "from";
   amount: string;
-  profile: RequestProfile;
+  profile: PredictRequestProfile;
 };
 
 export type RfqQuote = {
@@ -99,7 +65,7 @@ export type RfqQuote = {
   to_amount: string;
   solver_pubkey: string;
   valid_until: number;
-  profile: QuoteProfile;
+  profile: PredictQuoteProfile;
 };
 
 export type RfqRefusal = {
@@ -123,14 +89,14 @@ export type RfqStatus = {
   txid?: string;
 };
 
-/** A filled vault, published in the clear. The sealed RFQ is not this record. */
+/** A filled PredictVault, published in the clear so any settler can settle it. */
 export type OptionPosition = {
   v: 1;
   type: "option_position";
   program_id: string;
   rfq_id: string;
   pair: typeof PAIR;
-  kind: Kind;
+  kind: PredictKind;
   collateral: string;
   strike: string;
   expiry: number;
@@ -138,17 +104,13 @@ export type OptionPosition = {
   writer_pubkey: string;
   writer_pk_script: string;
   holder_pubkey: string;
-  /** Predict only: the bettor's Arkade address script, which the payout pays. */
-  holder_pk_script?: string;
-  stake?: string;
-  oracle_pubkey?: string;
-  backup_pubkey?: string;
-  void_after?: number;
-  fallback_delay?: number;
-  final_exit_delay?: number;
-  /** Options only: identity asset of the AttestationBeacon. */
-  beacon_txid?: string;
-  beacon_gidx?: number;
+  holder_pk_script: string;
+  stake: string;
+  oracle_pubkey: string;
+  backup_pubkey: string;
+  void_after: number;
+  fallback_delay: number;
+  final_exit_delay: number;
   vault_address: string;
   fill_txid: string;
 };
@@ -195,39 +157,23 @@ function parseRequest(body: Record<string, unknown>): RfqRequest | null {
   const profile = record(body.profile);
   if (!profile) return null;
   if (!hex64(body.rfq_id) || body.pair !== PAIR || body.amount_side !== "from" || !amount(body.amount)) return null;
-  if (profile.kind !== 0 && profile.kind !== 1 && profile.kind !== 2 && profile.kind !== 3) return null;
+  if (profile.kind !== 2 && profile.kind !== 3) return null;
   if (!int(profile.strike, Number(PRICE_MAX)) || profile.strike <= 0) return null;
   if (!int(profile.expiry, 4_000_000_000) || profile.expiry <= 1800) return null;
-  const base = {
-    v: 1 as const,
-    type: "rfq_request" as const,
-    rfq_id: body.rfq_id,
-    pair: PAIR as typeof PAIR,
-    amount_side: "from" as const,
-    amount: body.amount,
-  };
-  if (profile.kind === 2 || profile.kind === 3) {
-    if (!hex64(profile.holder_pubkey) || !script(profile.holder_pk_script)) return null;
-    return {
-      ...base,
-      profile: {
-        kind: profile.kind,
-        strike: profile.strike,
-        expiry: profile.expiry,
-        holder_pubkey: profile.holder_pubkey,
-        holder_pk_script: profile.holder_pk_script,
-      },
-    };
-  }
-  if (!hex64(profile.writer_pubkey) || !script(profile.writer_pk_script)) return null;
+  if (!hex64(profile.holder_pubkey) || !script(profile.holder_pk_script)) return null;
   return {
-    ...base,
+    v: 1,
+    type: "rfq_request",
+    rfq_id: body.rfq_id,
+    pair: PAIR,
+    amount_side: "from",
+    amount: body.amount,
     profile: {
       kind: profile.kind,
       strike: profile.strike,
       expiry: profile.expiry,
-      writer_pubkey: profile.writer_pubkey,
-      writer_pk_script: profile.writer_pk_script,
+      holder_pubkey: profile.holder_pubkey,
+      holder_pk_script: profile.holder_pk_script,
     },
   };
 }
@@ -243,55 +189,33 @@ function parseQuote(body: Record<string, unknown>): RfqQuote | null {
   if (!hex64(body.solver_pubkey) || !int(body.valid_until, 4_000_000_000)) return null;
   if (!int(profile.deadline, 4_000_000_000) || !bip68Delay(profile.exit, 512)) return null;
   if (!address(profile.intent_address) || !address(profile.vault_address)) return null;
-  const binding = {
-    deadline: profile.deadline,
-    exit: profile.exit,
-    intent_address: profile.intent_address,
-    vault_address: profile.vault_address,
-  };
-  const holder = hex64(profile.holder_pubkey) && script(profile.holder_pk_script);
-  const writer = hex64(profile.writer_pubkey) && script(profile.writer_pk_script);
-  // Exactly one side names the desk.
-  if (holder === writer) return null;
-  const quote = {
-    v: 1 as const,
-    type: "rfq_quote" as const,
+  if (!hex64(profile.writer_pubkey) || !script(profile.writer_pk_script)) return null;
+  if (!hex64(profile.oracle_pubkey)) return null;
+  if (!hex64(profile.backup_pubkey) || profile.backup_pubkey === profile.writer_pubkey) return null;
+  if (!int(profile.void_after, 30 * 86_400) || profile.void_after <= 0) return null;
+  if (!bip68Delay(profile.fallback_delay, profile.exit)) return null;
+  if (!bip68Delay(profile.final_exit_delay, profile.fallback_delay + 512)) return null;
+  return {
+    v: 1,
+    type: "rfq_quote",
     rfq_id: body.rfq_id,
-    pair: PAIR as typeof PAIR,
+    pair: PAIR,
     from_amount: body.from_amount,
     to_amount: body.to_amount,
     solver_pubkey: body.solver_pubkey,
     valid_until: body.valid_until,
-  };
-  if (writer) {
-    if (!hex64(profile.oracle_pubkey)) return null;
-    if (!hex64(profile.backup_pubkey) || profile.backup_pubkey === profile.writer_pubkey) return null;
-    if (!int(profile.void_after, 30 * 86_400) || profile.void_after <= 0) return null;
-    if (!bip68Delay(profile.fallback_delay, profile.exit)) return null;
-    if (!bip68Delay(profile.final_exit_delay, profile.fallback_delay + 512)) return null;
-    return {
-      ...quote,
-      profile: {
-        writer_pubkey: profile.writer_pubkey as string,
-        writer_pk_script: profile.writer_pk_script as string,
-        oracle_pubkey: profile.oracle_pubkey,
-        backup_pubkey: profile.backup_pubkey,
-        void_after: profile.void_after,
-        fallback_delay: profile.fallback_delay,
-        final_exit_delay: profile.final_exit_delay,
-        ...binding,
-      },
-    };
-  }
-  if (!hex64(profile.beacon_txid) || !int(profile.beacon_gidx, 65_535)) return null;
-  return {
-    ...quote,
     profile: {
-      holder_pubkey: profile.holder_pubkey as string,
-      holder_pk_script: profile.holder_pk_script as string,
-      beacon_txid: profile.beacon_txid,
-      beacon_gidx: profile.beacon_gidx,
-      ...binding,
+      writer_pubkey: profile.writer_pubkey,
+      writer_pk_script: profile.writer_pk_script,
+      oracle_pubkey: profile.oracle_pubkey,
+      backup_pubkey: profile.backup_pubkey,
+      void_after: profile.void_after,
+      fallback_delay: profile.fallback_delay,
+      final_exit_delay: profile.final_exit_delay,
+      deadline: profile.deadline,
+      exit: profile.exit,
+      intent_address: profile.intent_address,
+      vault_address: profile.vault_address,
     },
   };
 }
@@ -310,9 +234,8 @@ function parseStatusRequest(body: Record<string, unknown>): RfqStatusRequest | n
 
 const PROGRAM_ID = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
 
-/** An announcement without a program names the vault its kind settles through. */
-function readProgramId(value: unknown, kind: Kind): string | null {
-  if (value === undefined) return vaultProgramId(kind);
+function readProgramId(value: unknown): string | null {
+  if (value === undefined) return PREDICT_VAULT_PROGRAM_ID;
   if (typeof value === "string" && PROGRAM_ID.test(value)) return value;
   return null;
 }
@@ -320,52 +243,21 @@ function readProgramId(value: unknown, kind: Kind): string | null {
 export function parsePosition(value: unknown): OptionPosition | null {
   const body = record(value);
   if (!body || body.v !== 1 || body.type !== "option_position" || body.pair !== PAIR) return null;
-  if (!hex64(body.rfq_id) || (body.kind !== 0 && body.kind !== 1 && body.kind !== 2 && body.kind !== 3)) return null;
-  const program_id = readProgramId(body.program_id, body.kind);
+  if (!hex64(body.rfq_id) || (body.kind !== 2 && body.kind !== 3)) return null;
+  const program_id = readProgramId(body.program_id);
   if (!program_id) return null;
-  // A predict payout goes to the bettor's own address, so the settler needs its script.
-  const predict = isPredict(body.kind);
-  if (predict && !script(body.holder_pk_script)) return null;
-  if (!predict && body.holder_pk_script !== undefined) return null;
+  if (!script(body.holder_pk_script)) return null;
   if (!amount(body.collateral) || !amount(body.strike)) return null;
   if (!int(body.expiry, 4_000_000_000) || !int(body.exit, 4_000_000_000)) return null;
   if (!hex64(body.writer_pubkey) || !script(body.writer_pk_script)) return null;
   if (!hex64(body.holder_pubkey)) return null;
   if (!address(body.vault_address) || !hex64(body.fill_txid)) return null;
-  let extraFields: Pick<OptionPosition, "holder_pk_script" | "stake" | "oracle_pubkey" | "backup_pubkey" | "void_after" | "fallback_delay" | "final_exit_delay" | "beacon_txid" | "beacon_gidx"> = {};
-  if (predict) {
-    if (!amount(body.stake) || BigInt(body.stake) <= DUST_SATS) return null;
-    if (!hex64(body.oracle_pubkey)) return null;
-    if (!hex64(body.backup_pubkey) || body.backup_pubkey.toLowerCase() === body.writer_pubkey.toLowerCase()) return null;
-    if (!int(body.void_after, 30 * 86_400) || body.void_after <= 0) return null;
-    if (!bip68Delay(body.fallback_delay, body.exit)) return null;
-    if (!bip68Delay(body.final_exit_delay, body.fallback_delay + 512)) return null;
-    extraFields = {
-      holder_pk_script: (body.holder_pk_script as string).toLowerCase(),
-      stake: body.stake,
-      oracle_pubkey: body.oracle_pubkey.toLowerCase(),
-      backup_pubkey: body.backup_pubkey.toLowerCase(),
-      void_after: body.void_after,
-      fallback_delay: body.fallback_delay,
-      final_exit_delay: body.final_exit_delay,
-    };
-  } else {
-    if (
-      body.stake !== undefined
-      || body.oracle_pubkey !== undefined
-      || body.backup_pubkey !== undefined
-      || body.void_after !== undefined
-      || body.fallback_delay !== undefined
-      || body.final_exit_delay !== undefined
-    ) {
-      return null;
-    }
-    if (!hex64(body.beacon_txid) || !int(body.beacon_gidx, 65_535)) return null;
-    extraFields = {
-      beacon_txid: body.beacon_txid.toLowerCase(),
-      beacon_gidx: body.beacon_gidx,
-    };
-  }
+  if (!amount(body.stake) || BigInt(body.stake) <= DUST_SATS) return null;
+  if (!hex64(body.oracle_pubkey)) return null;
+  if (!hex64(body.backup_pubkey) || body.backup_pubkey.toLowerCase() === body.writer_pubkey.toLowerCase()) return null;
+  if (!int(body.void_after, 30 * 86_400) || body.void_after <= 0) return null;
+  if (!bip68Delay(body.fallback_delay, body.exit)) return null;
+  if (!bip68Delay(body.final_exit_delay, body.fallback_delay + 512)) return null;
   return {
     v: 1,
     type: "option_position",
@@ -380,7 +272,13 @@ export function parsePosition(value: unknown): OptionPosition | null {
     writer_pubkey: body.writer_pubkey.toLowerCase(),
     writer_pk_script: body.writer_pk_script.toLowerCase(),
     holder_pubkey: body.holder_pubkey.toLowerCase(),
-    ...extraFields,
+    holder_pk_script: body.holder_pk_script.toLowerCase(),
+    stake: body.stake,
+    oracle_pubkey: body.oracle_pubkey.toLowerCase(),
+    backup_pubkey: body.backup_pubkey.toLowerCase(),
+    void_after: body.void_after,
+    fallback_delay: body.fallback_delay,
+    final_exit_delay: body.final_exit_delay,
     vault_address: body.vault_address,
     fill_txid: body.fill_txid.toLowerCase(),
   };
@@ -399,18 +297,8 @@ function parseStatus(body: Record<string, unknown>): RfqStatus | null {
   };
 }
 
-/** `OptionVault` hardcodes this sample window. A quote needs a beacon with the same `expiryLag`. */
+/** `PredictVault` accepts samples with timestamp in `[expiry, expiry + 60]`. */
 export const VAULT_EXPIRY_LAG = 60n;
-
-/**
- * Why the desk must not build a vault for this beacon window.
- * Empty string means `expiryLag` is the vault's 60 seconds.
- */
-export function beaconWindowRefusal(expiryLag: bigint | null): string {
-  if (expiryLag == null) return "oracle";
-  if (expiryLag !== VAULT_EXPIRY_LAG) return "expiry lag";
-  return "";
-}
 
 export type QuoteLimits = {
   qMax?: bigint;
@@ -420,21 +308,7 @@ export type QuoteLimits = {
 
 /** Why a parsed request is not quotable. Empty string means the desk may price it. */
 export function requestRefusal(message: RfqRequest, now: number, limits?: QuoteLimits): string {
-  if (isPredictRequest(message.profile)) return predictRefusal(message.profile.expiry, BigInt(message.amount), now, limits);
-  const collateral = BigInt(message.amount);
-  const qMax = limits?.qMax ?? Q_MAX;
-  if (collateral < Q_MIN || collateral > qMax) return "collateral";
-  if (message.profile.expiry % PREDICT_GRID_S !== 0) return "expiry";
-  // Ten minutes is allowed. The open window (expiry − 1800) may already
-  // have passed; the quote only has to finish before expiry.
-  if (message.profile.expiry <= now + 60) return "expiry";
-  return "";
-}
-
-export function premiumRefusal(sats: bigint, collateral?: bigint): string {
-  if (sats <= DUST_SATS) return "premium below dust";
-  if (collateral != null && sats >= collateral) return "premium";
-  return "";
+  return predictRefusal(message.profile.expiry, BigInt(message.amount), now, limits);
 }
 
 /**
@@ -451,9 +325,9 @@ export function predictRefusal(expiry: number, stake: bigint, now: number, limit
   return "";
 }
 
-/** A payout the vault can hold that still wins more than the stake after the read fee. */
-export function payoutRefusal(payout: bigint, stake: bigint, readFee: bigint, qMax: bigint = Q_MAX): string {
+/** A payout the vault can hold that still strictly beats the stake. */
+export function payoutRefusal(payout: bigint, stake: bigint, qMax: bigint = Q_MAX): string {
   if (payout > qMax) return "payout";
-  if (payout - readFee <= stake) return "payout";
+  if (payout <= stake) return "payout";
   return "";
 }

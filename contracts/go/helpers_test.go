@@ -1,7 +1,6 @@
 package contractstest
 
 import (
-	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -11,8 +10,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/arkade-os/arkd/pkg/ark-lib/asset"
-	"github.com/arkade-os/arkd/pkg/ark-lib/extension"
 	scriptlib "github.com/arkade-os/arkd/pkg/ark-lib/script"
 	"github.com/arkade-os/emulator/pkg/arkade"
 	"github.com/btcsuite/btcd/btcec/v2"
@@ -22,8 +19,6 @@ import (
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 )
-
-const testReadFee int64 = 1_000
 
 type artifactFile struct {
 	ContractName string             `json:"contractName"`
@@ -298,77 +293,6 @@ func execArkadeLeaf(
 		return err
 	}
 	return parsed.Execute(tx, prevOuts, inputIdx, opts...)
-}
-
-type beaconSlot struct {
-	expiry     int64
-	priceCents int64
-	sampleTime int64
-}
-
-func encodeBeaconState(round uint64, slots []beaconSlot) []byte {
-	buf := make([]byte, 329)
-	buf[0] = 0x01
-	binary.LittleEndian.PutUint64(buf[1:9], round)
-	for i, slot := range slots {
-		if i >= 8 {
-			break
-		}
-		off := 9 + i*40
-		binary.LittleEndian.PutUint64(buf[off:off+8], uint64(slot.expiry))
-		binary.LittleEndian.PutUint64(buf[off+8:off+16], uint64(slot.priceCents))
-		binary.LittleEndian.PutUint64(buf[off+16:off+24], uint64(slot.sampleTime))
-	}
-	return buf
-}
-
-func beaconPrevTx(t *testing.T, beaconScript []byte, state []byte) *wire.MsgTx {
-	t.Helper()
-	ext, err := extension.NewExtensionFromPackets(extension.UnknownPacket{PacketType: 32, Data: state})
-	if err != nil {
-		t.Fatalf("beacon state ext: %v", err)
-	}
-	extOut, err := ext.TxOut()
-	if err != nil {
-		t.Fatalf("beacon state txout: %v", err)
-	}
-	prev := wire.NewMsgTx(3)
-	prev.AddTxIn(wire.NewTxIn(&wire.OutPoint{}, nil, nil))
-	prev.AddTxOut(wire.NewTxOut(330, beaconScript))
-	prev.AddTxOut(extOut)
-	return prev
-}
-
-func beaconTransferExtTxOut(t *testing.T, beaconTxid [32]byte, beaconGidx uint16, state []byte) *wire.TxOut {
-	t.Helper()
-	var hash chainhash.Hash
-	copy(hash[:], beaconTxid[:])
-	aid := &asset.AssetId{Txid: hash, Index: beaconGidx}
-	in, err := asset.NewAssetInput(1, 1)
-	if err != nil {
-		t.Fatalf("asset input: %v", err)
-	}
-	out, err := asset.NewAssetOutput(0, 1)
-	if err != nil {
-		t.Fatalf("asset output: %v", err)
-	}
-	grp, err := asset.NewAssetGroup(aid, nil, []asset.AssetInput{*in}, []asset.AssetOutput{*out}, nil)
-	if err != nil {
-		t.Fatalf("asset group: %v", err)
-	}
-	pkt, err := asset.NewPacket([]asset.AssetGroup{*grp})
-	if err != nil {
-		t.Fatalf("asset packet: %v", err)
-	}
-	ext, err := extension.NewExtensionFromPackets(pkt, extension.UnknownPacket{PacketType: 32, Data: state})
-	if err != nil {
-		t.Fatalf("transfer ext: %v", err)
-	}
-	txOut, err := ext.TxOut()
-	if err != nil {
-		t.Fatalf("transfer ext txout: %v", err)
-	}
-	return txOut
 }
 
 func dummyOutPoint(tag byte, vout uint32) wire.OutPoint {

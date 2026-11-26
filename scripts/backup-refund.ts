@@ -23,7 +23,7 @@ import {
   Transaction,
 } from "@arkade-os/sdk";
 
-import { DUST_SATS, PREDICT_READ_FEE } from "../protocol/constants.ts";
+import { DUST_SATS } from "../protocol/constants.ts";
 import { bindContracts, type Terms } from "../protocol/contracts.ts";
 import { bytesToHex, hexToBytes, xOnly } from "../protocol/hex.ts";
 import { parsePosition } from "../protocol/messages.ts";
@@ -190,7 +190,7 @@ async function main() {
     || bytesToHex(xOnly(hexToBytes((await new RestArkProvider(process.env.ARK_URL?.trim() || profile.arkUrl).getInfo()).signerPubkey)));
   const serverKey = xOnly(hexToBytes(serverKeyHex));
   const emulatorKey = hexToBytes(process.env.EMULATOR_KEY?.trim() || defaultEmulatorPubkey(profile.network));
-  const terms = termsFor(watched, serverKey, emulatorKey, PREDICT_READ_FEE, profile.hrp);
+  const terms = termsFor(watched, serverKey, emulatorKey, profile.hrp);
   const bound = bindContracts(terms);
   if (bound.vaultAddress !== pos.vault_address) {
     throw new Error(`derived vaultAddress ${bound.vaultAddress} != position ${pos.vault_address}`);

@@ -4,24 +4,28 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { Book, finishedQuote, hasBeacon, openPremium, pageQuotes, type QuoteRow } from "./book.ts";
+import { Book, finishedQuote, hasOracle, openPremium, outlay, pageQuotes, type QuoteRow } from "./book.ts";
 
 function row(patch: Partial<QuoteRow> = {}): QuoteRow {
   return {
     rfqId: "aa".repeat(32),
-    collateral: "10000000",
+    collateral: "95000",
     premium: "50000",
-    kind: 0,
+    kind: 2,
     strike: "9700000",
     expiry: 2_000,
     deadline: 1_500,
     validUntil: 1_030,
-    exit: 512,
+    exit: 2048,
     writerPubkey: "11".repeat(32),
     writerPkScript: "5120" + "22".repeat(32),
     holderPubkey: "33".repeat(32),
-    beaconTxid: "07".repeat(32),
-    beaconGidx: 0,
+    holderPkScript: "5120" + "44".repeat(32),
+    oraclePubkey: "55".repeat(32),
+    backupPubkey: "66".repeat(32),
+    voidAfter: 86_400,
+    fallbackDelay: 22_016,
+    finalExitDelay: 108_032,
     intentAddress: "tark1intent",
     vaultAddress: "tark1vault",
     status: "open",
@@ -31,12 +35,13 @@ function row(patch: Partial<QuoteRow> = {}): QuoteRow {
   };
 }
 
-test("openPremium sums quotes the desk has not filled yet", () => {
+test("openPremium sums the full payout outlay of open unexpired quotes", () => {
+  assert.equal(outlay(row({ collateral: "95000", premium: "50000" })), 95_000n);
   assert.equal(openPremium([
-    row({ premium: "10" }),
-    row({ rfqId: "bb".repeat(32), premium: "5", status: "filled" }),
-    row({ rfqId: "cc".repeat(32), premium: "7", deadline: 100 }),
-  ], 1_200), 10n);
+    row({ collateral: "95000" }),
+    row({ rfqId: "bb".repeat(32), collateral: "80000", status: "filled" }),
+    row({ rfqId: "cc".repeat(32), collateral: "70000", deadline: 100 }),
+  ], 1_200), 95_000n);
 });
 
 test("pageQuotes returns the newest page and skips finished history", () => {
@@ -54,7 +59,7 @@ test("pageQuotes returns the newest page and skips finished history", () => {
 });
 
 test("prune drops expired quotes and keeps an open one", async () => {
-  const dir = await mkdtemp(path.join(tmpdir(), "arkade-book-"));
+  const dir = await mkdtemp(path.join(tmpdir(), "coinflip-book-"));
   try {
     const book = await Book.open(dir);
     const caps = { perStrike: 50_000_000n, total: 50_000_000n };
@@ -71,15 +76,15 @@ test("prune drops expired quotes and keeps an open one", async () => {
 });
 
 test("exposure counts open quotes and unexpired fills, and the cap refuses the next one", async () => {
-  const dir = await mkdtemp(path.join(tmpdir(), "arkade-book-"));
+  const dir = await mkdtemp(path.join(tmpdir(), "coinflip-book-"));
   try {
     const book = await Book.open(dir);
-    const caps = { perStrike: 15_000_000n, total: 20_000_000n };
-    assert.equal(book.hold(row(), caps, 1_200), true);
-    assert.equal(book.hold(row({ rfqId: "bb".repeat(32), collateral: "10000000" }), caps, 1_200), false);
+    const caps = { perStrike: 150_000n, total: 200_000n };
+    assert.equal(book.hold(row({ collateral: "100000" }), caps, 1_200), true);
+    assert.equal(book.hold(row({ rfqId: "bb".repeat(32), collateral: "100000" }), caps, 1_200), false);
     book.mark("aa".repeat(32), "filled", "cc".repeat(32));
-    assert.equal(book.exposure(1_200).total, 10_000_000n);
-    assert.equal(book.hold(row({ rfqId: "dd".repeat(32), strike: "9800000", collateral: "10000000" }), caps, 1_200), true);
+    assert.equal(book.exposure(1_200).total, 100_000n);
+    assert.equal(book.hold(row({ rfqId: "dd".repeat(32), strike: "9800000", collateral: "100000" }), caps, 1_200), true);
     book.mark("aa".repeat(32), "filled");
     const reopened = await Book.open(dir);
     assert.equal(reopened.list().length, 0);
@@ -87,21 +92,21 @@ test("exposure counts open quotes and unexpired fills, and the cap refuses the n
     const saved = await Book.open(dir);
     assert.equal(saved.list().length, 2);
     assert.equal(saved.get("aa".repeat(32))?.fillTxid, "cc".repeat(32));
-    assert.equal(saved.exposure(1_600).total, 10_000_000n);
+    assert.equal(saved.exposure(1_600).total, 100_000n);
     assert.equal(saved.exposure(3_000).total, 0n);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
 });
 
-test("a quote needs a 64-hex beacon txid", () => {
-  assert.equal(hasBeacon(row()), true);
-  assert.equal(hasBeacon(row({ beaconTxid: "" })), false);
-  assert.equal(hasBeacon(row({ beaconTxid: undefined as unknown as string })), false);
+test("a quote needs a 64-hex oracle pubkey", () => {
+  assert.equal(hasOracle(row()), true);
+  assert.equal(hasOracle(row({ oraclePubkey: "" })), false);
+  assert.equal(hasOracle(row({ oraclePubkey: undefined as unknown as string })), false);
 });
 
 test("parallel saves all land in book.json", async () => {
-  const dir = await mkdtemp(path.join(tmpdir(), "arkade-book-"));
+  const dir = await mkdtemp(path.join(tmpdir(), "coinflip-book-"));
   try {
     const book = await Book.open(dir);
     const caps = { perStrike: 10_000_000_000n, total: 10_000_000_000n };
@@ -119,7 +124,7 @@ test("parallel saves all land in book.json", async () => {
 });
 
 test("one rfqId stays one row: live duplicates refuse, dead ones are replaced", async () => {
-  const dir = await mkdtemp(path.join(tmpdir(), "arkade-book-"));
+  const dir = await mkdtemp(path.join(tmpdir(), "coinflip-book-"));
   try {
     const book = await Book.open(dir);
     const caps = { perStrike: 100_000_000n, total: 100_000_000n };

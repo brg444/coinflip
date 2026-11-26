@@ -28,11 +28,9 @@ import {
 import { requestPredictQuotes } from "./src/rfq.ts";
 import { btcUsdCents, deribitMultiplier, fetchSurface } from "../protocol/deribit.ts";
 import {
-  isPredict,
   PREDICT_GRID_S,
   PREDICT_LOCK_S,
   PREDICT_MIN_LEFT_S,
-  PREDICT_READ_FEE,
   PREDICT_VOID_AFTER,
   QUOTE_TTL_S,
   STAKE_MIN,
@@ -123,8 +121,6 @@ function persist() {
     deadline: p.deadline,
     holderPkHex: p.holderPkHex,
     oraclePkHex: p.oraclePkHex || "",
-    beaconTxid: p.beaconTxid,
-    beaconGidx: p.beaconGidx,
     exit: p.exit,
     vaultAddress: p.vaultAddress,
     writerHex: p.writerHex,
@@ -207,6 +203,8 @@ function mine(position) {
   if (position.payoutAddress) return position.payoutAddress === state.address;
   return false;
 }
+
+const isPredict = (kind) => kind === 2 || kind === 3;
 
 function visiblePositions() {
   return state.positions.filter((p) => isPredict(p.kind) && mine(p));
@@ -383,7 +381,7 @@ function sendClock(node) {
 
 function canSettle(position) {
   if (position.status !== "filled") return false;
-  if (!position.vaultAddress || !position.deskPkHex || !(position.oraclePkHex || position.beaconTxid)) return false;
+  if (!position.vaultAddress || !position.deskPkHex || !position.oraclePkHex) return false;
   const expiry = Number(position.expiry) || 0;
   if (!expiry || expiry > Math.floor(Date.now() / 1000)) return false;
   if (position.settleTxid && position.settleTxid !== position.closeTxid) return false;
@@ -507,8 +505,6 @@ async function fundRequest(position) {
     finalExitDelay: position.finalExitDelay ? BigInt(position.finalExitDelay) : undefined,
     holderAddress: position.holderAddress || position.payoutAddress,
     holderPubkey: position.holderPubkey || undefined,
-    beaconTxidHex: position.beaconTxid,
-    beaconGidx: position.beaconGidx,
     exit: position.exit != null ? BigInt(position.exit) : undefined,
   };
 }
@@ -665,7 +661,7 @@ function startWatch() {
   const watched = rows.map((position) => ({
     ...watchRow(position),
     register: async () => {
-      if (!position.deskPkHex || !(position.oraclePkHex || position.beaconTxid)) return "";
+      if (!position.deskPkHex || !position.oraclePkHex) return "";
       return registerIntent(await fundRequest(position));
     },
   }));
@@ -1078,7 +1074,7 @@ const localTime = (unix) => new Date(Number(unix) * 1000).toLocaleTimeString(und
 const utcTime = (unix) => `${hhmm(new Date(Number(unix) * 1000))} UTC`;
 const usdCents = (cents) => `$${usdFromCents(BigInt(cents))}`;
 const timesX = (m) => `${m.toFixed(2)}×`;
-const won = (payout) => payout - PREDICT_READ_FEE;
+const won = (payout) => payout;
 const amount = (sats) => (sats < 100_000n ? `${int(sats)} sats` : `₿${fmtBtc(sats)}`);
 
 /** The next closes on the 5-minute grid, then the quarter hours after them. */
@@ -1216,7 +1212,7 @@ function betMultiplier(kind, lineCents, expiry) {
   });
 }
 
-/** Payout before the fee, or null when the desk would not quote it or it cannot beat the stake. */
+/** Payout, or null when the desk would not quote it. */
 function betPayout(stake, multiplier) {
   if (multiplier == null) return null;
   return predictPayout(stake, multiplier);
@@ -1418,7 +1414,7 @@ function renderBetPop(focus = false) {
     title = "How much to stake?";
     hint = inUsd()
       ? `Dollars become sats at the current ${usd0(spotUsd())}; the stake is in sats from the moment the desk quotes it.`
-      : "";
+      : `Your stake goes to the desk; the full payout locks in the vault until ${at}.`;
     const m = betMultiplier(t.kind, t.lineCents, t.expiry);
     const list = el("div", "opts");
     const choices = inUsd() ? USD_STAKES.map((usd) => [usd, usdToSats(usd)]) : STAKES.map((sats) => [null, sats]);
@@ -1479,7 +1475,7 @@ function renderBetPop(focus = false) {
         side: ok ? [timesX(m), inUsd() ? usdFig(worth(won(payout), spotUsd())) : `${int(won(payout))} sats`] : "",
         off: ok ? "" : m == null
           ? `Too ${(t.kind === 2) === (step < 0) ? "likely" : "unlikely"} for the desk to quote.`
-          : `Wins ${int(won(payout))} sats after the fee, not more than you put in.`,
+          : `Wins ${int(won(payout))} sats, not more than you put in.`,
       }));
     }
     parts.push(list);
@@ -1968,9 +1964,9 @@ function placeBet() {
 // ----- positions -----
 
 /**
- * The fixing is the last oracle sample within 60 seconds after the close (the vault's EXPIRY_LAG), and the
- * beacon takes it no sooner. From then on the result is known, so the page reads the same samples the settler
- * does, through the server that serves it, and shows the result while the payout settles in the background.
+ * The fixing is the last DIA oracle sample within 60 seconds after the close (the vault's EXPIRY_LAG).
+ * From then on the oracle signs and serves that single fixing, so the page reads it through the
+ * server that serves it and shows the result while the payout settles in the background.
  */
 const FIXING_LAG_S = 60;
 let oracleReadable = true;
@@ -1981,7 +1977,7 @@ async function readFixing(position) {
   const res = await fetch(`oracle/fixing?expiry=${expiry}`, { cache: "no-store", signal: AbortSignal.timeout(8_000) });
   const isJson = (res.headers.get("content-type") ?? "").toLowerCase().includes("application/json");
   if (res.status === 404 && !isJson) {
-    // A static host has no oracle behind it; the result then arrives with the settlement.
+    // A static host has no oracle proxy behind it; the result then arrives with the settlement.
     oracleReadable = false;
     return;
   }
@@ -2229,11 +2225,9 @@ function renderPrediction(p) {
     body.push(el("p", "sub", fixing != null
       ? `The ${at} fixing was ${usd2(fixing)}, ${usd2(Math.abs(fixing - line))} ${DIR[p.kind]} your ${lineUsd} line. That’s your ${int(stake)} back plus ${int(back - stake)}.`
       : `BTC closed ${DIR[p.kind]} your ${lineUsd} line. That’s your ${int(stake)} back plus ${int(back - stake)}.`));
-    const winFee = payout - back;
     body.push(ledger([
       ["You staked", `${int(stake)} sats`],
-      ["From the desk", `+${int(payout - stake)}`],
-      ...(winFee > 0n ? [[`Price-check fee at ${at}`, `−${int(winFee)}`, "minus"]] : []),
+      ["From the desk", `+${int(back - stake)}`],
       ["Paid to you", `${int(back)} sats`, "tot"],
     ]));
     body.push(el("p", "sub", "Paid to your Arkade wallet. Nothing left to do."), ...again());
@@ -2310,11 +2304,9 @@ function renderPrediction(p) {
       head.replaceChildren("You won ", el("span", "amt", `${int(won(payout))} sats`), ".");
       badge = pill("Won · paying out", "pill ok");
       body.push(el("p", "sub", `The ${at} fixing was ${usd2(fixing)}, ${usd2(Math.abs(fixing - line))} ${DIR[p.kind]} your ${lineUsd} line. The payout is on its way to your Arkade wallet; nothing for you to do.`));
-      const estFee = payout - won(payout);
       body.push(ledger([
         ["You staked", `${int(stake)} sats`],
-        ["From the desk", `+${int(payout - stake)}`],
-        ...(estFee > 0n ? [[`Price-check fee at ${at}`, `−${int(estFee)}`, "minus"]] : []),
+        ["From the desk", `+${int(won(payout) - stake)}`],
         ["Paid to you", `${int(won(payout))} sats`, "tot"],
       ]));
       body.push(...again());
@@ -2907,7 +2899,7 @@ async function readSetup() {
     $("demo-setup").hidden = true;
     return;
   }
-  // The page is rebuilt once the beacon exists; pick that build up when setup finishes.
+  // The page is rebuilt once the oracle and desk are up; pick that build up when setup finishes.
   if (next.stage === "ready" && setupSeen && setupSeen !== "ready") {
     location.reload();
     return;
@@ -2949,41 +2941,22 @@ function renderSetup(next) {
     panel.hidden = true;
     return;
   }
-  const oracleNeed = BigInt(next.oracle?.need || 0);
-  const needsOracleDeposit = oracleNeed > 0n;
-  const oracleDone = !needsOracleDeposit || BigInt(next.oracle.balance || 0) >= oracleNeed || ["deploying", "desk", "fund-desk"].includes(next.stage);
-  const deskDone = BigInt(next.desk.balance || 0) >= BigInt(next.desk.need) / 4n;
-  const total = needsOracleDeposit ? 2 : 1;
-  const count = (needsOracleDeposit ? Number(oracleDone) : 0) + Number(deskDone);
+  const deskDone = BigInt(next.desk?.balance || 0) >= BigInt(next.desk?.need || 0) / 4n;
+  const count = Number(deskDone);
   pill.hidden = false;
-  $("setup-pill-text").replaceChildren(el("span", "long", "Fund demo "), `${count}/${total}`);
-  pill.setAttribute("aria-label", `Demo setup, ${count} of ${total} ${total === 1 ? "deposit" : "deposits"} in`);
+  $("setup-pill-text").replaceChildren(el("span", "long", "Fund demo "), `${count}/1`);
+  pill.setAttribute("aria-label", `Demo setup, ${count} of 1 deposit in`);
   pill.setAttribute("aria-expanded", String(setupOpen));
   const steps = el("ol", "setup-steps");
-  if (needsOracleDeposit) {
-    steps.append(
-      setupStep(1, {
-        title: "Price oracle",
-        note: oracleDone
-          ? next.stage === "deploying" ? "Setting up the price feed." : "Signs the price that settles every prediction."
-          : `Send ${int(oracleNeed)} sats. It signs the price that settles every prediction.`,
-        address: next.oracle.wallet,
-        balance: next.oracle.balance,
-        need: next.oracle.need,
-        done: oracleDone,
-        busy: next.stage === "deploying",
-      }),
-    );
-  }
   steps.append(
-    setupStep(needsOracleDeposit ? 2 : 1, {
+    setupStep(1, {
       title: "Desk",
-      note: next.desk.address
+      note: next.desk?.address
         ? `Send about ${int(BigInt(next.desk.need))} sats. It pays winning predictions.`
-        : "Its address appears once the price feed is set up.",
-      address: next.desk.address,
-      balance: next.desk.balance,
-      need: next.desk.need,
+        : "Starting the desk…",
+      address: next.desk?.address || "",
+      balance: next.desk?.balance || "0",
+      need: next.desk?.need || "0",
       done: deskDone,
     }),
   );
@@ -2991,14 +2964,10 @@ function renderSetup(next) {
   open.href = next.wallet || WALLET_URL;
   open.target = "_blank";
   open.rel = "noopener";
-  const title = el(
-    "p",
-    "setup-title",
-    needsOracleDeposit ? "Two deposits before the first prediction" : "Fund the desk before the first prediction",
-  );
+  const title = el("p", "setup-title", "One deposit before the first prediction");
   title.id = "setup-title";
   const foot = el("p", "setup-foot");
-  foot.append(open, " · updates as they land");
+  foot.append(open, " · updates as it lands");
   panel.replaceChildren(title, steps, foot);
   panel.hidden = !setupOpen;
 }

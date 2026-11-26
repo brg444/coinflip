@@ -4,20 +4,16 @@ import test from "node:test";
 import {
   adverseSpotCents,
   BASIS_MAX_BPS,
-  BEACON_RATCHET_MARGIN_S,
-  beaconExpiryRefusal,
   COIN_EXPIRY_MARGIN_S,
   coinOutlives,
   minCoinExpiry,
-  minFillCoinExpiry,
   ORACLE_SPOT_MAX_AGE_S,
-  parseRatchetMargin,
   predictFillAllowed,
   predictSpot,
 } from "./guards.ts";
 import { predictMultiplier, predictPayout } from "../protocol/pricing.ts";
 
-test("coin expiry guards fail closed on missing or dead beacons and block beacon ratchet", () => {
+test("coin expiry guards require VTXOs to outlive settlement plus margin", () => {
   const expiry = 1_700_000_000;
   const need = minCoinExpiry(expiry);
   assert.equal(need, expiry + 60 + COIN_EXPIRY_MARGIN_S);
@@ -25,26 +21,6 @@ test("coin expiry guards fail closed on missing or dead beacons and block beacon
   assert.equal(coinOutlives({}, need), true);
   assert.equal(coinOutlives({ expiresAt: new Date(need * 1000) }, need), true);
   assert.equal(coinOutlives({ expiresAt: new Date((need - 1) * 1000) }, need), false);
-
-  assert.equal(beaconExpiryRefusal(expiry, null), "beacon expiry");
-  assert.equal(beaconExpiryRefusal(expiry, 0), "beacon expiry");
-  assert.equal(beaconExpiryRefusal(expiry, expiry - 10), "beacon expiry");
-  assert.equal(beaconExpiryRefusal(expiry, need - 1), "beacon expiry");
-  assert.equal(beaconExpiryRefusal(expiry, need), "");
-
-  const liveBeacon = expiry + 86_400;
-  assert.equal(BEACON_RATCHET_MARGIN_S, 0);
-  assert.equal(minFillCoinExpiry(expiry, liveBeacon), liveBeacon);
-  assert.equal(minFillCoinExpiry(expiry, liveBeacon, COIN_EXPIRY_MARGIN_S, 3_600), liveBeacon - 3_600);
-  assert.equal(parseRatchetMargin(undefined), 0);
-  assert.equal(parseRatchetMargin("432000"), 432_000);
-  assert.throws(() => parseRatchetMargin("-1"));
-  assert.throws(() => parseRatchetMargin("abc"));
-  assert.equal(coinOutlives({ expiresAt: new Date((liveBeacon - 1) * 1000) }, minFillCoinExpiry(expiry, liveBeacon)), false);
-  assert.equal(coinOutlives({ expiresAt: new Date(liveBeacon * 1000) }, minFillCoinExpiry(expiry, liveBeacon)), true);
-  assert.equal(minFillCoinExpiry(expiry, need), need);
-  assert.equal(minFillCoinExpiry(expiry, null), need);
-  assert.equal(minFillCoinExpiry(expiry, 0), need);
 });
 
 test("predictSpot uses fresh oracle DIA price within the exchange basis band", () => {
